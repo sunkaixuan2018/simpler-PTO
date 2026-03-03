@@ -338,6 +338,8 @@ class CodeRunner:
         enable_profiling: bool = False,
         run_all_cases: bool = False,
         case_name: Optional[str] = None,
+        n_ranks: Optional[int] = None,
+        first_device_id: Optional[int] = None,
     ):
         # Setup logging if not already configured (e.g., when used directly, not via run_example.py)
         _setup_logging_if_needed()
@@ -383,6 +385,8 @@ class CodeRunner:
         self.aicpu_thread_num = runtime_config.get('aicpu_thread_num', 3)
         self.block_dim = runtime_config.get('block_dim', 24)
         self.runtime_name = runtime_config.get('runtime', 'host_build_graph')
+        self.n_ranks = n_ranks if n_ranks is not None else runtime_config.get('n_ranks', 4)
+        self.first_device_id = first_device_id if first_device_id is not None else runtime_config.get('first_device_id', 0)
 
     def _load_kernel_config(self):
         """Load kernel_config.py from kernels directory."""
@@ -612,6 +616,10 @@ class CodeRunner:
            - Initialize and launch runtime
            - Finalize and compare with golden
         """
+        if self.runtime_name == "comm_gather":
+            self._run_comm_gather()
+            return
+
         # Import runtime modules (deferred import to avoid top-level dependency)
         from runtime_builder import RuntimeBuilder
         from bindings import bind_host_binary, set_device, launch_runtime
@@ -788,6 +796,45 @@ class CodeRunner:
         logger.info(f"=== All {total_cases} cases passed ===")
         logger.info("=" * 60)
 
+    def _run_comm_gather(self) -> None:
+        """Run comm_gather: execute built runner with n_ranks / first_device. Linux only (fork)."""
+        import subprocess
+
+        host_dir = self.kernels_dir / "host"
+        runner_name = "comm_gather_runner"
+        runner_path = host_dir / runner_name
+
+        if not runner_path.exists():
+            # Try to build
+            makefile = host_dir / "Makefile"
+            if makefile.exists():
+                logger.info("=== Building comm_gather runner ===")
+                r = subprocess.run(
+                    ["make", "-C", str(host_dir), runner_name],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                if r.returncode != 0:
+                    raise RuntimeError(
+                        f"comm_gather build failed:\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}"
+                    )
+            if not runner_path.exists():
+                raise FileNotFoundError(
+                    f"comm_gather runner not found: {runner_path}\n"
+                    "Build it on a2a3 with CANN: cd kernels/host && make"
+                )
+
+        logger.info(f"=== Running comm_gather: n_ranks={self.n_ranks} first_device={self.first_device_id} ===")
+        cmd = [
+            str(runner_path),
+            "--n-ranks", str(self.n_ranks),
+            "--first-device", str(self.first_device_id),
+        ]
+        result = subprocess.run(cmd, timeout=120, cwd=str(self.project_root))
+        if result.returncode != 0:
+            raise RuntimeError(f"comm_gather runner exited with code {result.returncode}")
+
     def _compare_with_golden(
         self,
         outputs: Dict[str, torch.Tensor],
@@ -829,9 +876,11 @@ class CodeRunner:
 
 
 def create_code_runner(kernels_dir, golden_path, device_id=None, platform="a2a3",
-                       enable_profiling=False, run_all_cases=False, case_name=None):
+                       enable_profiling=False, run_all_cases=False, case_name=None,
+                       n_ranks=None, first_device_id=None):
     """Factory: creates a CodeRunner based on kernel_config."""
     return CodeRunner(kernels_dir=kernels_dir, golden_path=golden_path,
                       device_id=device_id, platform=platform,
                       enable_profiling=enable_profiling,
-                      run_all_cases=run_all_cases, case_name=case_name)
+                      run_all_cases=run_all_cases, case_name=case_name,
+                      n_ranks=n_ranks, first_device_id=first_device_id)

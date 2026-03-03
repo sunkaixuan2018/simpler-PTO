@@ -159,6 +159,20 @@ Golden.py interface:
         help="Run a specific test case by name (e.g., --case Case2)"
     )
 
+    parser.add_argument(
+        "--n-ranks",
+        type=int,
+        default=None,
+        help="Number of ranks for comm_gather (default: from kernel_config, usually 4)"
+    )
+
+    parser.add_argument(
+        "--first-device",
+        type=int,
+        default=None,
+        help="First device ID for comm_gather (default: from kernel_config, usually 0)"
+    )
+
     args = parser.parse_args()
 
     if args.all and args.case:
@@ -226,6 +240,8 @@ Golden.py interface:
             enable_profiling=args.enable_profiling,
             run_all_cases=args.all,
             case_name=args.case,
+            n_ranks=args.n_ranks,
+            first_device_id=args.first_device,
         )
 
         # Snapshot existing device logs before the run so we can identify the
