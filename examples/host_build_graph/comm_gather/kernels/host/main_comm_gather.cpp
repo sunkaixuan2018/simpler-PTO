@@ -1,7 +1,7 @@
 /**
- * comm_gather entry: 4-card TGATHER, no compute.
+ * comm_gather entry: 2-card TGATHER, no compute.
  * Usage: comm_gather_runner [--n-ranks N] [--first-device D]
- * Default: n_ranks=4, first_device=0.
+ * Default: n_ranks=2, first_device=0.
  */
 
 #include <cstdlib>
@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv)
 {
-    int n_ranks = 4;
+    int n_ranks = 2;
     int first_device_id = 0;
 
     for (int i = 1; i < argc; ++i) {
@@ -27,7 +27,7 @@ int main(int argc, char **argv)
 
     std::cout << "[comm_gather] n_ranks=" << n_ranks << " first_device=" << first_device_id << std::endl;
 
-    bool ok = RunGather<float, COMM_GATHER_COUNT>(n_ranks, n_ranks, 0, first_device_id);
+    bool ok = RunGather<uint8_t, COMM_GATHER_COUNT>(n_ranks, n_ranks, 0, first_device_id);
 
     std::cout << "[comm_gather] " << (ok ? "PASS" : "FAIL") << std::endl;
     return ok ? 0 : 1;

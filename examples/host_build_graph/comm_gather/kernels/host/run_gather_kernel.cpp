@@ -13,7 +13,7 @@
 #include "pto/common/pto_tile.hpp"
 #include "comm_common.hpp"
 
-#define COMM_GATHER_COUNT 256
+#define COMM_GATHER_COUNT 512
 
 // ============================================================================
 // Device kernel: root gathers data from all ranks

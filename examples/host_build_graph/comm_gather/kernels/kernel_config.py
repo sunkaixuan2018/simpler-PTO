@@ -1,6 +1,6 @@
 """
-comm_gather: 4-card collective TGATHER only (no compute kernel).
-Uses HCCL; run with run_example.py --n-ranks 4 --first-device 0.
+comm_gather: 2-card collective TGATHER only (no compute kernel).
+Uses HCCL; run with run_example.py --n-ranks 2 --first-device 0.
 Executable is built by Makefile in kernels/host/ (CANN env on a2a3).
 """
 
@@ -16,6 +16,6 @@ KERNELS = []
 
 RUNTIME_CONFIG = {
     "runtime": "comm_gather",
-    "n_ranks": 4,
+    "n_ranks": 2,
     "first_device_id": 0,
 }
