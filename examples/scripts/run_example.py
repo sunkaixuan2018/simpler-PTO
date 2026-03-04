@@ -51,6 +51,32 @@ def _get_device_log_dir(device_id):
     return Path.home() / "ascend" / "log" / "debug" / f"device-{device_id}"
 
 
+def _run_profiling_swimlane(args, kernels_path, project_root, device_log_dir, pre_run_device_logs, log_level_str):
+    """Run swimlane converter after test. Returns 0 on success."""
+    swimlane_script = project_root / "tools" / "swimlane_converter.py"
+    if not swimlane_script.exists():
+        logger.warning("Swimlane converter script not found")
+        return 0
+    import subprocess
+    try:
+        cmd = [sys.executable, str(swimlane_script), "-k", str(kernels_path)]
+        if device_log_dir is not None:
+            device_log_file = _wait_for_new_device_log(device_log_dir, pre_run_device_logs)
+            if device_log_file:
+                cmd += ["--device-log", str(device_log_file)]
+            else:
+                cmd += ["-d", str(args.device)]
+        else:
+            cmd += ["-d", str(args.device)]
+        if log_level_str == "debug":
+            cmd.append("-v")
+        subprocess.run(cmd, check=True, capture_output=True, text=True)
+        logger.info("Swimlane JSON generation completed")
+    except subprocess.CalledProcessError as e:
+        logger.warning(f"Swimlane conversion failed: {e}")
+    return 0
+
+
 def _wait_for_new_device_log(log_dir, pre_run_logs, timeout=15, interval=0.5):
     """Wait for a new device log file that wasn't present before the run.
 
@@ -173,6 +199,19 @@ Golden.py interface:
         help="Run a specific test case by name (e.g., --case Case2)"
     )
 
+    parser.add_argument(
+        "--run-only",
+        action="store_true",
+        help="(Internal) Skip compile, load from --prebuilt-dir and run"
+    )
+
+    parser.add_argument(
+        "--prebuilt-dir",
+        type=str,
+        default=None,
+        help="(Internal) Path to pre-built artifacts directory"
+    )
+
     args = parser.parse_args()
 
     if args.all and args.case:
@@ -230,74 +269,133 @@ Golden.py interface:
 
     # Import and run
     try:
-        from code_runner import create_code_runner
+        import tempfile
+        import subprocess
 
-        runner = create_code_runner(
-            kernels_dir=str(args.kernels),
-            golden_path=str(args.golden),
-            device_id=args.device,
-            platform=args.platform,
-            enable_profiling=args.enable_profiling,
-            run_all_cases=args.all,
-            case_name=args.case,
-            n_devices=args.n_devices,
-            first_device_id=args.first_device,
-        )
+        from code_runner import create_code_runner, create_compiler, _write_artifacts_to_dir
 
-        # Snapshot existing device logs before the run so we can identify the
-        # new log created by this run (CANN writes device logs asynchronously).
-        pre_run_device_logs = set()
-        device_log_dir = None
-        if args.enable_profiling and args.platform == "a2a3":
-            device_log_dir = _get_device_log_dir(args.device)
-            if device_log_dir.exists():
-                pre_run_device_logs = set(device_log_dir.glob("*.log"))
+        # Run-only mode: subprocess loading from prebuilt dir (no compile)
+        if getattr(args, 'run_only', False) and args.prebuilt_dir:
+            runner = create_code_runner(
+                kernels_dir=str(args.kernels),
+                golden_path=str(args.golden),
+                device_id=args.device,
+                platform=args.platform,
+                enable_profiling=args.enable_profiling,
+                run_all_cases=args.all,
+                case_name=args.case,
+                n_devices=1,
+                first_device_id=args.device,
+                prebuilt_dir=args.prebuilt_dir,
+            )
+            pre_run_device_logs = set()
+            device_log_dir = None
+            if args.enable_profiling and args.platform == "a2a3":
+                device_log_dir = _get_device_log_dir(args.device)
+                if device_log_dir.exists():
+                    pre_run_device_logs = set(device_log_dir.glob("*.log"))
+            runner.run()
+            logger.info("=" * 60)
+            logger.info("TEST PASSED")
+            logger.info("=" * 60)
+            if args.enable_profiling:
+                return _run_profiling_swimlane(args, kernels_path, project_root, device_log_dir, pre_run_device_logs, log_level_str)
+            return 0
 
-        runner.run()
-        logger.info("=" * 60)
-        logger.info("TEST PASSED")
-        logger.info("=" * 60)
+        # Compile first
+        compiler = create_compiler(kernels_dir=str(args.kernels), platform=args.platform)
+        artifacts = compiler.compile()
 
-        # If profiling was enabled, generate merged swimlane JSON
-        if args.enable_profiling:
-            logger.info("Generating swimlane visualization...")
-            kernel_config_path = kernels_path / "kernel_config.py"
-            swimlane_script = project_root / "tools" / "swimlane_converter.py"
+        # Resolve n_devices and first_device_id (args override config)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("kernel_config", kernel_config_path)
+        cfg = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cfg)
+        runtime_config = getattr(cfg, "RUNTIME_CONFIG", {})
+        n_devices = args.n_devices if args.n_devices is not None else runtime_config.get("n_devices", 1)
+        first_device_id = args.first_device if args.first_device is not None else runtime_config.get("first_device_id", 0)
 
-            if swimlane_script.exists():
-                import subprocess
-                try:
-                    cmd = [
-                        sys.executable,
-                        str(swimlane_script),
-                        "-k",
-                        str(kernel_config_path),
-                    ]
+        if n_devices > 1:
+            # Multi-device: write artifacts, spawn N subprocesses in parallel
+            device_ids = list(range(first_device_id, first_device_id + n_devices))
+            logger.info(f"=== Multi-device: compile done, running on devices {device_ids} (parallel) ===")
+            prebuilt_dir = Path(tempfile.mkdtemp(prefix="pto_prebuilt_"))
+            try:
+                _write_artifacts_to_dir(artifacts, prebuilt_dir)
+                run_example_path = script_dir / "run_example.py"
+                base_cmd = [
+                    sys.executable,
+                    str(run_example_path),
+                    "--run-only",
+                    "--prebuilt-dir", str(prebuilt_dir),
+                    "-k", str(args.kernels),
+                    "-g", str(args.golden),
+                    "-p", args.platform,
+                ]
+                if args.enable_profiling:
+                    base_cmd.append("--enable-profiling")
+                if args.all:
+                    base_cmd.append("--all")
+                elif args.case:
+                    base_cmd.extend(["--case", args.case])
 
-                    # Find the device log created by this run via snapshot diff
-                    if device_log_dir is not None:
-                        device_log_file = _wait_for_new_device_log(
-                            device_log_dir, pre_run_device_logs)
-                        if device_log_file:
-                            cmd += ["--device-log", str(device_log_file)]
-                        else:
-                            logger.warning("No new device log found, falling back to device-id")
-                            cmd += ["-d", str(args.device)]
+                procs = []
+                for did in device_ids:
+                    cmd = base_cmd + ["-d", str(did)]
+                    logger.info(f"Spawning device {did}: {' '.join(cmd[:12])}...")
+                    procs.append((did, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)))
+
+                failed = []
+                for did, proc in procs:
+                    stdout, stderr = proc.communicate()
+                    if proc.returncode != 0:
+                        failed.append((did, proc.returncode, stdout, stderr))
+                        logger.error(f"Device {did} failed (exit {proc.returncode}):\nstderr: {stderr}\nstdout: {stdout}")
                     else:
-                        cmd += ["-d", str(args.device)]
+                        logger.info(f"Device {did}: PASS")
 
-                    if log_level_str == "debug":
-                        cmd.append("-v")
+                if failed:
+                    err_msg = "; ".join(f"device {d}: exit {r}" for d, r, _, _ in failed)
+                    raise RuntimeError(f"Multi-device run failed: {err_msg}")
+            finally:
+                import shutil
+                if prebuilt_dir.exists():
+                    shutil.rmtree(prebuilt_dir, ignore_errors=True)
 
-                    result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-                    logger.info(result.stdout)
-                    logger.info("Swimlane JSON generation completed")
-                except subprocess.CalledProcessError as e:
-                    logger.warning(f"Failed to generate swimlane JSON: {e}")
-                    if log_level_str == "debug":
-                        logger.debug(f"stderr: {e.stderr}")
-            else:
-                logger.warning(f"Swimlane converter script not found: {swimlane_script}")
+            logger.info("=" * 60)
+            logger.info("TEST PASSED (all devices)")
+            logger.info("=" * 60)
+            return 0
+        else:
+            # Single device: run in-process with compiled artifacts
+            runner = create_code_runner(
+                kernels_dir=str(args.kernels),
+                golden_path=str(args.golden),
+                device_id=args.device,
+                platform=args.platform,
+                enable_profiling=args.enable_profiling,
+                run_all_cases=args.all,
+                case_name=args.case,
+                n_devices=1,
+                first_device_id=args.device,
+                compiled_artifacts=artifacts,
+            )
+
+            pre_run_device_logs = set()
+            device_log_dir = None
+            if args.enable_profiling and args.platform == "a2a3":
+                device_log_dir = _get_device_log_dir(args.device)
+                if device_log_dir.exists():
+                    pre_run_device_logs = set(device_log_dir.glob("*.log"))
+
+            runner.run()
+            logger.info("=" * 60)
+            logger.info("TEST PASSED")
+            logger.info("=" * 60)
+
+            if args.enable_profiling:
+                logger.info("Generating swimlane visualization...")
+                _run_profiling_swimlane(args, kernels_path, project_root, device_log_dir, pre_run_device_logs, log_level_str)
 
         return 0
 

@@ -340,6 +340,8 @@ class CodeRunner:
         case_name: Optional[str] = None,
         n_devices: Optional[int] = None,
         first_device_id: Optional[int] = None,
+        compiled_artifacts: Optional[dict] = None,
+        prebuilt_dir: Optional[str] = None,
     ):
         # Setup logging if not already configured (e.g., when used directly, not via run_example.py)
         _setup_logging_if_needed()
@@ -351,6 +353,9 @@ class CodeRunner:
         self.run_all_cases = run_all_cases
         self.case_name = case_name
         self.project_root = _get_project_root()
+        self.compiled_artifacts = compiled_artifacts
+        self.prebuilt_dir = Path(prebuilt_dir) if prebuilt_dir else None
+        self._skip_build = compiled_artifacts is not None or (self.prebuilt_dir is not None and self.prebuilt_dir.exists())
 
         # Resolve device ID
         self.device_id = device_id if device_id is not None else 0
@@ -606,142 +611,91 @@ class CodeRunner:
 
         return func_args, arg_types, arg_sizes
 
-    def _run_multi_device(self) -> None:
-        """Run on multiple devices in parallel: spawn N subprocesses (run_example.py -d <device_id>), wait for all."""
-        import subprocess
-
-        run_example_path = Path(__file__).resolve().parent / "run_example.py"
-        if not run_example_path.exists():
-            raise FileNotFoundError(f"run_example.py not found: {run_example_path}")
-
-        device_ids = list(range(self.first_device_id, self.first_device_id + self.n_devices))
-        logger.info(f"=== Multi-device: running on devices {device_ids} (parallel) ===")
-
-        # Child must run single-card: pass --n-devices 1 so it does not re-enter multi-card branch
-        # (same -k/-g loads kernel_config with n_devices=2; without this, child would spawn again)
-        base_cmd = [
-            sys.executable,
-            str(run_example_path),
-            "-k", str(self.kernels_dir),
-            "-g", str(self.golden_path),
-            "-p", self.platform,
-            "--n-devices", "1",
-        ]
-        if self.run_all_cases:
-            base_cmd.append("--all")
-        elif self.case_name is not None:
-            base_cmd.extend(["--case", self.case_name])
-
-        procs = []
-        for did in device_ids:
-            cmd = base_cmd + ["-d", str(did)]
-            logger.info(f"Spawning device {did}: {' '.join(cmd)}")
-            procs.append((did, subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)))
-
-        failed = []
-        for did, proc in procs:
-            stdout, stderr = proc.communicate()
-            if proc.returncode != 0:
-                failed.append((did, proc.returncode, stdout, stderr))
-                logger.error(f"Device {did} failed (exit {proc.returncode}):\nstderr: {stderr}\nstdout: {stdout}")
-            else:
-                logger.info(f"Device {did}: PASS")
-
-        if failed:
-            err_msg = "; ".join(f"device {d}: exit {r}" for d, r, _, _ in failed)
-            raise RuntimeError(f"Multi-device run failed: {err_msg}")
-
     def run(self) -> None:
         """
         Execute the full test flow:
-        1. Check environment
-        2. Build runtime
-        3. Load runtime and set device
-        4. Compile orchestration
-        5. Compile and register kernels
-        6. For each params in params_list:
-           - Generate inputs using golden.py
-           - Initialize and launch runtime
-           - Finalize and compare with golden
-
-        If n_devices > 1, runs N subprocesses in parallel (one per device), each executing
-        single-card run_example.py -d <device_id>, then aggregates return codes.
+        - If compiled_artifacts or prebuilt_dir: skip build, load and run (set_device → init → launch → finalize)
+        - Else: build first, then run
         """
-        # Multi-card branch: parallel subprocesses, no single-card build/launch
-        if self.n_devices > 1:
-            self._run_multi_device()
-            return
-
-        # Import runtime modules (deferred import to avoid top-level dependency)
-        from runtime_builder import RuntimeBuilder
         from bindings import bind_host_binary, set_device, launch_runtime
-        from elf_parser import extract_text_section
 
-        # Auto-setup PTO_ISA_ROOT if needed (for all platforms, since kernels may use PTO ISA headers)
-        pto_isa_root = _ensure_pto_isa_root(verbose=True)
-        if pto_isa_root is None:
-            raise EnvironmentError(
-                "PTO_ISA_ROOT could not be resolved.\n"
-                "Please set it to the PTO-ISA root directory, e.g.:\n"
-                "  export PTO_ISA_ROOT=$(pwd)/examples/scripts/_deps/pto-isa"
-            )
-
-        # Step 1: Build runtime, orchestration, and kernels in parallel
-        # (they are independent — all only need kernel_compiler which is ready)
-        logger.info(f"=== Building Runtime: {self.runtime_name} (platform: {self.platform}) ===")
-        builder = RuntimeBuilder(platform=self.platform)
-        kernel_compiler = builder.get_kernel_compiler()
-
-        from concurrent.futures import ThreadPoolExecutor, Future
-
-        runtime_include_dirs = [
-            os.path.join(self.project_root, "src", "runtime", self.runtime_name, "runtime")
-        ]
-
-        def _build_runtime():
-            return builder.build(self.runtime_name)
-
-        def _compile_orchestration():
-            return kernel_compiler.compile_orchestration(
-                self.runtime_name,
-                self.orchestration["source"],
-            )
-
-        def _compile_one_kernel(kernel):
-            logger.info(f"Compiling kernel: {kernel['source']} (func_id={kernel['func_id']})")
-            incore_o = kernel_compiler.compile_incore(
-                kernel["source"],
-                core_type=kernel["core_type"],
-                pto_isa_root=pto_isa_root,
-                extra_include_dirs=runtime_include_dirs,
-            )
-            if self.platform == "a2a3sim":
-                kernel_bin = incore_o
+        if self._skip_build:
+            if self.compiled_artifacts:
+                artifacts = self.compiled_artifacts
             else:
-                kernel_bin = extract_text_section(incore_o)
-            return (kernel["func_id"], kernel_bin)
+                artifacts = _load_artifacts_from_dir(self.prebuilt_dir)
+            host_binary = artifacts["host_binary"]
+            orch_so_binary = artifacts["orch_so_binary"]
+            aicpu_binary = artifacts["aicpu_binary"]
+            aicore_binary = artifacts["aicore_binary"]
+            kernel_binaries = artifacts["kernel_binaries"]
+            orch_func_name = artifacts["orch_func_name"]
+            logger.info(f"=== Using pre-built artifacts ({len(kernel_binaries)} kernels) ===")
+        else:
+            # Build path
+            from runtime_builder import RuntimeBuilder
+            from elf_parser import extract_text_section
 
-        # Launch all compilations concurrently
-        max_workers = 2 + len(self.kernels)  # runtime + orchestration + kernels
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            fut_runtime = executor.submit(_build_runtime)
-            fut_orch = executor.submit(_compile_orchestration)
-            fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+            pto_isa_root = _ensure_pto_isa_root(verbose=True)
+            if pto_isa_root is None:
+                raise EnvironmentError(
+                    "PTO_ISA_ROOT could not be resolved.\n"
+                    "Please set it to the PTO-ISA root directory, e.g.:\n"
+                    "  export PTO_ISA_ROOT=$(pwd)/examples/scripts/_deps/pto-isa"
+                )
 
-            try:
-                host_binary, aicpu_binary, aicore_binary = fut_runtime.result()
-            except Exception as e:
-                raise RuntimeError(
-                    f"Failed to build runtime '{self.runtime_name}' for platform '{self.platform}'.\n"
-                    f"Error: {e}"
-                ) from e
+            logger.info(f"=== Building Runtime: {self.runtime_name} (platform: {self.platform}) ===")
+            builder = RuntimeBuilder(platform=self.platform)
+            kernel_compiler = builder.get_kernel_compiler()
 
-            orch_so_binary = fut_orch.result()
-            kernel_binaries = [f.result() for f in fut_kernels]
+            from concurrent.futures import ThreadPoolExecutor
 
-        logger.info(f"Compiled {len(kernel_binaries)} kernel(s)")
+            runtime_include_dirs = [
+                os.path.join(self.project_root, "src", "runtime", self.runtime_name, "runtime")
+            ]
 
-        # Step 2: Load runtime and set device
+            def _build_runtime():
+                return builder.build(self.runtime_name)
+
+            def _compile_orchestration():
+                return kernel_compiler.compile_orchestration(
+                    self.runtime_name,
+                    self.orchestration["source"],
+                )
+
+            def _compile_one_kernel(kernel):
+                logger.info(f"Compiling kernel: {kernel['source']} (func_id={kernel['func_id']})")
+                incore_o = kernel_compiler.compile_incore(
+                    kernel["source"],
+                    core_type=kernel["core_type"],
+                    pto_isa_root=pto_isa_root,
+                    extra_include_dirs=runtime_include_dirs,
+                )
+                if self.platform == "a2a3sim":
+                    return (kernel["func_id"], incore_o)
+                return (kernel["func_id"], extract_text_section(incore_o))
+
+            max_workers = 2 + len(self.kernels)
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                fut_runtime = executor.submit(_build_runtime)
+                fut_orch = executor.submit(_compile_orchestration)
+                fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+
+                try:
+                    host_binary, aicpu_binary, aicore_binary = fut_runtime.result()
+                except Exception as e:
+                    raise RuntimeError(
+                        f"Failed to build runtime '{self.runtime_name}' for platform '{self.platform}'.\n"
+                        f"Error: {e}"
+                    ) from e
+
+                orch_so_binary = fut_orch.result()
+                kernel_binaries = [f.result() for f in fut_kernels]
+
+            logger.info(f"Compiled {len(kernel_binaries)} kernel(s)")
+            orch_func_name = self.orchestration["function_name"]
+
+        # Load runtime and set device
         logger.info(f"=== Loading Runtime ({len(host_binary)} bytes) ===")
         Runtime = bind_host_binary(host_binary)
 
@@ -795,7 +749,7 @@ class CodeRunner:
             with _temporary_env(run_env):
                 runtime.initialize(
                     orch_so_binary,
-                    self.orchestration["function_name"],
+                    orch_func_name,
                     func_args,
                     arg_types=arg_types,
                     arg_sizes=arg_sizes,
@@ -890,10 +844,146 @@ class CodeRunner:
 
 def create_code_runner(kernels_dir, golden_path, device_id=None, platform="a2a3",
                        enable_profiling=False, run_all_cases=False, case_name=None,
-                       n_devices=None, first_device_id=None):
+                       n_devices=None, first_device_id=None,
+                       compiled_artifacts=None, prebuilt_dir=None):
     """Factory: creates a CodeRunner based on kernel_config."""
     return CodeRunner(kernels_dir=kernels_dir, golden_path=golden_path,
                       device_id=device_id, platform=platform,
                       enable_profiling=enable_profiling,
                       run_all_cases=run_all_cases, case_name=case_name,
-                      n_devices=n_devices, first_device_id=first_device_id)
+                      n_devices=n_devices, first_device_id=first_device_id,
+                      compiled_artifacts=compiled_artifacts, prebuilt_dir=prebuilt_dir)
+
+
+# =============================================================================
+# PTOCompiler - compile once, run many
+# =============================================================================
+
+def _write_artifacts_to_dir(artifacts: dict, out_dir: Path) -> None:
+    """Write compiled artifacts to a directory for subprocess loading."""
+    import json
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "host.bin").write_bytes(artifacts["host_binary"])
+    (out_dir / "orch.so").write_bytes(artifacts["orch_so_binary"])
+    (out_dir / "aicpu.so").write_bytes(artifacts["aicpu_binary"])
+    (out_dir / "aicore.bin").write_bytes(artifacts["aicore_binary"])
+    for func_id, bin_data in artifacts["kernel_binaries"]:
+        (out_dir / f"kernel_{func_id}.bin").write_bytes(bin_data)
+    manifest = {
+        "orch_func_name": artifacts["orch_func_name"],
+        "kernel_func_ids": [k[0] for k in artifacts["kernel_binaries"]],
+    }
+    (out_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+
+def _load_artifacts_from_dir(prebuilt_dir: Path) -> dict:
+    """Load compiled artifacts from a prebuilt directory."""
+    import json
+    manifest = json.loads((prebuilt_dir / "manifest.json").read_text(encoding="utf-8"))
+    kernel_binaries = []
+    for func_id in manifest["kernel_func_ids"]:
+        bin_data = (prebuilt_dir / f"kernel_{func_id}.bin").read_bytes()
+        kernel_binaries.append((func_id, bin_data))
+    return {
+        "host_binary": (prebuilt_dir / "host.bin").read_bytes(),
+        "orch_so_binary": (prebuilt_dir / "orch.so").read_bytes(),
+        "aicpu_binary": (prebuilt_dir / "aicpu.so").read_bytes(),
+        "aicore_binary": (prebuilt_dir / "aicore.bin").read_bytes(),
+        "kernel_binaries": kernel_binaries,
+        "orch_func_name": manifest["orch_func_name"],
+    }
+
+
+class PTOCompiler:
+    """Compiles PTO runtime, orchestration, and kernels. Returns artifacts for Runner."""
+
+    def __init__(
+        self,
+        kernels_dir: str,
+        platform: str = "a2a3",
+    ):
+        self.kernels_dir = Path(kernels_dir).resolve()
+        self.platform = platform
+        self.project_root = _get_project_root()
+        self._kernel_config = _load_module_from_path(
+            self.kernels_dir / "kernel_config.py", f"kernel_config_compiler_{id(self)}"
+        )
+        self.kernels = self._kernel_config.KERNELS
+        self.orchestration = self._kernel_config.ORCHESTRATION
+        runtime_config = getattr(self._kernel_config, "RUNTIME_CONFIG", {})
+        self.runtime_name = runtime_config.get("runtime", "host_build_graph")
+
+    def compile(self) -> dict:
+        """Build runtime, orchestration, and kernels. Return artifacts dict."""
+        from runtime_builder import RuntimeBuilder
+        from elf_parser import extract_text_section
+
+        pto_isa_root = _ensure_pto_isa_root(verbose=True)
+        if pto_isa_root is None:
+            raise EnvironmentError(
+                "PTO_ISA_ROOT could not be resolved.\n"
+                "Please set it to the PTO-ISA root directory."
+            )
+
+        logger.info(f"=== PTOCompiler: Building {self.runtime_name} (platform: {self.platform}) ===")
+        builder = RuntimeBuilder(platform=self.platform)
+        kernel_compiler = builder.get_kernel_compiler()
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        runtime_include_dirs = [
+            os.path.join(self.project_root, "src", "runtime", self.runtime_name, "runtime")
+        ]
+
+        def _build_runtime():
+            return builder.build(self.runtime_name)
+
+        def _compile_orchestration():
+            return kernel_compiler.compile_orchestration(
+                self.runtime_name,
+                self.orchestration["source"],
+            )
+
+        def _compile_one_kernel(kernel):
+            logger.info(f"Compiling kernel: {kernel['source']} (func_id={kernel['func_id']})")
+            incore_o = kernel_compiler.compile_incore(
+                kernel["source"],
+                core_type=kernel["core_type"],
+                pto_isa_root=pto_isa_root,
+                extra_include_dirs=runtime_include_dirs,
+            )
+            if self.platform == "a2a3sim":
+                return (kernel["func_id"], incore_o)
+            return (kernel["func_id"], extract_text_section(incore_o))
+
+        max_workers = 2 + len(self.kernels)
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            fut_runtime = executor.submit(_build_runtime)
+            fut_orch = executor.submit(_compile_orchestration)
+            fut_kernels = [executor.submit(_compile_one_kernel, k) for k in self.kernels]
+
+            try:
+                host_binary, aicpu_binary, aicore_binary = fut_runtime.result()
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to build runtime '{self.runtime_name}': {e}"
+                ) from e
+
+            orch_so_binary = fut_orch.result()
+            kernel_binaries = [f.result() for f in fut_kernels]
+
+        logger.info(f"PTOCompiler: Compiled {len(kernel_binaries)} kernel(s)")
+
+        return {
+            "host_binary": host_binary,
+            "orch_so_binary": orch_so_binary,
+            "aicpu_binary": aicpu_binary,
+            "aicore_binary": aicore_binary,
+            "kernel_binaries": kernel_binaries,
+            "orch_func_name": self.orchestration["function_name"],
+        }
+
+
+def create_compiler(kernels_dir, platform="a2a3"):
+    """Factory: creates a PTOCompiler."""
+    return PTOCompiler(kernels_dir=kernels_dir, platform=platform)

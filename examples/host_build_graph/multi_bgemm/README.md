@@ -27,7 +27,7 @@ python examples/scripts/run_example.py \
 ## 行为说明
 
 - 与 **bgemm** 使用同一套 orchestration（`build_bgemm_graph`）、同一套 kernel（GEMM + tile_add）、同一套 golden。
-- 多卡时主进程**并行**起 N 个子进程，每个子进程执行一次 `run_example.py -k ... -g ... -d <device_id>`，即每张卡跑一次完整单卡 BGEMM，互不依赖。
+- **编译与运行分离**：主进程先 `compile()` 一次，将产物写入临时目录，再并行 spawn N 个子进程；每个子进程只做 set_device → init → launch → finalize，**跳过 build**，无重复编译。
 - 不引入 HCCL、通信算子或建联逻辑；与后续多卡通信方案兼容（通信 case 将使用独立 C++ 入口）。
 
 ## 目录结构
