@@ -18,10 +18,20 @@
 ## 运行
 
 ```bash
-# 设置 pto-comm-isa 路径
+# 1. 先 source CANN 环境（与跑 pto-comm-isa comm case 相同）
+source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
+# 若 CANN 安装路径不同，用实际路径，如 nnae/nnrt 等
+
+# 2. 编译 C++ HCCL 辅助库（与 pto-comm-isa 同方式链接，Python 通过 ctypes 调用）
+cd examples/scripts/hccl_helper && mkdir -p build && cd build && cmake .. && make && cd ../../../../..
+
+# 3. 设置 pto-comm-isa 路径（注意用单个 =）
 export PTO_COMM_ISA_ROOT=/path/to/pto-comm-isa
 
-# 2 卡运行
+# 验证：应存在 include/pto/pto-inst.hpp
+ls $PTO_COMM_ISA_ROOT/include/pto/pto-inst.hpp
+
+# 4. 2 卡运行
 python examples/scripts/multi_card_run_example.py \
   -k examples/host_build_graph/cpt_and_comm/kernels \
   -g examples/host_build_graph/cpt_and_comm/golden.py \
