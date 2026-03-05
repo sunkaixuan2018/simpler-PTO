@@ -114,7 +114,7 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
               << " win_dst=0x" << win_dst
               << std::dec << '\n';
 
-    int t0 = -1, t1 = -1, t2 = -1, t3 = -1;
+    int t0 = -1, t1 = -1, t2 = -1, t3 = -1, t_init_dst = -1;
     bool run_phase0 = (phase != 1); // full or phase0
     bool run_phase1 = (phase != 0); // full or phase1
 
@@ -136,6 +136,15 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     }
 
     if (run_phase1) {
+        // Keep reference behavior: root pre-initializes gather destination window region.
+        if (dev_out != nullptr) {
+            uint64_t args_wmin_dst[3];
+            args_wmin_dst[0] = win_dst;
+            args_wmin_dst[1] = reinterpret_cast<uint64_t>(dev_out);
+            args_wmin_dst[2] = static_cast<uint64_t>(n_ranks * GATHER_COUNT);
+            t_init_dst = runtime->add_task(args_wmin_dst, 3, 1, CoreType::AIV);
+        }
+
         // Task 2: Gather - root collects from all ranks
         uint64_t args_gather[5];
         args_gather[0] = win_dst;
@@ -147,6 +156,9 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
 
         if (t1 >= 0) {
             runtime->add_successor(t1, t2);
+        }
+        if (t_init_dst >= 0) {
+            runtime->add_successor(t_init_dst, t2);
         }
 
         if (dev_out != nullptr) {
@@ -166,6 +178,7 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
 
     if (t0 >= 0) std::cout << "  task" << t0 << ": GEMM [AIC]\n";
     if (t1 >= 0) std::cout << "  task" << t1 << ": WindowMemCopyIn [AIV]\n";
+    if (t_init_dst >= 0) std::cout << "  task" << t_init_dst << ": WindowMemCopyIn(dst_init) [AIV]\n";
     if (t2 >= 0) std::cout << "  task" << t2 << ": Gather [AIV]\n";
     if (t3 >= 0) std::cout << "  task" << t3 << ": WindowMemCopyOut [AIV]\n";
 
