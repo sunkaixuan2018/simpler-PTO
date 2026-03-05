@@ -825,6 +825,10 @@ class CodeRunner:
                 hccl_barrier(comm_context["comm"], comm_context["stream"])
                 logger.info("HcclBarrier (post-launch) done")
 
+            # Debug window dump after kernels finished, before finalize copy-back
+            if comm_context and "win_base" in comm_context and "n_ranks" in comm_context:
+                self._dump_window_after_launch(comm_context)
+
             # Finalize
             logger.info("=== Finalizing Runtime ===")
             runtime.finalize()
@@ -838,6 +842,53 @@ class CodeRunner:
         logger.info("=" * 60)
         logger.info(f"=== All {total_cases} cases passed ===")
         logger.info("=" * 60)
+
+    def _dump_window_after_launch(self, comm_context: Dict[str, Any]) -> None:
+        """
+        Dump window memory after launch (post HcclBarrier, pre finalize).
+        Helps verify WindowMemCopyIn/TGATHER wrote expected data.
+        """
+        try:
+            from bindings import copy_from_device
+        except Exception as e:
+            logger.warning(f"[dump] cannot import copy_from_device: {e}")
+            return
+
+        try:
+            win_base = int(comm_context["win_base"])
+            n_ranks = int(comm_context["n_ranks"])
+            rank_id = int(comm_context.get("rank_id", -1))
+
+            # Keep constants aligned with cpt_and_comm_orch.cpp
+            HCCL_WIN_SYNC_PREFIX = 64 * 4
+            GATHER_COUNT = 64
+            win_src = win_base + HCCL_WIN_SYNC_PREFIX
+            win_dst = win_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * 4
+
+            def _dump_one(tag: str, dev_addr: int, count: int):
+                host = torch.zeros(count, dtype=torch.float32)
+                copy_from_device(host.data_ptr(), dev_addr, count * 4)
+                n_show = min(16, count)
+                logger.info(
+                    "[dump] %s rank=%s addr=0x%x count=%d first %d: %s",
+                    tag,
+                    rank_id,
+                    dev_addr,
+                    count,
+                    n_show,
+                    host[:n_show].tolist(),
+                )
+                try:
+                    debug_dir = self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    np.save(debug_dir / f"{tag}_rank{rank_id}.npy", host.numpy())
+                except Exception as e:
+                    logger.warning(f"[dump] failed to save {tag} npy: {e}")
+
+            _dump_one("post_launch_win_src", win_src, GATHER_COUNT)
+            _dump_one("post_launch_win_dst", win_dst, n_ranks * GATHER_COUNT)
+        except Exception as e:
+            logger.warning(f"[dump] window dump failed: {e}")
 
     def _compare_with_golden(
         self,
