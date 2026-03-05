@@ -419,6 +419,7 @@ int hccl_helper_init_comm(
         for (uint32_t i = 0; i < head.rankSize; ++i) {
             if (i == head.localUsrRankId) {
                 hostCtx.windowsIn[i] = head.localWindowsIn;
+                hostCtx.windowsOut[i] = head.localWindowsOut;
                 continue;
             }
 
@@ -438,11 +439,19 @@ int hccl_helper_init_comm(
                 return -static_cast<int>(aRet);
             }
 
-            hostCtx.windowsIn[i] = remoteInfo.windowsIn;
+            uint32_t mappedIdx = i;
+            if (remoteInfo.remoteUsrRankId < head.rankSize) {
+                mappedIdx = remoteInfo.remoteUsrRankId;
+            }
+
+            hostCtx.windowsIn[mappedIdx] = remoteInfo.windowsIn;
+            hostCtx.windowsOut[mappedIdx] = remoteInfo.windowsOut;
 
             std::cout << "[hccl_helper] remoteRes[" << i << "] remoteUsrRankId="
                       << remoteInfo.remoteUsrRankId
+                      << " mappedIdx=" << mappedIdx
                       << " windowsIn=0x" << std::hex << remoteInfo.windowsIn
+                      << " windowsOut=0x" << remoteInfo.windowsOut
                       << std::dec << std::endl;
         }
 
