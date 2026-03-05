@@ -69,9 +69,10 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     int n_ranks = static_cast<int>(args[10]);
     int root = static_cast<int>(args[11]);
     int rank_id = static_cast<int>(args[12]);
+    int phase = (arg_count >= 14) ? static_cast<int>(args[13]) : -1; // -1: full, 0: gemm+wmin, 1: gather+wmout
 
     std::cout << "\n=== build_cpt_and_comm_graph ===" << '\n';
-    std::cout << "  n_ranks=" << n_ranks << " root=" << root << " rank_id=" << rank_id << '\n';
+    std::cout << "  n_ranks=" << n_ranks << " root=" << root << " rank_id=" << rank_id << " phase=" << phase << '\n';
 
     // Allocate device memory
     void* dev_A = runtime->host_api.device_malloc(size_A);
@@ -113,50 +114,59 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
               << " win_dst=0x" << win_dst
               << std::dec << '\n';
 
-    // Task 0: GEMM C = A @ B
-    uint64_t args_gemm[3];
-    args_gemm[0] = reinterpret_cast<uint64_t>(dev_A);
-    args_gemm[1] = reinterpret_cast<uint64_t>(dev_B);
-    args_gemm[2] = reinterpret_cast<uint64_t>(dev_C);
-    int t0 = runtime->add_task(args_gemm, 3, 0, CoreType::AIC);
+    int t0 = -1, t1 = -1, t2 = -1, t3 = -1;
+    bool run_phase0 = (phase != 1); // full or phase0
+    bool run_phase1 = (phase != 0); // full or phase1
 
-    // Task 1: WindowMemCopyIn - copy first GATHER_COUNT of dev_C to window
-    uint64_t args_wmin[3];
-    args_wmin[0] = win_src;
-    args_wmin[1] = reinterpret_cast<uint64_t>(dev_C);
-    args_wmin[2] = static_cast<uint64_t>(GATHER_COUNT);
-    int t1 = runtime->add_task(args_wmin, 3, 1, CoreType::AIV);
+    if (run_phase0) {
+        // Task 0: GEMM C = A @ B
+        uint64_t args_gemm[3];
+        args_gemm[0] = reinterpret_cast<uint64_t>(dev_A);
+        args_gemm[1] = reinterpret_cast<uint64_t>(dev_B);
+        args_gemm[2] = reinterpret_cast<uint64_t>(dev_C);
+        t0 = runtime->add_task(args_gemm, 3, 0, CoreType::AIC);
 
-    // Task 2: Gather - root collects from all ranks
-    uint64_t args_gather[5];
-    args_gather[0] = win_dst;
-    args_gather[1] = win_src;
-    args_gather[2] = device_ctx_ptr;
-    args_gather[3] = static_cast<uint64_t>(n_ranks);
-    args_gather[4] = static_cast<uint64_t>(root);
-    int t2 = runtime->add_task(args_gather, 5, 2, CoreType::AIV);
+        // Task 1: WindowMemCopyIn - copy first GATHER_COUNT of dev_C to window
+        uint64_t args_wmin[3];
+        args_wmin[0] = win_src;
+        args_wmin[1] = reinterpret_cast<uint64_t>(dev_C);
+        args_wmin[2] = static_cast<uint64_t>(GATHER_COUNT);
+        t1 = runtime->add_task(args_wmin, 3, 1, CoreType::AIV);
+        runtime->add_successor(t0, t1);
+    }
 
-    runtime->add_successor(t0, t1);
-    runtime->add_successor(t1, t2);
+    if (run_phase1) {
+        // Task 2: Gather - root collects from all ranks
+        uint64_t args_gather[5];
+        args_gather[0] = win_dst;
+        args_gather[1] = win_src;
+        args_gather[2] = device_ctx_ptr;
+        args_gather[3] = static_cast<uint64_t>(n_ranks);
+        args_gather[4] = static_cast<uint64_t>(root);
+        t2 = runtime->add_task(args_gather, 5, 2, CoreType::AIV);
+
+        if (t1 >= 0) {
+            runtime->add_successor(t1, t2);
+        }
+
+        if (dev_out != nullptr) {
+            // Task 3: WindowMemCopyOut - root copies gathered result to device
+            uint64_t args_wmout[3];
+            args_wmout[0] = reinterpret_cast<uint64_t>(dev_out);
+            args_wmout[1] = win_dst;
+            args_wmout[2] = static_cast<uint64_t>(n_ranks * GATHER_COUNT);
+            t3 = runtime->add_task(args_wmout, 3, 3, CoreType::AIV);
+            runtime->add_successor(t2, t3);
+        }
+    }
 
     // Debug dump snapshot (build-time): observe win_src/win_dst memory content.
     DebugDumpWindow(runtime, "after_wmin", win_src, GATHER_COUNT);
     DebugDumpWindow(runtime, "after_tgather", win_dst, static_cast<size_t>(n_ranks * GATHER_COUNT));
 
-    int t3 = -1;
-    if (dev_out != nullptr) {
-        // Task 3: WindowMemCopyOut - root copies gathered result to device
-        uint64_t args_wmout[3];
-        args_wmout[0] = reinterpret_cast<uint64_t>(dev_out);
-        args_wmout[1] = win_dst;
-        args_wmout[2] = static_cast<uint64_t>(n_ranks * GATHER_COUNT);
-        t3 = runtime->add_task(args_wmout, 3, 3, CoreType::AIV);
-        runtime->add_successor(t2, t3);
-    }
-
-    std::cout << "  task" << t0 << ": GEMM [AIC]\n";
-    std::cout << "  task" << t1 << ": WindowMemCopyIn [AIV]\n";
-    std::cout << "  task" << t2 << ": Gather [AIV]\n";
+    if (t0 >= 0) std::cout << "  task" << t0 << ": GEMM [AIC]\n";
+    if (t1 >= 0) std::cout << "  task" << t1 << ": WindowMemCopyIn [AIV]\n";
+    if (t2 >= 0) std::cout << "  task" << t2 << ": Gather [AIV]\n";
     if (t3 >= 0) std::cout << "  task" << t3 << ": WindowMemCopyOut [AIV]\n";
 
     return 0;

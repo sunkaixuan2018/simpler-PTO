@@ -833,9 +833,12 @@ class CodeRunner:
             logger.info("=== Finalizing Runtime ===")
             runtime.finalize()
 
-            # Compute golden and compare
-            logger.info("=== Comparing Results ===")
-            self._compare_with_golden(outputs, golden)
+            # Compute golden and compare (phase0 in split-launch can skip)
+            if comm_context and comm_context.get("disable_compare", False):
+                logger.info("=== Comparing Results (skipped for this phase) ===")
+            else:
+                logger.info("=== Comparing Results ===")
+                self._compare_with_golden(outputs, golden)
 
             logger.info(f"=== Case {case_idx + 1}/{total_cases} Passed ===")
 
@@ -1039,7 +1042,25 @@ def run_on_device_comm(
         compiled_artifacts=artifacts,
         rank_id=rank_id,
     )
-    runner.run(comm_context=comm_context)
+    # 方案A：拆成两段 launch，确保所有 rank 的 WindowMemCopyIn 完成后再做 TGATHER
+    phase0_ctx = {**comm_context, "phase": 0, "disable_compare": True}
+    runner.run(comm_context=phase0_ctx)
+
+    phase1_runner = create_code_runner(
+        kernels_dir=kernels_dir,
+        golden_path=golden_path,
+        device_id=device_id,
+        platform=platform,
+        enable_profiling=enable_profiling,
+        run_all_cases=run_all_cases,
+        case_name=case_name,
+        n_devices=n_devices,
+        first_device_id=first_device_id,
+        compiled_artifacts=artifacts,
+        rank_id=rank_id,
+    )
+    phase1_ctx = {**comm_context, "phase": 1}
+    phase1_runner.run(comm_context=phase1_ctx)
 
 
 # =============================================================================

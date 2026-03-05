@@ -24,6 +24,7 @@ def generate_inputs(params: dict) -> list:
     rank_id = params.get("rank_id", 0)
     n_ranks = params.get("n_ranks", 2)
     root = params.get("root", 0)
+    phase = params.get("phase", -1)  # -1: full path, 0: gemm+wmin, 1: gather+wmout
 
     # A, B: 64x64 per rank (different data per rank)
     np.random.seed(42 + rank_id)
@@ -50,6 +51,7 @@ def generate_inputs(params: dict) -> list:
             ("n_ranks", ctypes.c_int32(n_ranks)),
             ("root", ctypes.c_int32(root)),
             ("rank_id", ctypes.c_int32(rank_id)),
+            ("phase", ctypes.c_int32(phase)),
         ])
 
     return result
