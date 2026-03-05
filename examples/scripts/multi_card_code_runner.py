@@ -47,6 +47,7 @@ Golden.py interface:
 import importlib.util
 import logging
 import os
+import struct
 import sys
 import time
 from contextlib import contextmanager
@@ -794,6 +795,8 @@ class CodeRunner:
             logger.info(f">>> Total init-to-launch: {_t_golden_end - _t_init_start:.3f}s "
                         f"(initialize={_t_init_end - _t_init_start:.3f}s, "
                         f"golden={_t_golden_end - _t_golden_start:.3f}s)")
+            if comm_context and comm_context.get("phase", -1) == 1 and "device_ctx_ptr" in comm_context:
+                self._dump_hccl_device_context(comm_context, "phase1_prelaunch")
 
             # HcclBarrier before launch (when using comm)
             if comm_context and "comm" in comm_context and "stream" in comm_context:
@@ -828,6 +831,8 @@ class CodeRunner:
             # Debug window dump after kernels finished, before finalize copy-back
             if comm_context and "win_base" in comm_context and "n_ranks" in comm_context:
                 self._dump_window_after_launch(comm_context)
+            if comm_context and comm_context.get("phase", -1) == 1 and "device_ctx_ptr" in comm_context:
+                self._dump_hccl_device_context(comm_context, "phase1_postlaunch")
 
             # Finalize
             logger.info("=== Finalizing Runtime ===")
@@ -892,6 +897,61 @@ class CodeRunner:
             _dump_one("post_launch_win_dst", win_dst, n_ranks * GATHER_COUNT)
         except Exception as e:
             logger.warning(f"[dump] window dump failed: {e}")
+
+    def _dump_hccl_device_context(self, comm_context: Dict[str, Any], tag: str) -> None:
+        """
+        Dump HcclDeviceContext from device memory for phase1 diagnosis.
+        Layout follows examples/scripts/comm_include/hccl_context.h.
+        """
+        try:
+            from bindings import copy_from_device
+        except Exception as e:
+            logger.warning(f"[dump] cannot import copy_from_device for hccl ctx: {e}")
+            return
+
+        try:
+            ctx_addr = int(comm_context["device_ctx_ptr"])
+            rank_id = int(comm_context.get("rank_id", -1))
+            n_ranks = int(comm_context.get("n_ranks", 0))
+
+            # uint64 workSpace, uint64 workSpaceSize, uint32 rankId, uint32 rankNum,
+            # uint64 winSize, uint64 windowsIn[64], uint64 windowsOut[64]
+            ctx_size = 8 + 8 + 4 + 4 + 8 + 64 * 8 + 64 * 8
+            raw = torch.zeros(ctx_size, dtype=torch.uint8)
+            copy_from_device(raw.data_ptr(), ctx_addr, ctx_size)
+
+            fmt = "<QQIIQ64Q64Q"
+            unpacked = struct.unpack(fmt, bytes(raw.tolist()))
+            work_space = unpacked[0]
+            work_space_size = unpacked[1]
+            ctx_rank_id = unpacked[2]
+            ctx_rank_num = unpacked[3]
+            win_size = unpacked[4]
+            windows_in = unpacked[5:69]
+            windows_out = unpacked[69:133]
+
+            n_show = max(0, min(n_ranks, 8))
+            win_in_show = [f"0x{windows_in[i]:x}" for i in range(n_show)]
+            win_out_show = [f"0x{windows_out[i]:x}" for i in range(n_show)]
+            logger.info(
+                "[dump] %s hccl_ctx rank=%s ctx_addr=0x%x rankId=%d rankNum=%d "
+                "winSize=0x%x workSpace=0x%x workSpaceSize=0x%x "
+                "windowsIn[0:%d]=%s windowsOut[0:%d]=%s",
+                tag,
+                rank_id,
+                ctx_addr,
+                ctx_rank_id,
+                ctx_rank_num,
+                win_size,
+                work_space,
+                work_space_size,
+                n_show,
+                win_in_show,
+                n_show,
+                win_out_show,
+            )
+        except Exception as e:
+            logger.warning(f"[dump] hccl device context dump failed ({tag}): {e}")
 
     def _compare_with_golden(
         self,
