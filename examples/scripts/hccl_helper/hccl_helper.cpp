@@ -12,6 +12,7 @@
 #include <cerrno>
 #include <cstddef>
 #include <vector>
+#include <iostream>
 
 #include "acl/acl.h"
 #include "hccl/hccl_comm.h"
@@ -456,10 +457,24 @@ int hccl_helper_init_comm(
         deviceCtxPtr = newDevMem;
     }
 
+    // Debug print: rank mapping and windowsIn/out
+    std::cout << "[hccl_helper] rank_id(py)=" << rank_id
+              << " rankId(hccl)=" << hostCtx.rankId
+              << " rankNum=" << hostCtx.rankNum
+              << " topo=" << topo << std::endl;
+    for (uint32_t i = 0; i < hostCtx.rankNum && i < 4; ++i) {
+        std::cout << "[hccl_helper] windowsIn[" << i << "]=0x"
+                  << std::hex << hostCtx.windowsIn[i]
+                  << " windowsOut[" << i << "]=0x" << hostCtx.windowsOut[i]
+                  << std::dec << std::endl;
+    }
+
     *out_comm = comm;
     *out_ctx_ptr = deviceCtxPtr;
     // 使用 HcclDeviceContext 自带的 rankId 作为本地窗口索引，避免 Python 侧 rank_id 与 HCCL 内部 localUsrRankId 不一致
     *out_win_base = hostCtx.windowsIn[hostCtx.rankId];
+    std::cout << "[hccl_helper] out_win_base=0x"
+              << std::hex << *out_win_base << std::dec << std::endl;
     *out_stream = stream;
     return 0;
 }

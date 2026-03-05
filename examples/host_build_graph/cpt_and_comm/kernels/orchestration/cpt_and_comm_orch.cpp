@@ -36,7 +36,7 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     int rank_id = static_cast<int>(args[12]);
 
     std::cout << "\n=== build_cpt_and_comm_graph ===" << '\n';
-    std::cout << "  n_ranks=" << n_ranks << " root=" << root << '\n';
+    std::cout << "  n_ranks=" << n_ranks << " root=" << root << " rank_id=" << rank_id << '\n';
 
     // Allocate device memory
     void* dev_A = runtime->host_api.device_malloc(size_A);
@@ -73,6 +73,10 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     // Window layout: sync_prefix, src (GATHER_COUNT*4), dst (n_ranks*GATHER_COUNT*4)
     uint64_t win_src = win_base + HCCL_WIN_SYNC_PREFIX;
     uint64_t win_dst = win_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * sizeof(float);
+    std::cout << "  win_base=0x" << std::hex << win_base
+              << " win_src=0x" << win_src
+              << " win_dst=0x" << win_dst
+              << std::dec << '\n';
 
     // Task 0: GEMM C = A @ B
     uint64_t args_gemm[3];
