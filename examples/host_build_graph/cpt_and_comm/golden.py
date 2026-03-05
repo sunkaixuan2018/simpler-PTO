@@ -71,6 +71,8 @@ def compute_golden(tensors: dict, params: dict) -> None:
 
     # Gather: root collects first GATHER_COUNT from each rank
     if rank_id == root:
+        # out is torch.Tensor (CodeRunner converts); use numpy view for assignment
+        out_np = out.cpu().numpy()
         for r in range(n_ranks):
             # Simulate rank r's GEMM output (we only have our own, so for golden we compute all)
             np.random.seed(42 + r)
@@ -78,4 +80,4 @@ def compute_golden(tensors: dict, params: dict) -> None:
             br = np.random.randn(TILE, TILE).astype(np.float32) * 0.1
             cr = ar @ br
             flat = cr.flatten()
-            out[r * GATHER_COUNT : (r + 1) * GATHER_COUNT] = flat[:GATHER_COUNT]
+            out_np[r * GATHER_COUNT : (r + 1) * GATHER_COUNT] = flat[:GATHER_COUNT]
