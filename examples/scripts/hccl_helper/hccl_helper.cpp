@@ -433,17 +433,9 @@ int hccl_helper_init_comm(
                 return -static_cast<int>(aRet);
             }
 
-            // remoteRes array order is not guaranteed to match user-rank order in RING topo.
-            // Re-index by remoteUsrRankId to build windowsIn[userRank] mapping expected by kernels.
-            uint32_t remoteRank = remoteInfo.remoteUsrRankId;
-            if (remoteRank < head.rankSize) {
-                hostCtx.windowsIn[remoteRank] = remoteInfo.windowsIn;
-            } else {
-                // Fallback to original slot if remoteUsrRankId is invalid.
-                hostCtx.windowsIn[i] = remoteInfo.windowsIn;
-            }
+            hostCtx.windowsIn[i] = remoteInfo.windowsIn;
 
-            std::cout << "[hccl_helper] remoteRes[" << i << "] -> remoteUsrRankId="
+            std::cout << "[hccl_helper] remoteRes[" << i << "] remoteUsrRankId="
                       << remoteInfo.remoteUsrRankId
                       << " windowsIn=0x" << std::hex << remoteInfo.windowsIn
                       << std::dec << std::endl;
