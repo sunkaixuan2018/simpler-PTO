@@ -55,17 +55,17 @@ def _load_helper():
     if path is None:
         raise RuntimeError(
             "libhccl_helper.so not found. Build it with CANN env set:\n"
+            "  source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash\n"
             "  cd examples/scripts/hccl_helper && mkdir build && cd build\n"
-            "  source /path/to/Ascend/.../set_env.sh\n"
             "  cmake .. && make\n"
-            "Then run your script with the same CANN env (source set_env.sh)."
+            "Then run your script with the same CANN env (source setenv.bash)."
         )
     try:
         _lib_helper = ctypes.CDLL(str(path))
     except OSError as e:
         raise RuntimeError(
             f"Failed to load {path}: {e}\n"
-            "Ensure CANN env is set (source set_env.sh) so dependencies (ascendcl, hcomm, runtime) can be found."
+            "Ensure CANN env is set (source .../setenv.bash) so dependencies (ascendcl, hcomm, runtime) can be found."
         ) from e
 
     # C API

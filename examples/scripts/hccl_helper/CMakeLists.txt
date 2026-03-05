@@ -1,5 +1,5 @@
 # Build libhccl_helper.so — same link as pto-comm-isa (ascendcl, hcomm, runtime).
-# Run with CANN env: source /path/to/Ascend/set_env.sh, then:
+# Run with CANN env: source .../setenv.bash, then:
 #   mkdir build && cd build && cmake .. && make
 
 cmake_minimum_required(VERSION 3.16)
@@ -12,7 +12,7 @@ if(DEFINED ENV{ASCEND_HOME_PATH})
 elseif(DEFINED ENV{ASCEND_HOME})
     set(ASCEND_HOME_PATH $ENV{ASCEND_HOME})
 else()
-    message(FATAL_ERROR "ASCEND_HOME_PATH or ASCEND_HOME not set. Run: source /path/to/Ascend/.../set_env.sh")
+    message(FATAL_ERROR "ASCEND_HOME_PATH or ASCEND_HOME not set. Run: source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash")
 endif()
 
 add_library(hccl_helper SHARED hccl_helper.cpp)

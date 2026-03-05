@@ -19,8 +19,7 @@
 
 ```bash
 # 1. 先 source CANN 环境（与跑 pto-comm-isa comm case 相同）
-source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh
-# 若 CANN 安装路径不同，用实际路径，如 nnae/nnrt 等
+source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
 
 # 2. 编译 C++ HCCL 辅助库（与 pto-comm-isa 同方式链接，Python 通过 ctypes 调用）
 cd examples/scripts/hccl_helper && mkdir -p build && cd build && cmake .. && make && cd ../../../../..
