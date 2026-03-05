@@ -54,6 +54,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -644,7 +645,15 @@ class CodeRunner:
 
             # For requires_comm, prefer PTO_COMM_ISA_ROOT (pto-comm-isa has comm headers)
             if self.requires_comm and os.environ.get("PTO_COMM_ISA_ROOT"):
-                pto_isa_root = os.environ["PTO_COMM_ISA_ROOT"]
+                pto_isa_root = os.environ["PTO_COMM_ISA_ROOT"].strip()
+                pto_isa_root = str(Path(pto_isa_root).resolve())
+                pto_inst = Path(pto_isa_root) / "include" / "pto" / "pto-inst.hpp"
+                if not pto_inst.exists():
+                    raise EnvironmentError(
+                        f"PTO_COMM_ISA_ROOT/include/pto/pto-inst.hpp not found:\n{pto_inst}\n"
+                        f"PTO_COMM_ISA_ROOT={pto_isa_root}\n"
+                        f"Ensure PTO_COMM_ISA_ROOT points to pto-comm-isa root (use single =)."
+                    )
                 logger.info(f"Using PTO_COMM_ISA_ROOT for comm kernels: {pto_isa_root}")
             else:
                 pto_isa_root = _ensure_pto_isa_root(verbose=True)
@@ -851,8 +860,9 @@ class CodeRunner:
                 flat_actual = actual.flatten()
                 flat_expected = expected.flatten()
                 n_show = min(10, flat_actual.numel())
-                logger.debug(f"  First {n_show} actual:   {flat_actual[:n_show].tolist()}")
-                logger.debug(f"  First {n_show} expected: {flat_expected[:n_show].tolist()}")
+                # 始终打印前几个元素，方便对比实际值与 golden
+                logger.info(f"  First {n_show} actual:   {flat_actual[:n_show].tolist()}")
+                logger.info(f"  First {n_show} expected: {flat_expected[:n_show].tolist()}")
 
             # Use torch for comparison
             if not torch.allclose(actual, expected, rtol=self.rtol, atol=self.atol):
@@ -860,6 +870,18 @@ class CodeRunner:
                 close_mask = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol)
                 mismatches = (~close_mask).sum().item()
                 total = actual.numel()
+
+                # 额外把实际值和 golden 写到本地 .npy 文件，方便离线对比
+                try:
+                    debug_dir = self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
+                    debug_dir.mkdir(parents=True, exist_ok=True)
+                    rank_id = getattr(self, "rank_id", None)
+                    suffix = f"_rank{rank_id}" if rank_id is not None else ""
+                    np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
+                    np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
+                    logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
+                except Exception as e:
+                    logger.warning(f"Failed to save debug tensors for {name}: {e}")
                 raise AssertionError(
                     f"Output '{name}' does not match golden.\n"
                     f"Mismatched elements: {mismatches}/{total}\n"
@@ -1029,7 +1051,14 @@ class PTOCompiler:
         from elf_parser import extract_text_section
 
         if self.requires_comm and os.environ.get("PTO_COMM_ISA_ROOT"):
-            pto_isa_root = os.environ["PTO_COMM_ISA_ROOT"]
+            pto_isa_root = os.environ["PTO_COMM_ISA_ROOT"].strip()
+            pto_isa_root = str(Path(pto_isa_root).resolve())
+            pto_inst = Path(pto_isa_root) / "include" / "pto" / "pto-inst.hpp"
+            if not pto_inst.exists():
+                raise EnvironmentError(
+                    f"PTO_COMM_ISA_ROOT/include/pto/pto-inst.hpp not found:\n{pto_inst}\n"
+                    f"Ensure PTO_COMM_ISA_ROOT points to pto-comm-isa root (use single =)."
+                )
         else:
             pto_isa_root = _ensure_pto_isa_root(verbose=True)
         if pto_isa_root is None:
