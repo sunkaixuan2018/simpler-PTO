@@ -198,6 +198,17 @@ int finalize_runtime(RuntimeHandle runtime);
 int set_device(int device_id);
 
 /**
+ * Get current AICPU stream handle from DeviceRunner.
+ *
+ * Returns NULL if stream is not initialized.
+ * This is mainly for integrating external comm setup that must share
+ * the same stream context as runtime-launched comm resources.
+ *
+ * @return AICPU stream handle, or NULL if unavailable
+ */
+void* get_aicpu_stream(void);
+
+/**
  * Get current AICore stream handle from DeviceRunner.
  *
  * Returns NULL if stream is not initialized.

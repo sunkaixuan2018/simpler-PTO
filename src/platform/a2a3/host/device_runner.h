@@ -330,6 +330,12 @@ public:
     int ensure_device_set(int device_id);
 
     /**
+     * Get AICPU stream created by ensure_device_set().
+     * Returns nullptr when stream is not initialized.
+     */
+    rtStream_t get_aicpu_stream() const { return stream_aicpu_; }
+
+    /**
      * Get AICore stream created by ensure_device_set().
      * Returns nullptr when stream is not initialized.
      */

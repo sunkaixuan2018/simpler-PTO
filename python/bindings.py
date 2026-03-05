@@ -147,6 +147,10 @@ class RuntimeLibraryLoader:
         self.lib.set_device.argtypes = [c_int]
         self.lib.set_device.restype = c_int
 
+        # get_aicpu_stream - fetch DeviceRunner AICPU stream handle
+        self.lib.get_aicpu_stream.argtypes = []
+        self.lib.get_aicpu_stream.restype = c_void_p
+
         # get_aicore_stream - fetch DeviceRunner AICore stream handle
         self.lib.get_aicore_stream.argtypes = []
         self.lib.get_aicore_stream.restype = c_void_p
@@ -404,6 +408,20 @@ def get_aicore_stream() -> int:
     if _lib is None:
         raise RuntimeError("Runtime not loaded. Call bind_host_binary() first.")
     ptr = _lib.get_aicore_stream()
+    return int(ptr) if ptr else 0
+
+
+def get_aicpu_stream() -> int:
+    """
+    Get current AICPU stream handle from DeviceRunner.
+
+    Returns:
+        Stream handle as integer, or 0 when unavailable.
+    """
+    global _lib
+    if _lib is None:
+        raise RuntimeError("Runtime not loaded. Call bind_host_binary() first.")
+    ptr = _lib.get_aicpu_stream()
     return int(ptr) if ptr else 0
 
 

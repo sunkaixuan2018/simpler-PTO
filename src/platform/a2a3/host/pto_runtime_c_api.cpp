@@ -215,6 +215,15 @@ int set_device(int device_id) {
     }
 }
 
+void* get_aicpu_stream(void) {
+    try {
+        DeviceRunner& runner = DeviceRunner::get();
+        return reinterpret_cast<void*>(runner.get_aicpu_stream());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 void* get_aicore_stream(void) {
     try {
         DeviceRunner& runner = DeviceRunner::get();

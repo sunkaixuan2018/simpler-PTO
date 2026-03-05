@@ -217,6 +217,10 @@ int set_device(int device_id) {
     return 0;
 }
 
+void* get_aicpu_stream(void) {
+    return NULL;
+}
+
 void* get_aicore_stream(void) {
     return NULL;
 }

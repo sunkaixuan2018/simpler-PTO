@@ -1074,13 +1074,13 @@ def run_on_device_comm(
     Worker for requires_comm: init HCCL, create CodeRunner, run with comm_context.
     """
     from hccl_bindings import hccl_init_comm
-    from bindings import bind_host_binary, set_device, get_aicore_stream
+    from bindings import bind_host_binary, set_device, get_aicpu_stream
 
-    # Ensure HCCL comm resources are created on the same AICore stream
-    # used by runtime-launched kernels in this process.
+    # Ensure HCCL comm resources are created on the same AICPU stream
+    # used by runtime/device side scheduler in this process.
     bind_host_binary(artifacts["host_binary"])
     set_device(device_id)
-    runtime_stream = get_aicore_stream()
+    runtime_stream = get_aicpu_stream()
 
     comm, device_ctx_ptr, win_base, stream = hccl_init_comm(
         rank_id, n_ranks, n_devices, first_device_id, root_info, runtime_stream=runtime_stream
