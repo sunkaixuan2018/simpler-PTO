@@ -433,7 +433,20 @@ int hccl_helper_init_comm(
                 return -static_cast<int>(aRet);
             }
 
-            hostCtx.windowsIn[i] = remoteInfo.windowsIn;
+            // remoteRes array order is not guaranteed to match user-rank order in RING topo.
+            // Re-index by remoteUsrRankId to build windowsIn[userRank] mapping expected by kernels.
+            uint32_t remoteRank = remoteInfo.remoteUsrRankId;
+            if (remoteRank < head.rankSize) {
+                hostCtx.windowsIn[remoteRank] = remoteInfo.windowsIn;
+            } else {
+                // Fallback to original slot if remoteUsrRankId is invalid.
+                hostCtx.windowsIn[i] = remoteInfo.windowsIn;
+            }
+
+            std::cout << "[hccl_helper] remoteRes[" << i << "] -> remoteUsrRankId="
+                      << remoteInfo.remoteUsrRankId
+                      << " windowsIn=0x" << std::hex << remoteInfo.windowsIn
+                      << std::dec << std::endl;
         }
 
         // 4. Allocate new device memory and copy our correctly-built HcclDeviceContext.
