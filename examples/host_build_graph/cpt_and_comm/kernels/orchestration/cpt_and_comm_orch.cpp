@@ -8,12 +8,47 @@
 #include "runtime.h"
 #include <iostream>
 #include <cstdint>
+#include <vector>
+#include <algorithm>
 
 extern "C" {
 
 constexpr int TILE = 64;
 constexpr int GATHER_COUNT = 64;
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
+
+static void DebugDumpWindow(Runtime* runtime, const char* tag, uint64_t addr, size_t count) {
+    if (runtime == nullptr || runtime->host_api.copy_from_device == nullptr) {
+        std::cout << "[dump] " << tag << ": runtime/copy_from_device unavailable\n";
+        return;
+    }
+    if (addr == 0 || count == 0) {
+        std::cout << "[dump] " << tag << ": invalid addr/count\n";
+        return;
+    }
+
+    std::vector<float> host(count, 0.0f);
+    int ret = runtime->host_api.copy_from_device(
+        host.data(),
+        reinterpret_cast<void*>(addr),
+        count * sizeof(float)
+    );
+    if (ret != 0) {
+        std::cout << "[dump] " << tag << ": copy_from_device failed, ret=" << ret << '\n';
+        return;
+    }
+
+    size_t n_show = std::min<size_t>(count, 16);
+    std::cout << "[dump] " << tag << " addr=0x" << std::hex << addr << std::dec
+              << " count=" << count << " first " << n_show << ": ";
+    for (size_t i = 0; i < n_show; ++i) {
+        std::cout << host[i];
+        if (i + 1 < n_show) {
+            std::cout << ", ";
+        }
+    }
+    std::cout << '\n';
+}
 
 int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     if (arg_count < 13) {
@@ -103,6 +138,10 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
 
     runtime->add_successor(t0, t1);
     runtime->add_successor(t1, t2);
+
+    // Debug dump snapshot (build-time): observe win_src/win_dst memory content.
+    DebugDumpWindow(runtime, "after_wmin", win_src, GATHER_COUNT);
+    DebugDumpWindow(runtime, "after_tgather", win_dst, static_cast<size_t>(n_ranks * GATHER_COUNT));
 
     int t3 = -1;
     if (dev_out != nullptr) {
