@@ -103,6 +103,8 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
             runtime->host_api.device_free(dev_C);
             return -1;
         }
+        // Initialize dev_out from host_out so phase1 dst_init does not copy uninitialized garbage.
+        runtime->host_api.copy_to_device(dev_out, host_out, size_out);
         runtime->record_tensor_pair(host_out, dev_out, size_out);
     }
 
