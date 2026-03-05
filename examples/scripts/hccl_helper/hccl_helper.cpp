@@ -271,6 +271,7 @@ int hccl_helper_init_comm(
     int first_device_id,
     const void* root_info,
     unsigned root_info_len,
+    void* external_stream,
     void** out_comm,
     void** out_ctx_ptr,
     uint64_t* out_win_base,
@@ -286,10 +287,14 @@ int hccl_helper_init_comm(
     if (rtRet != 0)
         return -rtRet;
 
-    void* stream = nullptr;
-    rtRet = rtStreamCreate(&stream, RT_STREAM_PRIORITY_DEFAULT);
-    if (rtRet != 0 || stream == nullptr)
-        return rtRet != 0 ? -rtRet : -1;
+    bool own_stream = false;
+    void* stream = external_stream;
+    if (stream == nullptr) {
+        rtRet = rtStreamCreate(&stream, RT_STREAM_PRIORITY_DEFAULT);
+        if (rtRet != 0 || stream == nullptr)
+            return rtRet != 0 ? -rtRet : -1;
+        own_stream = true;
+    }
 
     HcclComm comm = nullptr;
     auto* root = reinterpret_cast<const HcclRootInfo*>(root_info);
@@ -299,7 +304,7 @@ int hccl_helper_init_comm(
         static_cast<uint32_t>(rank_id),
         &comm);
     if (hret != HCCL_SUCCESS || comm == nullptr) {
-        rtStreamDestroy(stream);
+        if (own_stream) rtStreamDestroy(stream);
         return hret != HCCL_SUCCESS ? -hret : -1;
     }
 
@@ -307,7 +312,7 @@ int hccl_helper_init_comm(
     hret = HcclGetCommName(comm, group);
     if (hret != HCCL_SUCCESS) {
         HcclCommDestroy(comm);
-        rtStreamDestroy(stream);
+        if (own_stream) rtStreamDestroy(stream);
         return -hret;
     }
 
@@ -315,7 +320,7 @@ int hccl_helper_init_comm(
     hret = HcomGetL0TopoTypeEx(group, &topo, COMM_IS_NOT_SET_DEVICE);
     if (hret != HCCL_SUCCESS) {
         HcclCommDestroy(comm);
-        rtStreamDestroy(stream);
+        if (own_stream) rtStreamDestroy(stream);
         return -hret;
     }
 
@@ -323,7 +328,7 @@ int hccl_helper_init_comm(
     hret = HcomGetCommHandleByGroup(group, &commHandle);
     if (hret != HCCL_SUCCESS) {
         HcclCommDestroy(comm);
-        rtStreamDestroy(stream);
+        if (own_stream) rtStreamDestroy(stream);
         return -hret;
     }
 
@@ -345,7 +350,7 @@ int hccl_helper_init_comm(
     hret = HcclAllocComResourceByTiling(commHandle, stream, &tiling, &ctxPtr);
     if (hret != HCCL_SUCCESS || ctxPtr == nullptr) {
         HcclCommDestroy(comm);
-        rtStreamDestroy(stream);
+        if (own_stream) rtStreamDestroy(stream);
         return hret != HCCL_SUCCESS ? -hret : -1;
     }
 
@@ -358,7 +363,7 @@ int hccl_helper_init_comm(
         aclError aRet = aclrtMemcpy(&hostCtx, sizeof(hostCtx), ctxPtr, sizeof(hostCtx), ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -static_cast<int>(aRet);
         }
         deviceCtxPtr = ctxPtr;
@@ -373,13 +378,13 @@ int hccl_helper_init_comm(
         aclError aRet = aclrtMemcpy(&head, sizeof(head), rawCtx + headOff, sizeof(head), ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -static_cast<int>(aRet);
         }
 
         if (head.rankSize == 0 || head.rankSize > HCCL_MAX_RANK_NUM) {
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -EINVAL;
         }
 
@@ -392,7 +397,7 @@ int hccl_helper_init_comm(
                            ACL_MEMCPY_DEVICE_TO_HOST);
         if (aRet != ACL_SUCCESS) {
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -static_cast<int>(aRet);
         }
 
@@ -420,7 +425,7 @@ int hccl_helper_init_comm(
             uint64_t devPtr = remoteResArr[i].nextDevicePtr;
             if (devPtr == 0) {
                 HcclCommDestroy(comm);
-                rtStreamDestroy(stream);
+                if (own_stream) rtStreamDestroy(stream);
                 return -EINVAL;
             }
 
@@ -429,7 +434,7 @@ int hccl_helper_init_comm(
                                ACL_MEMCPY_DEVICE_TO_HOST);
             if (aRet != ACL_SUCCESS) {
                 HcclCommDestroy(comm);
-                rtStreamDestroy(stream);
+                if (own_stream) rtStreamDestroy(stream);
                 return -static_cast<int>(aRet);
             }
 
@@ -446,7 +451,7 @@ int hccl_helper_init_comm(
         aRet = aclrtMalloc(&newDevMem, sizeof(HcclDeviceContext), ACL_MEM_MALLOC_HUGE_FIRST);
         if (aRet != ACL_SUCCESS || newDevMem == nullptr) {
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -static_cast<int>(aRet);
         }
 
@@ -455,7 +460,7 @@ int hccl_helper_init_comm(
         if (aRet != ACL_SUCCESS) {
             aclrtFree(newDevMem);
             HcclCommDestroy(comm);
-            rtStreamDestroy(stream);
+            if (own_stream) rtStreamDestroy(stream);
             return -static_cast<int>(aRet);
         }
 
@@ -480,6 +485,8 @@ int hccl_helper_init_comm(
     *out_win_base = hostCtx.windowsIn[hostCtx.rankId];
     std::cout << "[hccl_helper] out_win_base=0x"
               << std::hex << *out_win_base << std::dec << std::endl;
+    std::cout << "[hccl_helper] stream=" << stream
+              << (own_stream ? " (helper-created)" : " (runtime-shared)") << std::endl;
     *out_stream = stream;
     return 0;
 }

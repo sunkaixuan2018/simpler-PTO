@@ -197,6 +197,17 @@ int finalize_runtime(RuntimeHandle runtime);
  */
 int set_device(int device_id);
 
+/**
+ * Get current AICore stream handle from DeviceRunner.
+ *
+ * Returns NULL if stream is not initialized.
+ * This is mainly for integrating external comm setup that must share
+ * the same stream context as runtime-launched kernels.
+ *
+ * @return AICore stream handle, or NULL if unavailable
+ */
+void* get_aicore_stream(void);
+
 /* Note: register_kernel() has been internalized into init_runtime().
  * Kernel binaries are now passed directly to init_runtime() which handles
  * registration and stores addresses in Runtime's func_id_to_addr_[] array.

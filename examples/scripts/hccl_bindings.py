@@ -78,6 +78,7 @@ def _load_helper():
     _lib_helper.hccl_helper_init_comm.argtypes = [
         c_int, c_int, c_int, c_int,  # rank_id, n_ranks, n_devices, first_device_id
         c_void_p, c_uint32,           # root_info, root_info_len
+        c_void_p,                     # external/runtime stream (nullable)
         POINTER(c_void_p), POINTER(c_void_p), POINTER(c_uint64), POINTER(c_void_p),
     ]
     _lib_helper.hccl_helper_init_comm.restype = c_int
@@ -107,6 +108,7 @@ def hccl_init_comm(
     n_devices: int,
     first_device_id: int,
     root_info: bytes,
+    runtime_stream: int = 0,
 ) -> Tuple[int, int, int, int]:
     """
     All ranks: init HCCL comm (same link as pto-comm-isa).
@@ -134,6 +136,7 @@ def hccl_init_comm(
         first_device_id,
         buf,
         len(root_info),
+        ctypes.c_void_p(runtime_stream),
         ctypes.byref(comm),
         ctypes.byref(ctx_ptr),
         ctypes.byref(win_base),

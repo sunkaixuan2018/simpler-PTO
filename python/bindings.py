@@ -147,6 +147,10 @@ class RuntimeLibraryLoader:
         self.lib.set_device.argtypes = [c_int]
         self.lib.set_device.restype = c_int
 
+        # get_aicore_stream - fetch DeviceRunner AICore stream handle
+        self.lib.get_aicore_stream.argtypes = []
+        self.lib.get_aicore_stream.restype = c_void_p
+
         # device_malloc - allocate device memory
         self.lib.device_malloc.argtypes = [c_size_t]
         self.lib.device_malloc.restype = c_void_p
@@ -387,6 +391,20 @@ def set_device(device_id: int) -> None:
     rc = _lib.set_device(device_id)
     if rc != 0:
         raise RuntimeError(f"set_device failed: {rc}")
+
+
+def get_aicore_stream() -> int:
+    """
+    Get current AICore stream handle from DeviceRunner.
+
+    Returns:
+        Stream handle as integer, or 0 when unavailable.
+    """
+    global _lib
+    if _lib is None:
+        raise RuntimeError("Runtime not loaded. Call bind_host_binary() first.")
+    ptr = _lib.get_aicore_stream()
+    return int(ptr) if ptr else 0
 
 
 def device_malloc(size: int) -> Optional[int]:

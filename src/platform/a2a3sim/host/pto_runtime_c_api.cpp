@@ -217,6 +217,10 @@ int set_device(int device_id) {
     return 0;
 }
 
+void* get_aicore_stream(void) {
+    return NULL;
+}
+
 int enable_runtime_profiling(RuntimeHandle runtime, int enabled) {
     if (runtime == NULL) {
         return -1;

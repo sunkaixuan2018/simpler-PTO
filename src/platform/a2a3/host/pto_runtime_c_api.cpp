@@ -215,6 +215,15 @@ int set_device(int device_id) {
     }
 }
 
+void* get_aicore_stream(void) {
+    try {
+        DeviceRunner& runner = DeviceRunner::get();
+        return reinterpret_cast<void*>(runner.get_aicore_stream());
+    } catch (...) {
+        return nullptr;
+    }
+}
+
 /* Note: register_kernel() has been internalized into init_runtime().
  * Kernel binaries are now passed directly to init_runtime() which handles
  * registration and stores addresses in Runtime's func_id_to_addr_[] array.
