@@ -33,6 +33,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using Global = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
 
     using TileData = pto::Tile<pto::TileType::Vec, float, 1, GATHER_COUNT, pto::BLayout::RowMajor, -1, -1>;
+    int my_rank = static_cast<int>(hcclCtx->rankId);
 
     ShapeDyn srcShape(1, 1, 1, 1, GATHER_COUNT);
     StrideDyn srcStride(GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, 1);
@@ -53,6 +54,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     TileData ubTile(1, GATHER_COUNT);
     TASSIGN(ubTile, 0x0);
 
-    // Collective op: all ranks should participate; root is encoded in ParallelGroup.
-    pto::comm::TGATHER(pg, dstG, ubTile);
+    // For current PTO/HCCL integration, run gather on root side.
+    if (my_rank == root) {
+        pto::comm::TGATHER(pg, dstG, ubTile);
+    }
 }
