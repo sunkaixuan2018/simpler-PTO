@@ -871,17 +871,17 @@ class CodeRunner:
                 mismatches = (~close_mask).sum().item()
                 total = actual.numel()
 
-                # 额外把实际值和 golden 写到本地 .npy 文件，方便离线对比
-                try:
-                    debug_dir = self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    rank_id = getattr(self, "rank_id", None)
-                    suffix = f"_rank{rank_id}" if rank_id is not None else ""
-                    np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
-                    np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
-                    logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
-                except Exception as e:
-                    logger.warning(f"Failed to save debug tensors for {name}: {e}")
+                if os.environ.get("PTO_DUMP_MISMATCH") == "1":
+                    try:
+                        debug_dir = self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        rank_id = getattr(self, "rank_id", None)
+                        suffix = f"_rank{rank_id}" if rank_id is not None else ""
+                        np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
+                        np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
+                        logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save debug tensors for {name}: {e}")
 
                 logger.warning(
                     "Output '%s' does not match golden (mismatched %d/%d, rtol=%g, atol=%g) "
@@ -961,16 +961,17 @@ def run_on_device_comm(
     """
     from hccl_bindings import hccl_init_comm
 
-    comm, device_ctx_ptr, win_base, stream = hccl_init_comm(
+    comm, device_ctx_ptr, win_in_base, win_out_base, actual_rank_id, stream = hccl_init_comm(
         rank_id, n_ranks, n_devices, first_device_id, root_info
     )
 
     comm_context = {
         "device_ctx_ptr": device_ctx_ptr,
-        "win_base": win_base,
+        "win_in_base": win_in_base,
+        "win_out_base": win_out_base,
         "n_ranks": n_ranks,
         "root": root,
-        "rank_id": rank_id,
+        "rank_id": actual_rank_id,
         "comm": comm,
         "stream": stream,
     }

@@ -25,5 +25,8 @@ examples/scripts/_deps/
 # Profiling files
 outputs
 
+# cpt_and_comm debug artifacts
+examples/host_build_graph/cpt_and_comm/debug/
+
 # Mid-work documentation
 .docs

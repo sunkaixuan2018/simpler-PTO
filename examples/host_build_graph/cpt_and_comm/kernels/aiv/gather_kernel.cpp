@@ -58,4 +58,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     if (my_rank == root) {
         pto::comm::TGATHER(pg, dstG, ubTile);
     }
+
+    pipe_barrier(PIPE_ALL);
 }

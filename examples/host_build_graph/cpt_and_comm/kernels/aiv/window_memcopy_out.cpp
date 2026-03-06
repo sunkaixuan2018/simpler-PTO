@@ -22,4 +22,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     for (int i = 0; i < count; ++i) {
         dev_dst[i] = win_src[i];
     }
+
+    pipe_barrier(PIPE_ALL);
 }

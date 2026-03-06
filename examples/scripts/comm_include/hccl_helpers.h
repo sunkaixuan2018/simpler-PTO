@@ -18,12 +18,13 @@
 #define __gm__
 #endif
 
-// Convert local window pointer to remote rank's equivalent address
+// Convert local window pointer to remote rank's equivalent address via windowsIn
 template <typename T>
 AICORE inline __gm__ T* HcclRemotePtr(__gm__ HcclDeviceContext* ctx, __gm__ T* localPtr, int pe) {
-    uint64_t localBase = ctx->windowsIn[ctx->rankId];
-    uint64_t offset = (uint64_t)localPtr - localBase;
-    return (__gm__ T*)(ctx->windowsIn[pe] + offset);
+    uint64_t localWinIn = ctx->windowsIn[ctx->rankId];
+    uint64_t peerWinIn  = ctx->windowsIn[pe];
+    uint64_t offset = (uint64_t)localPtr - localWinIn;
+    return (__gm__ T*)(peerWinIn + offset);
 }
 
 // Allocate from window at (windowBase + offset), advance offset

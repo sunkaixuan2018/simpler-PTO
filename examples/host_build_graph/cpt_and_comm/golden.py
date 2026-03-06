@@ -43,10 +43,13 @@ def generate_inputs(params: dict) -> list:
         ("size_out", ctypes.c_int64(out.nbytes)),
     ]
 
-    if "device_ctx_ptr" in params and "win_base" in params:
+    if "device_ctx_ptr" in params and "win_in_base" in params:
+        win_in = params["win_in_base"]
+        win_out = params.get("win_out_base", win_in)
         result.extend([
             ("device_ctx_ptr", ctypes.c_uint64(params["device_ctx_ptr"])),
-            ("win_base", ctypes.c_uint64(params["win_base"])),
+            ("win_in_base", ctypes.c_uint64(win_in)),
+            ("win_out_base", ctypes.c_uint64(win_out)),
             ("n_ranks", ctypes.c_int32(n_ranks)),
             ("root", ctypes.c_int32(root)),
             ("rank_id", ctypes.c_int32(rank_id)),
@@ -71,10 +74,9 @@ def compute_golden(tensors: dict, params: dict) -> None:
 
     # Gather: root collects first GATHER_COUNT from each rank
     if rank_id == root:
-        # out is torch.Tensor (CodeRunner converts); use numpy view for assignment
-        out_np = out.cpu().numpy()
+        # Use numpy view so slice-assignment writes back into the underlying storage
+        out_np = out.numpy() if isinstance(out, np.ndarray) else out.cpu().numpy()
         for r in range(n_ranks):
-            # Simulate rank r's GEMM output (we only have our own, so for golden we compute all)
             np.random.seed(42 + r)
             ar = np.random.randn(TILE, TILE).astype(np.float32) * 0.1
             br = np.random.randn(TILE, TILE).astype(np.float32) * 0.1

@@ -56,9 +56,14 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
             write_reg(RegId::COND, MAKE_ACK_VALUE(actual_task_id));
 
             __gm__ Task* task_ptr = &(runtime->tasks[actual_task_id]);
+            dcci(task_ptr, ENTIRE_DATA_CACHE);
+
             uint64_t start_time = get_sys_cnt_aicore();
 
             execute_task(task_ptr);
+
+            dcci(task_ptr, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+            pipe_barrier(PIPE_ALL);
 
             if (profiling_enabled) {
                 uint64_t end_time = get_sys_cnt_aicore();

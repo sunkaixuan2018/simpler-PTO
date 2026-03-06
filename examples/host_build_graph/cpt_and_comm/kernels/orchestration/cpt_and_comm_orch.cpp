@@ -2,7 +2,12 @@
  * cpt_and_comm orchestration: GEMM -> WindowMemCopyIn -> TGATHER -> WindowMemCopyOut (root only).
  *
  * Args: host_A, host_B, host_C, host_out, size_A, size_B, size_C, size_out,
- *       device_ctx_ptr, win_base, n_ranks, root, rank_id
+ *       device_ctx_ptr, win_in_base, win_out_base, n_ranks, root, rank_id
+ *
+ * Window layout (per rank, relative to win_in_base):
+ *   [0 .. HCCL_WIN_SYNC_PREFIX)                 : HCCL sync metadata
+ *   [SYNC .. SYNC + GATHER_COUNT*4)             : win_src  (local GEMM slice, RDMA-readable)
+ *   [SYNC + GATHER_COUNT*4 .. SYNC + (1+n_ranks)*GATHER_COUNT*4) : win_dst (gather result, root only)
  */
 
 #include "runtime.h"
@@ -16,8 +21,8 @@ constexpr int GATHER_COUNT = 64;
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 
 int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
-    if (arg_count < 13) {
-        std::cerr << "build_cpt_and_comm_graph: Expected at least 13 args, got " << arg_count << '\n';
+    if (arg_count < 14) {
+        std::cerr << "build_cpt_and_comm_graph: Expected at least 14 args, got " << arg_count << '\n';
         return -1;
     }
 
@@ -30,13 +35,16 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     size_t size_C = static_cast<size_t>(args[6]);
     size_t size_out = static_cast<size_t>(args[7]);
     uint64_t device_ctx_ptr = args[8];
-    uint64_t win_base = args[9];
-    int n_ranks = static_cast<int>(args[10]);
-    int root = static_cast<int>(args[11]);
-    int rank_id = static_cast<int>(args[12]);
+    uint64_t win_in_base = args[9];
+    uint64_t win_out_base = args[10];
+    int n_ranks = static_cast<int>(args[11]);
+    int root = static_cast<int>(args[12]);
+    int rank_id = static_cast<int>(args[13]);
 
     std::cout << "\n=== build_cpt_and_comm_graph ===" << '\n';
     std::cout << "  n_ranks=" << n_ranks << " root=" << root << '\n';
+    std::cout << "  win_in_base=0x" << std::hex << win_in_base
+              << " win_out_base=0x" << win_out_base << std::dec << '\n';
 
     // Allocate device memory
     void* dev_A = runtime->host_api.device_malloc(size_A);
@@ -70,9 +78,9 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
         runtime->record_tensor_pair(host_out, dev_out, size_out);
     }
 
-    // Window layout: sync_prefix, src (GATHER_COUNT*4), dst (n_ranks*GATHER_COUNT*4)
-    uint64_t win_src = win_base + HCCL_WIN_SYNC_PREFIX;
-    uint64_t win_dst = win_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * sizeof(float);
+    // Both win_src and win_dst are based on win_in_base (RDMA-visible region)
+    uint64_t win_src = win_in_base + HCCL_WIN_SYNC_PREFIX;
+    uint64_t win_dst = win_in_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * sizeof(float);
 
     // Task 0: GEMM C = A @ B
     uint64_t args_gemm[3];
