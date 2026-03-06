@@ -110,6 +110,8 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, in
             // Execute the task
             execute_task(reinterpret_cast<__gm__ void*>(payload));
 
+            dcci(my_payload, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+
             // Performance profiling: record task execution
             if (profiling_enabled) {
                 uint64_t end_time = get_sys_cnt_aicore();
