@@ -879,25 +879,15 @@ class CodeRunner:
                     self.atol,
                 )
 
-                dump_enabled = os.environ.get("PTO_DUMP_MISMATCH", "").strip().lower() in ("1", "true", "yes")
-                if dump_enabled:
-                    try:
-                        debug_dir = (
-                            self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
-                        )
-                        debug_dir.mkdir(parents=True, exist_ok=True)
-                        rank_id = getattr(self, "rank_id", None)
-                        suffix = f"_rank{rank_id}" if rank_id is not None else ""
-                        np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
-                        np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
-                        logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
-                    except Exception as e:
-                        logger.warning(f"Failed to save debug tensors for {name}: {e}")
-
-                raise AssertionError(
-                    f"Output '{name}' mismatch: {mismatches}/{total} elements "
-                    f"(rtol={self.rtol}, atol={self.atol})"
-                )
+                flat_a = actual.flatten().tolist()
+                flat_e = expected.flatten().tolist()
+                chunk = 64
+                logger.warning("--- actual (%s) ---", name)
+                for i in range(0, len(flat_a), chunk):
+                    logger.warning("  [%4d:%4d] %s", i, min(i + chunk, len(flat_a)), flat_a[i:i + chunk])
+                logger.warning("--- expected (%s) ---", name)
+                for i in range(0, len(flat_e), chunk):
+                    logger.warning("  [%4d:%4d] %s", i, min(i + chunk, len(flat_e)), flat_e[i:i + chunk])
             else:
                 matched = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol).sum().item()
                 logger.info(f"  {name}: PASS ({matched}/{actual.numel()} elements matched)")
