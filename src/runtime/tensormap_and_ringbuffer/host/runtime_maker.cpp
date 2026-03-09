@@ -61,6 +61,25 @@ static uint64_t parse_env_uint64(const char* name, uint64_t min_val, bool requir
     return static_cast<uint64_t>(val);
 }
 
+static int _parse_aicpu_affinity_mode() {
+    // Default: disabled.
+    // Expected values:
+    //   "0" / "off"
+    //   "3510" / "dav_3510"
+    //   "2201" / "dav_2201"
+    const char* env = std::getenv("PTO2_AICPU_AFFINITY_MODE");
+    if (!env || env[0] == '\0') return 0;
+
+    // Normalize a few common spellings.
+    if (strcmp(env, "0") == 0 || strcmp(env, "off") == 0 || strcmp(env, "OFF") == 0) return 0;
+    if (strcmp(env, "3510") == 0 || strcmp(env, "dav_3510") == 0 || strcmp(env, "DAV_3510") == 0) return 3510;
+    if (strcmp(env, "2201") == 0 || strcmp(env, "dav_2201") == 0 || strcmp(env, "DAV_2201") == 0) return 2201;
+
+    // Unknown -> disable (do not fail runtime init).
+    LOG_WARN("PTO2_AICPU_AFFINITY_MODE=%s unsupported, affinity disabled", env);
+    return 0;
+}
+
 /**
  * Initialize a pre-allocated runtime for device orchestration.
  *
@@ -102,6 +121,8 @@ extern "C" int init_runtime_impl(Runtime *runtime,
         LOG_ERROR("Runtime pointer is null");
         return -1;
     }
+
+    runtime->aicpu_affinity_mode = _parse_aicpu_affinity_mode();
 
     // Register kernel binaries via platform-provided upload function
     if (kernel_count > 0 && kernel_func_ids != nullptr &&

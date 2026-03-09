@@ -43,3 +43,15 @@ RUNTIME_CONFIG = {
     "aicpu_thread_num": 4,
     "block_dim": 24,
 }
+
+# Optional: set AICPU affinity mode for scheduling threads.
+# Values:
+#   "3510" / "dav_3510" -> DAV_3510 die-split strategy
+#   "2201" / "dav_2201" -> DAV_2201 4-CPU cluster packing strategy
+#   "0" / "off"         -> disabled (default)
+#
+# Note: this env is applied during runtime.initialize() and will be read by
+# tensormap_and_ringbuffer host runtime maker to configure device-side binding.
+RUNTIME_ENV = {
+    "PTO2_AICPU_AFFINITY_MODE": "off",
+}

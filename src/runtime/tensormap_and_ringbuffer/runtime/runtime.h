@@ -142,6 +142,11 @@ public:
     // Execution parameters for AICPU scheduling
     int sche_cpu_num;  // Number of AICPU threads for scheduling
     int ready_queue_shards;  // Number of ready queue shards (1..MAX_AICPU_THREADS, default MAX-1)
+    // AICPU affinity mode:
+    //   0    = disabled
+    //   3510 = DAV_3510 strategy (split scheduler threads by die)
+    //   2201 = DAV_2201 strategy (pack scheduler threads into one 4-CPU cluster)
+    int aicpu_affinity_mode;
 
     // Ring buffer size overrides (0 = use compile-time defaults)
     uint64_t pto2_task_window_size;

@@ -5,6 +5,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <mutex>
+#include <pthread.h>
+#include <sched.h>
 #include <string>
 #include <thread>
 
@@ -92,6 +94,11 @@ struct AicpuExecutor {
     std::atomic<bool> init_failed_{false};
     std::atomic<bool> finished_{false};
 
+    // ===== AICPU affinity state (optional) =====
+    // Used by DAV_2201 strategy to pick a cluster based on initial placement.
+    std::atomic<uint64_t> affinity_cpumask_{0};
+    std::atomic<int> affinity_cluster_cpuoff_{-1};
+
     int thread_num_{0};
     int cores_total_num_{0};
     int thread_cores_num_{0};  // Cores per scheduler thread (0 for orchestrator when thread_num_==4)
@@ -162,6 +169,8 @@ struct AicpuExecutor {
     void deinit();
     void diagnose_stuck_state(Runtime* runtime, int thread_idx, const int* cur_thread_cores,
                               int core_num, Handshake* hank);
+
+    void apply_aicpu_affinity(Runtime* runtime, int thread_idx);
 
 private:
     // Helper: enqueue a ready task to the appropriate shard with profiling
@@ -1094,6 +1103,8 @@ int AicpuExecutor::run(Runtime* runtime) {
 
     DEV_INFO("Thread %d: Start", thread_idx);
 
+    apply_aicpu_affinity(runtime, thread_idx);
+
     const int* cur_thread_cores = core_assignments_[thread_idx];
     int my_cores = core_count_per_thread_[thread_idx];
 
@@ -1376,6 +1387,78 @@ int AicpuExecutor::run(Runtime* runtime) {
     return 0;
 }
 
+static inline int _popcount_u64(uint64_t v) {
+    return __builtin_popcountll(static_cast<unsigned long long>(v));
+}
+
+void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
+    if (runtime == nullptr) return;
+    const int mode = runtime->aicpu_affinity_mode;
+    if (mode != 3510 && mode != 2201) return;
+
+    // Only scheduler threads should be bound. In 4-thread mode, thread 3 is the orchestrator.
+    const int scheduler_thread_num = (thread_num_ == 4) ? 3 : thread_num_;
+
+    const int cpu = sched_getcpu();
+    if (cpu >= 0 && cpu < 63) {
+        affinity_cpumask_.fetch_or(1ULL << cpu, std::memory_order_release);
+    }
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+
+    if (mode == 3510) {
+        if (thread_idx >= scheduler_thread_num) return;
+        const long ncpu = sysconf(_SC_NPROCESSORS_CONF);
+        const int max_cpu_id = (ncpu > 0) ? static_cast<int>(ncpu - 1) : 0;
+        const int die0_max_cpuid = (max_cpu_id >> 1);
+        const int die0_sched_num = (scheduler_thread_num >> 1);
+
+        const bool is_die0 = (thread_idx < die0_sched_num);
+        if (is_die0) {
+            for (int c = 0; c <= die0_max_cpuid; ++c) CPU_SET(c, &cpuset);
+        } else {
+            for (int c = die0_max_cpuid + 1; c <= max_cpu_id; ++c) CPU_SET(c, &cpuset);
+        }
+        (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        return;
+    }
+
+    // DAV_2201: pack scheduler threads into one 4-CPU cluster.
+    // Wait for all AICPU threads to register their initial CPU.
+    while (_popcount_u64(affinity_cpumask_.load(std::memory_order_acquire)) != thread_num_) {
+        std::this_thread::yield();
+    }
+
+    int cpuoff = affinity_cluster_cpuoff_.load(std::memory_order_acquire);
+    if (cpuoff < 0) {
+        const uint64_t maskval = affinity_cpumask_.load(std::memory_order_relaxed);
+        int chosen = -1;
+        int off = 0;
+        for (int idx = 0; idx < static_cast<int>(sizeof(uint64_t)); ++idx) {
+            const int mask4 = static_cast<int>((maskval >> off) & 0xFULL);
+            if (__builtin_popcount(static_cast<unsigned>(mask4)) >= scheduler_thread_num) {
+                chosen = off;
+                break;
+            }
+            off += 4;
+        }
+        if (chosen >= 0) {
+            affinity_cluster_cpuoff_.store(chosen, std::memory_order_release);
+            cpuoff = chosen;
+        } else {
+            // Fallback: do not bind.
+            affinity_cluster_cpuoff_.store(-2, std::memory_order_release);
+            return;
+        }
+    }
+    if (cpuoff == -2) return;
+    if (thread_idx >= scheduler_thread_num) return;
+
+    for (int c = cpuoff; c < cpuoff + 4; ++c) CPU_SET(c, &cpuset);
+    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+}
+
 void AicpuExecutor::deinit() {
     // Cleanup runtime execution state (clear all max slots for safety)
     for (int s = 0; s < MAX_AICPU_THREADS; s++) {
@@ -1423,6 +1506,8 @@ void AicpuExecutor::deinit() {
     init_failed_.store(false, std::memory_order_release);
     thread_idx_.store(0, std::memory_order_release);
     finished_.store(false, std::memory_order_release);
+    affinity_cpumask_.store(0, std::memory_order_release);
+    affinity_cluster_cpuoff_.store(-1, std::memory_order_release);
 
     DEV_INFO("DeInit: AicpuExecutor reset complete");
 }
