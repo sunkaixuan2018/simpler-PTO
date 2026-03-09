@@ -27,3 +27,6 @@ outputs
 
 # Mid-work documentation
 .docs
+
+# Debug dumps (generated locally)
+examples/host_build_graph/cpt_and_comm/debug/

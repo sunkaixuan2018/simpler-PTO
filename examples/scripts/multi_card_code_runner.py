@@ -621,7 +621,7 @@ class CodeRunner:
         - If compiled_artifacts or prebuilt_dir: skip build, load and run (set_device → init → launch → finalize)
         - Else: build first, then run
 
-        When requires_comm, pass comm_context with device_ctx_ptr, win_base, n_ranks, root, rank_id
+        When requires_comm, pass comm_context with device_ctx_ptr, win_in_base, win_out_base, n_ranks, root, rank_id
         (and optionally comm, stream for HcclBarrier). Merged into params before generate_inputs.
         """
         from bindings import bind_host_binary, set_device, launch_runtime
@@ -866,31 +866,37 @@ class CodeRunner:
 
             # Use torch for comparison
             if not torch.allclose(actual, expected, rtol=self.rtol, atol=self.atol):
-                # Find mismatches for better error reporting
                 close_mask = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol)
                 mismatches = (~close_mask).sum().item()
                 total = actual.numel()
 
-                # 额外把实际值和 golden 写到本地 .npy 文件，方便离线对比
-                try:
-                    debug_dir = self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
-                    debug_dir.mkdir(parents=True, exist_ok=True)
-                    rank_id = getattr(self, "rank_id", None)
-                    suffix = f"_rank{rank_id}" if rank_id is not None else ""
-                    np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
-                    np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
-                    logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
-                except Exception as e:
-                    logger.warning(f"Failed to save debug tensors for {name}: {e}")
-
                 logger.warning(
-                    "Output '%s' does not match golden (mismatched %d/%d, rtol=%g, atol=%g) "
-                    "- logging only, NOT failing case for now",
+                    "Output '%s' does not match golden (mismatched %d/%d, rtol=%g, atol=%g)",
                     name,
                     mismatches,
                     total,
                     self.rtol,
                     self.atol,
+                )
+
+                dump_enabled = os.environ.get("PTO_DUMP_MISMATCH", "").strip().lower() in ("1", "true", "yes")
+                if dump_enabled:
+                    try:
+                        debug_dir = (
+                            self.project_root / "examples" / "host_build_graph" / "cpt_and_comm" / "debug"
+                        )
+                        debug_dir.mkdir(parents=True, exist_ok=True)
+                        rank_id = getattr(self, "rank_id", None)
+                        suffix = f"_rank{rank_id}" if rank_id is not None else ""
+                        np.save(debug_dir / f"{name}_actual{suffix}.npy", actual.numpy())
+                        np.save(debug_dir / f"{name}_golden{suffix}.npy", expected.numpy())
+                        logger.info(f"Saved mismatch tensors for {name} to {debug_dir}")
+                    except Exception as e:
+                        logger.warning(f"Failed to save debug tensors for {name}: {e}")
+
+                raise AssertionError(
+                    f"Output '{name}' mismatch: {mismatches}/{total} elements "
+                    f"(rtol={self.rtol}, atol={self.atol})"
                 )
             else:
                 matched = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol).sum().item()
@@ -961,16 +967,18 @@ def run_on_device_comm(
     """
     from hccl_bindings import hccl_init_comm
 
-    comm, device_ctx_ptr, win_base, stream = hccl_init_comm(
+    comm, device_ctx_ptr, win_in_base, win_out_base, stream, actual_rank_id = hccl_init_comm(
         rank_id, n_ranks, n_devices, first_device_id, root_info
     )
 
     comm_context = {
         "device_ctx_ptr": device_ctx_ptr,
-        "win_base": win_base,
+        "win_in_base": win_in_base,
+        "win_out_base": win_out_base,
         "n_ranks": n_ranks,
         "root": root,
-        "rank_id": rank_id,
+        # Keep graph/golden rank selection aligned with HCCL runtime rank.
+        "rank_id": actual_rank_id,
         "comm": comm,
         "stream": stream,
     }

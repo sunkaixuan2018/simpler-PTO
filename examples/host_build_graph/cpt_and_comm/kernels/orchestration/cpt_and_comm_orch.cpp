@@ -2,7 +2,7 @@
  * cpt_and_comm orchestration: GEMM -> WindowMemCopyIn -> TGATHER -> WindowMemCopyOut (root only).
  *
  * Args: host_A, host_B, host_C, host_out, size_A, size_B, size_C, size_out,
- *       device_ctx_ptr, win_base, n_ranks, root, rank_id
+ *       device_ctx_ptr, win_in_base, win_out_base, n_ranks, root, rank_id
  */
 
 #include "runtime.h"
@@ -16,8 +16,8 @@ constexpr int GATHER_COUNT = 64;
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 
 int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
-    if (arg_count < 13) {
-        std::cerr << "build_cpt_and_comm_graph: Expected at least 13 args, got " << arg_count << '\n';
+    if (arg_count < 14) {
+        std::cerr << "build_cpt_and_comm_graph: Expected at least 14 args, got " << arg_count << '\n';
         return -1;
     }
 
@@ -30,10 +30,11 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
     size_t size_C = static_cast<size_t>(args[6]);
     size_t size_out = static_cast<size_t>(args[7]);
     uint64_t device_ctx_ptr = args[8];
-    uint64_t win_base = args[9];
-    int n_ranks = static_cast<int>(args[10]);
-    int root = static_cast<int>(args[11]);
-    int rank_id = static_cast<int>(args[12]);
+    uint64_t win_in_base = args[9];
+    uint64_t win_out_base = args[10];
+    int n_ranks = static_cast<int>(args[11]);
+    int root = static_cast<int>(args[12]);
+    int rank_id = static_cast<int>(args[13]);
 
     std::cout << "\n=== build_cpt_and_comm_graph ===" << '\n';
     std::cout << "  n_ranks=" << n_ranks << " root=" << root << '\n';
@@ -70,9 +71,14 @@ int build_cpt_and_comm_graph(Runtime* runtime, uint64_t* args, int arg_count) {
         runtime->record_tensor_pair(host_out, dev_out, size_out);
     }
 
-    // Window layout: sync_prefix, src (GATHER_COUNT*4), dst (n_ranks*GATHER_COUNT*4)
-    uint64_t win_src = win_base + HCCL_WIN_SYNC_PREFIX;
-    uint64_t win_dst = win_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * sizeof(float);
+    // Window layout (matches pto-comm-isa TGATHER test pattern):
+    // Both src and dst live in the IN window so TGATHER DMA works for all
+    // ranks including root self-slice.
+    //   [0, SYNC_PREFIX) : sync prefix
+    //   [SYNC_PREFIX, SYNC_PREFIX + GATHER_COUNT*4) : src (per-rank GEMM slice)
+    //   [SYNC_PREFIX + GATHER_COUNT*4, ...) : dst (gathered result, root only)
+    uint64_t win_src = win_in_base + HCCL_WIN_SYNC_PREFIX;
+    uint64_t win_dst = win_in_base + HCCL_WIN_SYNC_PREFIX + GATHER_COUNT * sizeof(float);
 
     // Task 0: GEMM C = A @ B
     uint64_t args_gemm[3];

@@ -261,7 +261,8 @@ int hccl_helper_get_root_info(int device_id, void* out_buf, unsigned buf_size) {
     return (ret == HCCL_SUCCESS) ? 0 : -ret;
 }
 
-// All ranks: init comm. Fills out_comm, out_ctx_ptr, out_win_base, out_stream. Returns 0 on success.
+// All ranks: init comm. Fills out_comm, out_ctx_ptr, out_win_in_base, out_win_out_base, out_stream.
+// Returns 0 on success.
 // root_info from rank 0 (hccl_helper_get_root_info). No MPI — Python uses Barrier.
 int hccl_helper_init_comm(
     int rank_id,
@@ -272,10 +273,15 @@ int hccl_helper_init_comm(
     unsigned root_info_len,
     void** out_comm,
     void** out_ctx_ptr,
-    uint64_t* out_win_base,
-    void** out_stream
+    uint64_t* out_win_in_base,
+    uint64_t* out_win_out_base,
+    void** out_stream,
+    int* out_actual_rank_id
 ) {
-    if (out_comm == nullptr || out_ctx_ptr == nullptr || out_win_base == nullptr || out_stream == nullptr ||
+    if (out_comm == nullptr || out_ctx_ptr == nullptr ||
+        out_win_in_base == nullptr || out_win_out_base == nullptr ||
+        out_stream == nullptr ||
+        out_actual_rank_id == nullptr ||
         root_info == nullptr || root_info_len < HCCL_HELPER_ROOT_INFO_BYTES)
         return -EINVAL;
 
@@ -413,6 +419,7 @@ int hccl_helper_init_comm(
         for (uint32_t i = 0; i < head.rankSize; ++i) {
             if (i == head.localUsrRankId) {
                 hostCtx.windowsIn[i] = head.localWindowsIn;
+                hostCtx.windowsOut[i] = head.localWindowsOut;
                 continue;
             }
 
@@ -433,6 +440,7 @@ int hccl_helper_init_comm(
             }
 
             hostCtx.windowsIn[i] = remoteInfo.windowsIn;
+            hostCtx.windowsOut[i] = remoteInfo.windowsOut;
         }
 
         // 4. Allocate new device memory and copy our correctly-built HcclDeviceContext.
@@ -458,9 +466,12 @@ int hccl_helper_init_comm(
 
     *out_comm = comm;
     *out_ctx_ptr = deviceCtxPtr;
-    // 使用 HcclDeviceContext 自带的 rankId 作为本地窗口索引，避免 Python 侧 rank_id 与 HCCL 内部 localUsrRankId 不一致
-    *out_win_base = hostCtx.windowsIn[hostCtx.rankId];
+    *out_win_in_base = hostCtx.windowsIn[hostCtx.rankId];
+    *out_win_out_base = (hostCtx.windowsOut[hostCtx.rankId] != 0)
+                            ? hostCtx.windowsOut[hostCtx.rankId]
+                            : hostCtx.windowsIn[hostCtx.rankId];
     *out_stream = stream;
+    *out_actual_rank_id = static_cast<int>(hostCtx.rankId);
     return 0;
 }
 

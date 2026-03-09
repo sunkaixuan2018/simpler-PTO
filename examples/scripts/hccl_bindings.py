@@ -78,7 +78,7 @@ def _load_helper():
     _lib_helper.hccl_helper_init_comm.argtypes = [
         c_int, c_int, c_int, c_int,  # rank_id, n_ranks, n_devices, first_device_id
         c_void_p, c_uint32,           # root_info, root_info_len
-        POINTER(c_void_p), POINTER(c_void_p), POINTER(c_uint64), POINTER(c_void_p),
+        POINTER(c_void_p), POINTER(c_void_p), POINTER(c_uint64), POINTER(c_uint64), POINTER(c_void_p), POINTER(c_int),
     ]
     _lib_helper.hccl_helper_init_comm.restype = c_int
 
@@ -107,12 +107,12 @@ def hccl_init_comm(
     n_devices: int,
     first_device_id: int,
     root_info: bytes,
-) -> Tuple[int, int, int, int]:
+) -> Tuple[int, int, int, int, int, int]:
     """
     All ranks: init HCCL comm (same link as pto-comm-isa).
 
     Returns:
-        (comm, device_ctx_ptr, win_base, stream) as integers (void* as int).
+        (comm, device_ctx_ptr, win_in_base, win_out_base, stream, actual_rank_id) as integers.
     """
     _load_helper()
     if len(root_info) < HCCL_ROOT_INFO_BYTES:
@@ -120,8 +120,10 @@ def hccl_init_comm(
 
     comm = c_void_p()
     ctx_ptr = c_void_p()
-    win_base = c_uint64()
+    win_in_base = c_uint64()
+    win_out_base = c_uint64()
     stream = c_void_p()
+    actual_rank_id = c_int(-1)
 
     buf = create_string_buffer(len(root_info))
     # copy bytes into mutable buffer
@@ -136,8 +138,10 @@ def hccl_init_comm(
         len(root_info),
         ctypes.byref(comm),
         ctypes.byref(ctx_ptr),
-        ctypes.byref(win_base),
+        ctypes.byref(win_in_base),
+        ctypes.byref(win_out_base),
         ctypes.byref(stream),
+        ctypes.byref(actual_rank_id),
     )
     if ret != 0:
         raise RuntimeError(f"hccl_helper_init_comm failed: {ret}")
@@ -145,8 +149,10 @@ def hccl_init_comm(
     return (
         comm.value or 0,
         ctx_ptr.value or 0,
-        win_base.value,
+        win_in_base.value,
+        win_out_base.value,
         stream.value or 0,
+        actual_rank_id.value,
     )
 
 

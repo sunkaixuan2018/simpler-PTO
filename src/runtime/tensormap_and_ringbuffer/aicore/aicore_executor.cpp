@@ -30,8 +30,11 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ void* 
     UnifiedKernelFunc kernel = (UnifiedKernelFunc)payload->function_bin_addr;
     kernel(reinterpret_cast<__gm__ int64_t*>(payload->args));
 
-    // Ensure all memory writes are visible to other cores
     pipe_barrier(PIPE_ALL);
+
+    // Flush (clean + invalidate) data cache to GM so successor tasks' MTE2 DMA
+    // reads see scalar writes from this kernel.
+    dcci(task_ptr, ENTIRE_DATA_CACHE, CACHELINE_OUT);
 }
 
 /**

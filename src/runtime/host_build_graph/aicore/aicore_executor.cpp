@@ -10,11 +10,22 @@ __aicore__ __attribute__((always_inline)) static void execute_task(__gm__ Task* 
     if (task->function_bin_addr == 0) {
         return;
     }
+
+    // Invalidate data cache so kernel scalar reads fetch fresh data from GM,
+    // not stale cache lines left by a previous task on this core.
+    dcci(task, ENTIRE_DATA_CACHE);
+
     KernelFunc kernel = (KernelFunc)task->function_bin_addr;
     kernel(reinterpret_cast<__gm__ int64_t*>(task->args));
 
-    // Ensure all memory writes are visible to other cores
+    // Drain all pipelines (MTE2/MTE3/Vector/Cube)
     pipe_barrier(PIPE_ALL);
+
+    // Flush (clean + invalidate) the entire data cache to GM.
+    // Without this, scalar writes stay in this core's cache and are invisible
+    // to MTE2 DMA reads issued by successor tasks on any core.
+    // This is the task-level equivalent of aclrtSynchronizeStream.
+    dcci(task, ENTIRE_DATA_CACHE, CACHELINE_OUT);
 }
 
 __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime* runtime, int block_idx, CoreType core_type) {

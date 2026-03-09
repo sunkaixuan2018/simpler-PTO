@@ -20,7 +20,7 @@ ATOL = 1e-4
 
 
 def generate_inputs(params: dict) -> list:
-    """Return flat argument list. For requires_comm, params includes device_ctx_ptr, win_base, n_ranks, root, rank_id."""
+    """Return flat argument list. For requires_comm, params includes device_ctx_ptr, win_in_base, win_out_base, n_ranks, root, rank_id."""
     rank_id = params.get("rank_id", 0)
     n_ranks = params.get("n_ranks", 2)
     root = params.get("root", 0)
@@ -43,10 +43,11 @@ def generate_inputs(params: dict) -> list:
         ("size_out", ctypes.c_int64(out.nbytes)),
     ]
 
-    if "device_ctx_ptr" in params and "win_base" in params:
+    if "device_ctx_ptr" in params and "win_in_base" in params and "win_out_base" in params:
         result.extend([
             ("device_ctx_ptr", ctypes.c_uint64(params["device_ctx_ptr"])),
-            ("win_base", ctypes.c_uint64(params["win_base"])),
+            ("win_in_base", ctypes.c_uint64(params["win_in_base"])),
+            ("win_out_base", ctypes.c_uint64(params["win_out_base"])),
             ("n_ranks", ctypes.c_int32(n_ranks)),
             ("root", ctypes.c_int32(root)),
             ("rank_id", ctypes.c_int32(rank_id)),

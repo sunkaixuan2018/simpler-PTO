@@ -21,9 +21,11 @@
 // Convert local window pointer to remote rank's equivalent address
 template <typename T>
 AICORE inline __gm__ T* HcclRemotePtr(__gm__ HcclDeviceContext* ctx, __gm__ T* localPtr, int pe) {
+    // TGATHER source tensors are laid out in windowsIn.
     uint64_t localBase = ctx->windowsIn[ctx->rankId];
+    uint64_t peerBase = ctx->windowsIn[pe];
     uint64_t offset = (uint64_t)localPtr - localBase;
-    return (__gm__ T*)(ctx->windowsIn[pe] + offset);
+    return (__gm__ T*)(peerBase + offset);
 }
 
 // Allocate from window at (windowBase + offset), advance offset
