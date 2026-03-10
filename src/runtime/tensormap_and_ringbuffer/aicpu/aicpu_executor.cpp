@@ -99,6 +99,17 @@ struct AicpuExecutor {
     std::atomic<uint64_t> affinity_cpumask_{0};
     std::atomic<int> affinity_cluster_cpuoff_{-1};
 
+    // ===== Thread role state (orchestrator / scheduler / dropped) =====
+    enum class ThreadRole {
+        DROP = 0,
+        SCHED = 1,
+        ORCH = 2,
+    };
+    int thread_cpu_[MAX_AICPU_THREADS]{0};                // initial CPU for each thread
+    ThreadRole thread_role_[MAX_AICPU_THREADS]{ThreadRole::SCHED};
+    std::atomic<int> roles_ready_{0};                     // 0 = not ready, 1 = ready
+    std::atomic<int> roles_init_flag_{0};                 // CAS guard for role initialization
+
     int thread_num_{0};
     int cores_total_num_{0};
     int thread_cores_num_{0};  // Cores per scheduler thread (0 for orchestrator when thread_num_==4)
@@ -367,6 +378,16 @@ int AicpuExecutor::init(Runtime* runtime) {
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
+
+    // Initialize per-thread CPU and role state
+    for (int i = 0; i < MAX_AICPU_THREADS; ++i) {
+        thread_cpu_[i] = -1;
+        thread_role_[i] = ThreadRole::SCHED;
+    }
+    roles_ready_.store(0, std::memory_order_release);
+    roles_init_flag_.store(0, std::memory_order_release);
+    affinity_cpumask_.store(0, std::memory_order_release);
+    affinity_cluster_cpuoff_.store(-1, std::memory_order_release);
 
     // Use handshake mechanism to discover cores (aligned with host_build_graph)
     int rc = handshake_all_cores(runtime);
@@ -1105,11 +1126,18 @@ int AicpuExecutor::run(Runtime* runtime) {
 
     apply_aicpu_affinity(runtime, thread_idx);
 
+    ThreadRole role = thread_role_[thread_idx];
+
     const int* cur_thread_cores = core_assignments_[thread_idx];
     int my_cores = core_count_per_thread_[thread_idx];
 
+    if (role == ThreadRole::DROP) {
+        DEV_INFO("Thread %d: role=DROP, exiting early", thread_idx);
+        goto RUN_TAIL;
+    }
+
     // Thread 3 when 4 AICPU threads: orchestrator (no cores)
-    if (thread_num_ == 4 && thread_idx == 3) {
+    if ((thread_num_ == 4 && thread_idx == 3) || role == ThreadRole::ORCH) {
         if (runtime->get_orch_built_on_host()) {
             DEV_INFO("Thread 3: Host orchestration mode, no-op");
         } else {
@@ -1377,6 +1405,7 @@ int AicpuExecutor::run(Runtime* runtime) {
         DEV_INFO("Thread %d: Completed", thread_idx);
     }
 
+RUN_TAIL:
     // Check if this is the last thread to finish
     int prev_finished = finished_count_.fetch_add(1, std::memory_order_acq_rel);
     if (prev_finished + 1 == thread_num_) {
@@ -1402,6 +1431,9 @@ void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
     const int cpu = sched_getcpu();
     if (cpu >= 0 && cpu < 63) {
         affinity_cpumask_.fetch_or(1ULL << cpu, std::memory_order_release);
+    }
+    if (cpu >= 0 && thread_idx >= 0 && thread_idx < MAX_AICPU_THREADS) {
+        thread_cpu_[thread_idx] = cpu;
     }
 
     DEV_INFO("AICPU affinity: thread_idx=%d mode=%d sched_num=%d cpu_before=%d",
@@ -1442,9 +1474,91 @@ void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
         return;
     }
 
-    // DAV_2201: pack scheduler threads into one 4-CPU cluster.
+    // DAV_2201: pack scheduler threads into one 4-CPU cluster and assign roles.
     // Wait for all AICPU threads to register their initial CPU.
     while (_popcount_u64(affinity_cpumask_.load(std::memory_order_acquire)) != thread_num_) {
+        std::this_thread::yield();
+    }
+
+    // Only one thread computes roles and cluster selection.
+    int expected = 0;
+    if (roles_init_flag_.compare_exchange_strong(expected, 1, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        struct ClusterInfo {
+            int count{0};
+            int tids[MAX_AICPU_THREADS];
+        };
+        constexpr int MAX_CLUSTERS = 16; // 16 * 4 = 64 CPUs
+        ClusterInfo clusters[MAX_CLUSTERS];
+
+        for (int tid = 0; tid < thread_num_; ++tid) {
+            int c = thread_cpu_[tid];
+            if (c < 0) continue;
+            int cluster_id = c / CPUS_PER_CLUSTER;
+            if (cluster_id < 0 || cluster_id >= MAX_CLUSTERS) continue;
+            ClusterInfo &info = clusters[cluster_id];
+            if (info.count < MAX_AICPU_THREADS) {
+                info.tids[info.count++] = tid;
+            }
+        }
+
+        // Find top two clusters by count.
+        int major_id = -1, minor_id = -1;
+        int major_cnt = 0, minor_cnt = 0;
+        for (int cid = 0; cid < MAX_CLUSTERS; ++cid) {
+            int cnt = clusters[cid].count;
+            if (cnt == 0) continue;
+            if (cnt > major_cnt) {
+                minor_cnt = major_cnt;
+                minor_id = major_id;
+                major_cnt = cnt;
+                major_id = cid;
+            } else if (cnt > minor_cnt) {
+                minor_cnt = cnt;
+                minor_id = cid;
+            }
+        }
+
+        DEV_INFO("AICPU affinity: DAV_2201 clusters major(id=%d,cnt=%d) minor(id=%d,cnt=%d)",
+                 major_id, major_cnt, minor_id, minor_cnt);
+
+        // Default roles: everyone scheduler.
+        for (int tid = 0; tid < thread_num_; ++tid) {
+            thread_role_[tid] = ThreadRole::SCHED;
+        }
+
+        if (major_cnt == 4 && minor_cnt == 1 && major_id >= 0 && minor_id >= 0) {
+            // 4+1: in major cluster: 1 ORCH + 3 SCHED; in minor cluster: DROP
+            ClusterInfo &major = clusters[major_id];
+            ClusterInfo &minor = clusters[minor_id];
+            // Pick first in major as ORCH, rest SCHED
+            thread_role_[major.tids[0]] = ThreadRole::ORCH;
+            for (int i = 1; i < major.count; ++i) {
+                thread_role_[major.tids[i]] = ThreadRole::SCHED;
+            }
+            // Minor's single thread is dropped
+            thread_role_[minor.tids[0]] = ThreadRole::DROP;
+        } else if (major_cnt == 3 && minor_cnt == 2 && major_id >= 0 && minor_id >= 0) {
+            // 3+2: in major cluster: 3 SCHED; in minor cluster: 1 ORCH + 1 DROP
+            ClusterInfo &major = clusters[major_id];
+            ClusterInfo &minor = clusters[minor_id];
+            for (int i = 0; i < major.count; ++i) {
+                thread_role_[major.tids[i]] = ThreadRole::SCHED;
+            }
+            thread_role_[minor.tids[0]] = ThreadRole::ORCH;
+            if (minor.count > 1) {
+                thread_role_[minor.tids[1]] = ThreadRole::DROP;
+            }
+        } else {
+            // Fallback: no special role splitting.
+            DEV_WARN("AICPU affinity: DAV_2201 unexpected distribution major=%d minor=%d, all SCHED",
+                     major_cnt, minor_cnt);
+        }
+
+        roles_ready_.store(1, std::memory_order_release);
+    }
+
+    // All threads wait until roles have been assigned.
+    while (roles_ready_.load(std::memory_order_acquire) == 0) {
         std::this_thread::yield();
     }
 
@@ -1541,6 +1655,8 @@ void AicpuExecutor::deinit() {
     finished_.store(false, std::memory_order_release);
     affinity_cpumask_.store(0, std::memory_order_release);
     affinity_cluster_cpuoff_.store(-1, std::memory_order_release);
+    roles_ready_.store(0, std::memory_order_release);
+    roles_init_flag_.store(0, std::memory_order_release);
 
     DEV_INFO("DeInit: AicpuExecutor reset complete");
 }
