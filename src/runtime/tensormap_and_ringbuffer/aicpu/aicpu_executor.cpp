@@ -1404,23 +1404,41 @@ void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
         affinity_cpumask_.fetch_or(1ULL << cpu, std::memory_order_release);
     }
 
+    DEV_INFO("AICPU affinity: thread_idx=%d mode=%d sched_num=%d cpu_before=%d",
+             thread_idx, mode, scheduler_thread_num, cpu);
+
     cpu_set_t cpuset;
     CPU_ZERO(&cpuset);
 
     if (mode == 3510) {
-        if (thread_idx >= scheduler_thread_num) return;
+        if (thread_idx >= scheduler_thread_num) {
+            DEV_INFO("AICPU affinity: thread %d orchestrator, skip bind (DAV_3510)", thread_idx);
+            return;
+        }
         const long ncpu = sysconf(_SC_NPROCESSORS_CONF);
         const int max_cpu_id = (ncpu > 0) ? static_cast<int>(ncpu - 1) : 0;
         const int die0_max_cpuid = (max_cpu_id >> 1);
         const int die0_sched_num = (scheduler_thread_num >> 1);
 
         const bool is_die0 = (thread_idx < die0_sched_num);
+        int cpu_lo, cpu_hi;
         if (is_die0) {
-            for (int c = 0; c <= die0_max_cpuid; ++c) CPU_SET(c, &cpuset);
+            cpu_lo = 0;
+            cpu_hi = die0_max_cpuid;
+            for (int c = cpu_lo; c <= cpu_hi; ++c) CPU_SET(c, &cpuset);
         } else {
-            for (int c = die0_max_cpuid + 1; c <= max_cpu_id; ++c) CPU_SET(c, &cpuset);
+            cpu_lo = die0_max_cpuid + 1;
+            cpu_hi = max_cpu_id;
+            for (int c = cpu_lo; c <= cpu_hi; ++c) CPU_SET(c, &cpuset);
         }
-        (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        int ret = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+        if (ret == 0) {
+            DEV_INFO("AICPU affinity: thread %d DAV_3510 %s bound cpus [%d,%d] ok",
+                     thread_idx, is_die0 ? "die0" : "die1", cpu_lo, cpu_hi);
+        } else {
+            DEV_WARN("AICPU affinity: thread %d DAV_3510 pthread_setaffinity_np failed errno=%d cpus [%d,%d]",
+                     thread_idx, ret, cpu_lo, cpu_hi);
+        }
         return;
     }
 
@@ -1433,6 +1451,8 @@ void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
     int cpuoff = affinity_cluster_cpuoff_.load(std::memory_order_acquire);
     if (cpuoff < 0) {
         const uint64_t maskval = affinity_cpumask_.load(std::memory_order_relaxed);
+        DEV_DEBUG("AICPU affinity: thread %d cpumask=0x%llx popcount=%d",
+                  thread_idx, (unsigned long long)maskval, _popcount_u64(maskval));
         int chosen = -1;
         int off = 0;
         for (int idx = 0; idx < static_cast<int>(sizeof(uint64_t)); ++idx) {
@@ -1446,17 +1466,30 @@ void AicpuExecutor::apply_aicpu_affinity(Runtime* runtime, int thread_idx) {
         if (chosen >= 0) {
             affinity_cluster_cpuoff_.store(chosen, std::memory_order_release);
             cpuoff = chosen;
+            DEV_INFO("AICPU affinity: DAV_2201 cluster chosen cpuoff=%d cpus [%d,%d)",
+                     cpuoff, cpuoff, cpuoff + 4);
         } else {
             // Fallback: do not bind.
             affinity_cluster_cpuoff_.store(-2, std::memory_order_release);
+            DEV_WARN("AICPU affinity: thread %d DAV_2201 no cluster with >=%d cpus, skip bind",
+                     thread_idx, scheduler_thread_num);
             return;
         }
     }
     if (cpuoff == -2) return;
-    if (thread_idx >= scheduler_thread_num) return;
+    if (thread_idx >= scheduler_thread_num) {
+        DEV_INFO("AICPU affinity: thread %d orchestrator, skip bind (DAV_2201)", thread_idx);
+        return;
+    }
 
     for (int c = cpuoff; c < cpuoff + 4; ++c) CPU_SET(c, &cpuset);
-    (void)pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    int ret = pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &cpuset);
+    if (ret == 0) {
+        DEV_INFO("AICPU affinity: thread %d DAV_2201 bound cpus [%d,%d) ok", thread_idx, cpuoff, cpuoff + 4);
+    } else {
+        DEV_WARN("AICPU affinity: thread %d DAV_2201 pthread_setaffinity_np failed errno=%d cpus [%d,%d)",
+                 thread_idx, ret, cpuoff, cpuoff + 4);
+    }
 }
 
 void AicpuExecutor::deinit() {
