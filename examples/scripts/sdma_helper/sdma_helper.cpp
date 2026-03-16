@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <iostream>
 
-#include "pto/comm/async/sdma/sdma_workspace_manager.hpp"
+#include "pto/npu/comm/async/sdma/sdma_workspace_manager.hpp"
 
 static pto::comm::sdma::SdmaWorkspaceManager g_sdmaMgr;
 
