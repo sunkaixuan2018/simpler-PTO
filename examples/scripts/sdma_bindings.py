@@ -49,7 +49,18 @@ def _load():
             "Then run your script with the same CANN env."
         )
     try:
-        _lib = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL | ctypes.RTLD_LAZY)
+        # Some Python/ctypes builds (or non-posix platforms) may not define
+        # RTLD_GLOBAL/RTLD_LAZY. Build the mode bitmask defensively.
+        mode = 0
+        if hasattr(ctypes, "RTLD_GLOBAL"):
+            mode |= ctypes.RTLD_GLOBAL
+        if hasattr(ctypes, "RTLD_LAZY"):
+            mode |= ctypes.RTLD_LAZY
+
+        if mode:
+            _lib = ctypes.CDLL(str(path), mode=mode)
+        else:
+            _lib = ctypes.CDLL(str(path))
     except OSError as e:
         raise RuntimeError(
             f"Failed to load {path}: {e}\n"
