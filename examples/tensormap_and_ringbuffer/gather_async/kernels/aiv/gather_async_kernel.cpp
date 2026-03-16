@@ -16,7 +16,6 @@
 #include <pto/pto-inst.hpp>
 #include <pto/common/pto_tile.hpp>
 #include "pto/comm/pto_comm_inst.hpp"
-#include "pto/comm/async/sdma/sdma_types.hpp"
 #include "hccl_context.h"
 #include "hccl_helpers.h"
 
