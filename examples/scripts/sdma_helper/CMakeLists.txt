@@ -34,4 +34,5 @@ target_include_directories(sdma_helper PRIVATE
     ${PTO_COMM_ISA_ROOT}/include
 )
 target_link_directories(sdma_helper PRIVATE ${ASCEND_HOME_PATH}/lib64)
-target_link_libraries(sdma_helper PRIVATE ascendcl)
+# ascendcl: aclrt* APIs; nnopbase: aclCreateTensor/aclDestroyTensor (used by SdmaWorkspaceManager)
+target_link_libraries(sdma_helper PRIVATE ascendcl nnopbase)

@@ -49,7 +49,7 @@ def _load():
             "Then run your script with the same CANN env."
         )
     try:
-        _lib = ctypes.CDLL(str(path))
+        _lib = ctypes.CDLL(str(path), mode=ctypes.RTLD_GLOBAL | ctypes.RTLD_LAZY)
     except OSError as e:
         raise RuntimeError(
             f"Failed to load {path}: {e}\n"
