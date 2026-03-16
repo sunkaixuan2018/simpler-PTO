@@ -15,11 +15,16 @@ else()
     message(FATAL_ERROR "ASCEND_HOME_PATH or ASCEND_HOME not set. Run: source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash")
 endif()
 
-# Resolve pto-comm-isa root to absolute path
-get_filename_component(PTO_COMM_ISA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../_deps/pto-comm-isa" ABSOLUTE)
-if(NOT EXISTS "${PTO_COMM_ISA_ROOT}/include/pto/comm/async/sdma/sdma_workspace_manager.hpp")
-    message(FATAL_ERROR "pto-comm-isa not found at ${PTO_COMM_ISA_ROOT}. "
-        "Ensure examples/scripts/_deps/pto-comm-isa is present.")
+# Resolve pto-comm-isa root to absolute path.
+# Allow PTO_COMM_ISA_ROOT env override (same convention as kernel compiler).
+if(DEFINED ENV{PTO_COMM_ISA_ROOT})
+    get_filename_component(PTO_COMM_ISA_ROOT "$ENV{PTO_COMM_ISA_ROOT}" ABSOLUTE)
+else()
+    get_filename_component(PTO_COMM_ISA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../_deps/pto-comm-isa" ABSOLUTE)
+endif()
+if(NOT EXISTS "${PTO_COMM_ISA_ROOT}/include")
+    message(FATAL_ERROR "pto-comm-isa include dir not found at ${PTO_COMM_ISA_ROOT}/include. "
+        "Set PTO_COMM_ISA_ROOT env or ensure examples/scripts/_deps/pto-comm-isa is present.")
 endif()
 message(STATUS "PTO_COMM_ISA_ROOT: ${PTO_COMM_ISA_ROOT}")
 
