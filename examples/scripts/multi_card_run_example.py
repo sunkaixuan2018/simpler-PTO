@@ -315,6 +315,7 @@ Golden.py interface:
         n_devices = args.n_devices if args.n_devices is not None else runtime_config.get("n_devices", 1)
         first_device_id = args.first_device if args.first_device is not None else runtime_config.get("first_device_id", 0)
         requires_comm = runtime_config.get("requires_comm", False)
+        requires_sdma = runtime_config.get("requires_sdma", False)
         root = runtime_config.get("root", 0)
 
         if requires_comm and n_devices > 1:
@@ -348,6 +349,7 @@ Golden.py interface:
                     enable_profiling=args.enable_profiling,
                     run_all_cases=args.all,
                     case_name=args.case,
+                    requires_sdma=requires_sdma,
                 )
 
             procs = [mp.Process(target=_comm_worker, args=(r,)) for r in range(n_devices)]

@@ -944,9 +944,11 @@ def run_on_device_comm(
     enable_profiling: bool = False,
     run_all_cases: bool = False,
     case_name: Optional[str] = None,
+    requires_sdma: bool = False,
 ) -> None:
     """
     Worker for requires_comm: init HCCL, create CodeRunner, run with comm_context.
+    When requires_sdma is True, also initializes SDMA workspace and passes it in comm_context.
     """
     from hccl_bindings import hccl_init_comm
 
@@ -966,6 +968,11 @@ def run_on_device_comm(
         "stream": stream,
     }
 
+    if requires_sdma:
+        from sdma_bindings import sdma_init
+        sdma_workspace_ptr = sdma_init()
+        comm_context["sdma_workspace_ptr"] = sdma_workspace_ptr
+
     runner = create_code_runner(
         kernels_dir=kernels_dir,
         golden_path=golden_path,
@@ -979,7 +986,12 @@ def run_on_device_comm(
         compiled_artifacts=artifacts,
         rank_id=rank_id,
     )
-    runner.run(comm_context=comm_context)
+    try:
+        runner.run(comm_context=comm_context)
+    finally:
+        if requires_sdma:
+            from sdma_bindings import sdma_finalize
+            sdma_finalize()
 
 
 # =============================================================================
