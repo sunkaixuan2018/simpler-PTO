@@ -15,7 +15,13 @@ else()
     message(FATAL_ERROR "ASCEND_HOME_PATH or ASCEND_HOME not set. Run: source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash")
 endif()
 
-set(PTO_COMM_ISA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../_deps/pto-comm-isa")
+# Resolve pto-comm-isa root to absolute path
+get_filename_component(PTO_COMM_ISA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../_deps/pto-comm-isa" ABSOLUTE)
+if(NOT EXISTS "${PTO_COMM_ISA_ROOT}/include/pto/comm/async/sdma/sdma_workspace_manager.hpp")
+    message(FATAL_ERROR "pto-comm-isa not found at ${PTO_COMM_ISA_ROOT}. "
+        "Ensure examples/scripts/_deps/pto-comm-isa is present.")
+endif()
+message(STATUS "PTO_COMM_ISA_ROOT: ${PTO_COMM_ISA_ROOT}")
 
 add_library(sdma_helper SHARED sdma_helper.cpp)
 target_include_directories(sdma_helper PRIVATE

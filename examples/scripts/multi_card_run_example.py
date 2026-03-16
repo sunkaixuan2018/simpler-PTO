@@ -134,6 +134,38 @@ def _ensure_hccl_helper_built():
         ) from e
 
 
+def _ensure_sdma_helper_built():
+    """Ensure libsdma_helper.so is built. Build if build dir or .so is missing."""
+    sdma_helper_dir = script_dir / "sdma_helper"
+    build_dir = sdma_helper_dir / "build"
+    lib_path = build_dir / "libsdma_helper.so"
+    if lib_path.exists():
+        return
+    logger.info("SDMA helper not built, compiling...")
+    build_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["cmake", ".."],
+            cwd=str(build_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        subprocess.run(
+            ["make"],
+            cwd=str(build_dir),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        logger.info("SDMA helper built successfully")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"SDMA helper build failed: {e}\n"
+            "Ensure CANN env is set: source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash"
+        ) from e
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Run PTO runtime test with multi-card support (kernel config and golden script)",
@@ -317,6 +349,9 @@ Golden.py interface:
         requires_comm = runtime_config.get("requires_comm", False)
         requires_sdma = runtime_config.get("requires_sdma", False)
         root = runtime_config.get("root", 0)
+
+        if requires_sdma:
+            _ensure_sdma_helper_built()
 
         if requires_comm and n_devices > 1:
             # Multi-card with HCCL: use Barrier + shared root_info
