@@ -155,6 +155,10 @@ typedef struct {
     // Specifies which core type this task should run on
     CoreType core_type;  // CoreType::AIC or CoreType::AIV
 
+    // AIV task tag (for AIV core_type only)
+    // 0 = compute (default), 1 = communication
+    int32_t aiv_task_tag;
+
     // Dependency tracking (using PTO runtime terminology)
     std::atomic<int> fanin;          // Number of predecessors (dependencies)
     int fanout[RUNTIME_MAX_FANOUT];  // Successor task IDs

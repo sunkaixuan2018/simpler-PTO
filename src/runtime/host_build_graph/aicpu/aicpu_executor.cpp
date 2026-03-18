@@ -60,11 +60,14 @@ struct AicpuExecutor {
 
     // Per-thread local ready queues
     int cur_ready_queue_aic_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
-    int cur_ready_queue_aiv_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int cur_ready_queue_aiv_compute_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int cur_ready_queue_aiv_comm_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
     int cur_ready_queue_aic_head_[MAX_AICPU_THREADS];
     int cur_ready_queue_aic_tail_[MAX_AICPU_THREADS];
-    int cur_ready_queue_aiv_head_[MAX_AICPU_THREADS];
-    int cur_ready_queue_aiv_tail_[MAX_AICPU_THREADS];
+    int cur_ready_queue_aiv_compute_head_[MAX_AICPU_THREADS];
+    int cur_ready_queue_aiv_compute_tail_[MAX_AICPU_THREADS];
+    int cur_ready_queue_aiv_comm_head_[MAX_AICPU_THREADS];
+    int cur_ready_queue_aiv_comm_tail_[MAX_AICPU_THREADS];
 
     // ===== Task queue state =====
     std::mutex ready_queue_aic_mutex_;
@@ -73,11 +76,17 @@ struct AicpuExecutor {
     int ready_queue_aic_head_{0};  // Circular queue: read position (front)
     int ready_queue_aic_tail_{0};  // Circular queue: write position (back)
 
-    std::mutex ready_queue_aiv_mutex_;
-    int ready_queue_aiv_[RUNTIME_MAX_TASKS];
-    std::atomic<int> ready_count_aiv_{0};
-    int ready_queue_aiv_head_{0};  // Circular queue: read position (front)
-    int ready_queue_aiv_tail_{0};  // Circular queue: write position (back)
+    std::mutex ready_queue_aiv_compute_mutex_;
+    int ready_queue_aiv_compute_[RUNTIME_MAX_TASKS];
+    std::atomic<int> ready_count_aiv_compute_{0};
+    int ready_queue_aiv_compute_head_{0};  // Circular queue: read position (front)
+    int ready_queue_aiv_compute_tail_{0};  // Circular queue: write position (back)
+
+    std::mutex ready_queue_aiv_comm_mutex_;
+    int ready_queue_aiv_comm_[RUNTIME_MAX_TASKS];
+    std::atomic<int> ready_count_aiv_comm_{0};
+    int ready_queue_aiv_comm_head_{0};  // Circular queue: read position (front)
+    int ready_queue_aiv_comm_tail_{0};  // Circular queue: write position (back)
 
     // Task execution tracking
     std::atomic<int> completed_tasks_{0};
@@ -106,9 +115,12 @@ struct AicpuExecutor {
         int* cur_ready_queue_aic,
         int& cur_aic_tail,
         int& cur_aic_ready_count,
-        int* cur_ready_queue_aiv,
-        int& cur_aiv_tail,
-        int& cur_aiv_ready_count);
+        int* cur_ready_queue_aiv_compute,
+        int& cur_aiv_compute_tail,
+        int& cur_aiv_compute_ready_count,
+        int* cur_ready_queue_aiv_comm,
+        int& cur_aiv_comm_tail,
+        int& cur_aiv_comm_ready_count);
 
     inline bool try_dispatch_task(int core_id,
         uint64_t reg_addr,
@@ -131,9 +143,12 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
     int* cur_ready_queue_aic,
     int& cur_aic_tail,
     int& cur_aic_ready_count,
-    int* cur_ready_queue_aiv,
-    int& cur_aiv_tail,
-    int& cur_aiv_ready_count) {
+    int* cur_ready_queue_aiv_compute,
+    int& cur_aiv_compute_tail,
+    int& cur_aiv_compute_ready_count,
+    int* cur_ready_queue_aiv_comm,
+    int& cur_aiv_comm_tail,
+    int& cur_aiv_comm_ready_count) {
     for (int j = 0; j < task->fanout_count; j++) {
         int dep_id = task->fanout[j];
         Task* dep = runtime.get_task(dep_id);
@@ -152,15 +167,29 @@ inline void AicpuExecutor::resolve_task_dependencies(Task* task,
                     ready_count_aic_.fetch_add(1, std::memory_order_release);
                 }
             } else {
-                if (cur_aiv_ready_count < aiv_per_thread_) {
-                    cur_ready_queue_aiv[cur_aiv_tail] = dep_id;
-                    cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
-                    cur_aiv_ready_count++;
+                const bool is_comm = (dep->aiv_task_tag != 0);
+                if (!is_comm) {
+                    if (cur_aiv_compute_ready_count < aiv_per_thread_) {
+                        cur_ready_queue_aiv_compute[cur_aiv_compute_tail] = dep_id;
+                        cur_aiv_compute_tail = (cur_aiv_compute_tail + 1) % MAX_CORES_PER_THREAD;
+                        cur_aiv_compute_ready_count++;
+                    } else {
+                        std::lock_guard<std::mutex> lock(ready_queue_aiv_compute_mutex_);
+                        ready_queue_aiv_compute_[ready_queue_aiv_compute_tail_] = dep_id;
+                        ready_queue_aiv_compute_tail_ = (ready_queue_aiv_compute_tail_ + 1) % RUNTIME_MAX_TASKS;
+                        ready_count_aiv_compute_.fetch_add(1, std::memory_order_release);
+                    }
                 } else {
-                    std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                    ready_queue_aiv_[ready_queue_aiv_tail_] = dep_id;
-                    ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
-                    ready_count_aiv_.fetch_add(1, std::memory_order_release);
+                    if (cur_aiv_comm_ready_count < aiv_per_thread_) {
+                        cur_ready_queue_aiv_comm[cur_aiv_comm_tail] = dep_id;
+                        cur_aiv_comm_tail = (cur_aiv_comm_tail + 1) % MAX_CORES_PER_THREAD;
+                        cur_aiv_comm_ready_count++;
+                    } else {
+                        std::lock_guard<std::mutex> lock(ready_queue_aiv_comm_mutex_);
+                        ready_queue_aiv_comm_[ready_queue_aiv_comm_tail_] = dep_id;
+                        ready_queue_aiv_comm_tail_ = (ready_queue_aiv_comm_tail_ + 1) % RUNTIME_MAX_TASKS;
+                        ready_count_aiv_comm_.fetch_add(1, std::memory_order_release);
+                    }
                 }
             }
         }
@@ -434,8 +463,10 @@ void AicpuExecutor::assign_cores_to_threads() {
 void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
     ready_queue_aic_head_ = 0;
     ready_queue_aic_tail_ = 0;
-    ready_queue_aiv_head_ = 0;
-    ready_queue_aiv_tail_ = 0;
+    ready_queue_aiv_compute_head_ = 0;
+    ready_queue_aiv_compute_tail_ = 0;
+    ready_queue_aiv_comm_head_ = 0;
+    ready_queue_aiv_comm_tail_ = 0;
     int initial_ready[RUNTIME_MAX_TASKS];
     int initial_count = runtime->get_initial_ready_tasks(initial_ready);
 
@@ -443,26 +474,35 @@ void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
 
     // Classify initial ready tasks by type
     int initial_aic[RUNTIME_MAX_TASKS];
-    int initial_aiv[RUNTIME_MAX_TASKS];
+    int initial_aiv_compute[RUNTIME_MAX_TASKS];
+    int initial_aiv_comm[RUNTIME_MAX_TASKS];
     int initial_aic_count = 0;
-    int initial_aiv_count = 0;
+    int initial_aiv_compute_count = 0;
+    int initial_aiv_comm_count = 0;
 
     for (int i = 0; i < initial_count; i++) {
         Task* task = runtime->get_task(initial_ready[i]);
         if (task->core_type == CoreType::AIC) {
             initial_aic[initial_aic_count++] = initial_ready[i];
         } else {
-            initial_aiv[initial_aiv_count++] = initial_ready[i];
+            if (task->aiv_task_tag != 0) {
+                initial_aiv_comm[initial_aiv_comm_count++] = initial_ready[i];
+            } else {
+                initial_aiv_compute[initial_aiv_compute_count++] = initial_ready[i];
+            }
         }
     }
 
-    LOG_INFO("Init: Initial ready tasks by type: AIC=%d, AIV=%d", initial_aic_count, initial_aiv_count);
+    LOG_INFO("Init: Initial ready tasks by type: AIC=%d, AIV_compute=%d, AIV_comm=%d",
+             initial_aic_count, initial_aiv_compute_count, initial_aiv_comm_count);
 
     for (int t = 0; t < MAX_AICPU_THREADS; t++) {
         cur_ready_queue_aic_head_[t] = 0;
         cur_ready_queue_aic_tail_[t] = 0;
-        cur_ready_queue_aiv_head_[t] = 0;
-        cur_ready_queue_aiv_tail_[t] = 0;
+        cur_ready_queue_aiv_compute_head_[t] = 0;
+        cur_ready_queue_aiv_compute_tail_[t] = 0;
+        cur_ready_queue_aiv_comm_head_[t] = 0;
+        cur_ready_queue_aiv_comm_tail_[t] = 0;
     }
 
     int aic_shared_count = 0;
@@ -488,42 +528,71 @@ void AicpuExecutor::classify_and_distribute_initial_tasks(Runtime* runtime) {
     }
     ready_count_aic_.store(aic_shared_count, std::memory_order_release);
 
-    int aiv_shared_count = 0;
+    int aiv_compute_shared_count = 0;
     thread_idx = 0;
-    for (int i = 0; i < initial_aiv_count; i++) {
-        int task_id = initial_aiv[i];
+    for (int i = 0; i < initial_aiv_compute_count; i++) {
+        int task_id = initial_aiv_compute[i];
 
-        int head = cur_ready_queue_aiv_head_[thread_idx];
-        int tail = cur_ready_queue_aiv_tail_[thread_idx];
+        int head = cur_ready_queue_aiv_compute_head_[thread_idx];
+        int tail = cur_ready_queue_aiv_compute_tail_[thread_idx];
         int cur_size = (tail - head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
 
         if (cur_size < aiv_per_thread_) {
-            cur_ready_queue_aiv_[thread_idx][tail] = task_id;
-            cur_ready_queue_aiv_tail_[thread_idx] = (tail + 1) % MAX_CORES_PER_THREAD;
-            LOG_INFO("Init: AIV task %d -> Thread %d local queue (size=%d)", task_id, thread_idx, cur_size + 1);
+            cur_ready_queue_aiv_compute_[thread_idx][tail] = task_id;
+            cur_ready_queue_aiv_compute_tail_[thread_idx] = (tail + 1) % MAX_CORES_PER_THREAD;
+            LOG_INFO("Init: AIV_compute task %d -> Thread %d local queue (size=%d)", task_id, thread_idx, cur_size + 1);
         } else {
-            ready_queue_aiv_[ready_queue_aiv_tail_] = task_id;
-            ready_queue_aiv_tail_ = (ready_queue_aiv_tail_ + 1) % RUNTIME_MAX_TASKS;
-            aiv_shared_count++;
+            ready_queue_aiv_compute_[ready_queue_aiv_compute_tail_] = task_id;
+            ready_queue_aiv_compute_tail_ = (ready_queue_aiv_compute_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aiv_compute_shared_count++;
         }
 
         thread_idx = (thread_idx + 1) % thread_num_;
     }
-    ready_count_aiv_.store(aiv_shared_count, std::memory_order_release);
+    ready_count_aiv_compute_.store(aiv_compute_shared_count, std::memory_order_release);
+
+    int aiv_comm_shared_count = 0;
+    thread_idx = 0;
+    for (int i = 0; i < initial_aiv_comm_count; i++) {
+        int task_id = initial_aiv_comm[i];
+
+        int head = cur_ready_queue_aiv_comm_head_[thread_idx];
+        int tail = cur_ready_queue_aiv_comm_tail_[thread_idx];
+        int cur_size = (tail - head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
+
+        if (cur_size < aiv_per_thread_) {
+            cur_ready_queue_aiv_comm_[thread_idx][tail] = task_id;
+            cur_ready_queue_aiv_comm_tail_[thread_idx] = (tail + 1) % MAX_CORES_PER_THREAD;
+            LOG_INFO("Init: AIV_comm task %d -> Thread %d local queue (size=%d)", task_id, thread_idx, cur_size + 1);
+        } else {
+            ready_queue_aiv_comm_[ready_queue_aiv_comm_tail_] = task_id;
+            ready_queue_aiv_comm_tail_ = (ready_queue_aiv_comm_tail_ + 1) % RUNTIME_MAX_TASKS;
+            aiv_comm_shared_count++;
+        }
+
+        thread_idx = (thread_idx + 1) % thread_num_;
+    }
+    ready_count_aiv_comm_.store(aiv_comm_shared_count, std::memory_order_release);
 
     LOG_INFO("Init: Task distribution complete - AIC: %d in local queues, %d in shared queue",
         initial_aic_count - aic_shared_count,
         aic_shared_count);
-    LOG_INFO("Init: Task distribution complete - AIV: %d in local queues, %d in shared queue",
-        initial_aiv_count - aiv_shared_count,
-        aiv_shared_count);
+    LOG_INFO("Init: Task distribution complete - AIV_compute: %d in local queues, %d in shared queue",
+        initial_aiv_compute_count - aiv_compute_shared_count,
+        aiv_compute_shared_count);
+    LOG_INFO("Init: Task distribution complete - AIV_comm: %d in local queues, %d in shared queue",
+        initial_aiv_comm_count - aiv_comm_shared_count,
+        aiv_comm_shared_count);
 
     for (int t = 0; t < thread_num_; t++) {
         int aic_size =
             (cur_ready_queue_aic_tail_[t] - cur_ready_queue_aic_head_[t] + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
-        int aiv_size =
-            (cur_ready_queue_aiv_tail_[t] - cur_ready_queue_aiv_head_[t] + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
-        LOG_INFO("Init: Thread %d local queues - AIC: %d tasks, AIV: %d tasks", t, aic_size, aiv_size);
+        int aiv_compute_size =
+            (cur_ready_queue_aiv_compute_tail_[t] - cur_ready_queue_aiv_compute_head_[t] + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
+        int aiv_comm_size =
+            (cur_ready_queue_aiv_comm_tail_[t] - cur_ready_queue_aiv_comm_head_[t] + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
+        LOG_INFO("Init: Thread %d local queues - AIC: %d tasks, AIV_compute: %d tasks, AIV_comm: %d tasks",
+                 t, aic_size, aiv_compute_size, aiv_comm_size);
     }
 }
 
@@ -575,21 +644,27 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
 
     // Extract array pointers as local variables for better readability and performance
     int* cur_ready_queue_aic = cur_ready_queue_aic_[thread_idx];
-    int* cur_ready_queue_aiv = cur_ready_queue_aiv_[thread_idx];
+    int* cur_ready_queue_aiv_compute = cur_ready_queue_aiv_compute_[thread_idx];
+    int* cur_ready_queue_aiv_comm = cur_ready_queue_aiv_comm_[thread_idx];
 
     // Initialize local circular queue pointers from member variables (set by init())
     // After this point, only use local variables for lock-free performance
     int cur_aic_head = cur_ready_queue_aic_head_[thread_idx];
     int cur_aic_tail = cur_ready_queue_aic_tail_[thread_idx];
-    int cur_aiv_head = cur_ready_queue_aiv_head_[thread_idx];
-    int cur_aiv_tail = cur_ready_queue_aiv_tail_[thread_idx];
+    int cur_aiv_compute_head = cur_ready_queue_aiv_compute_head_[thread_idx];
+    int cur_aiv_compute_tail = cur_ready_queue_aiv_compute_tail_[thread_idx];
+    int cur_aiv_comm_head = cur_ready_queue_aiv_comm_head_[thread_idx];
+    int cur_aiv_comm_tail = cur_ready_queue_aiv_comm_tail_[thread_idx];
 
     // Calculate initial queue sizes
     int cur_aic_ready_count = (cur_aic_tail - cur_aic_head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
-    int cur_aiv_ready_count = (cur_aiv_tail - cur_aiv_head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
+    int cur_aiv_compute_ready_count =
+        (cur_aiv_compute_tail - cur_aiv_compute_head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
+    int cur_aiv_comm_ready_count =
+        (cur_aiv_comm_tail - cur_aiv_comm_head + MAX_CORES_PER_THREAD) % MAX_CORES_PER_THREAD;
 
-    LOG_INFO(
-        "Thread %d: Initial state - local queue: %d AIC, %d AIV", thread_idx, cur_aic_ready_count, cur_aiv_ready_count);
+    LOG_INFO("Thread %d: Initial state - local queue: %d AIC, %d AIV_compute, %d AIV_comm",
+             thread_idx, cur_aic_ready_count, cur_aiv_compute_ready_count, cur_aiv_comm_ready_count);
 
     // Initialize dispatch timestamps for all cores
     uint64_t dispatch_start_time = get_sys_cnt_aicpu();
@@ -655,16 +730,30 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                         cur_aic_ready_count,
                         profiling_enabled,
                         runtime);
-                } else if (h->core_type == CoreType::AIV && cur_aiv_ready_count > 0) {
-                    dispatched = try_dispatch_task(core_id,
-                        reg_addr,
-                        CoreType::AIV,
-                        thread_idx,
-                        cur_ready_queue_aiv,
-                        cur_aiv_head,
-                        cur_aiv_ready_count,
-                        profiling_enabled,
-                        runtime);
+                } else if (h->core_type == CoreType::AIV) {
+                    // Step 1 validation path: split AIV queues (compute/comm) but do NOT split AIV cores.
+                    // Any AIV core may execute either tag.
+                    if (cur_aiv_compute_ready_count > 0) {
+                        dispatched = try_dispatch_task(core_id,
+                            reg_addr,
+                            CoreType::AIV,
+                            thread_idx,
+                            cur_ready_queue_aiv_compute,
+                            cur_aiv_compute_head,
+                            cur_aiv_compute_ready_count,
+                            profiling_enabled,
+                            runtime);
+                    } else if (cur_aiv_comm_ready_count > 0) {
+                        dispatched = try_dispatch_task(core_id,
+                            reg_addr,
+                            CoreType::AIV,
+                            thread_idx,
+                            cur_ready_queue_aiv_comm,
+                            cur_aiv_comm_head,
+                            cur_aiv_comm_ready_count,
+                            profiling_enabled,
+                            runtime);
+                    }
                 }
 
                 // Resolve old running task dependencies (if exists)
@@ -681,9 +770,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                         cur_ready_queue_aic,
                         cur_aic_tail,
                         cur_aic_ready_count,
-                        cur_ready_queue_aiv,
-                        cur_aiv_tail,
-                        cur_aiv_ready_count);
+                    cur_ready_queue_aiv_compute,
+                    cur_aiv_compute_tail,
+                    cur_aiv_compute_ready_count,
+                    cur_ready_queue_aiv_comm,
+                    cur_aiv_comm_tail,
+                    cur_aiv_comm_ready_count);
 
                     LOG_INFO("Thread %d: Core %d resolved old running task %d",
                              thread_idx, core_id, prev_running_id);
@@ -695,9 +787,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                     cur_ready_queue_aic,
                     cur_aic_tail,
                     cur_aic_ready_count,
-                    cur_ready_queue_aiv,
-                    cur_aiv_tail,
-                    cur_aiv_ready_count);
+                    cur_ready_queue_aiv_compute,
+                    cur_aiv_compute_tail,
+                    cur_aiv_compute_ready_count,
+                    cur_ready_queue_aiv_comm,
+                    cur_aiv_comm_tail,
+                    cur_aiv_comm_ready_count);
 
                 made_progress = true;
 
@@ -734,9 +829,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                         cur_ready_queue_aic,
                         cur_aic_tail,
                         cur_aic_ready_count,
-                        cur_ready_queue_aiv,
-                        cur_aiv_tail,
-                        cur_aiv_ready_count);
+                        cur_ready_queue_aiv_compute,
+                        cur_aiv_compute_tail,
+                        cur_aiv_compute_ready_count,
+                        cur_ready_queue_aiv_comm,
+                        cur_aiv_comm_tail,
+                        cur_aiv_comm_ready_count);
 
                     LOG_INFO("Thread %d: Core %d resolved old running task %d",
                              thread_idx, core_id, prev_running_id);
@@ -787,16 +885,28 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             cur_aic_ready_count,
                             profiling_enabled,
                             runtime);
-                    } else if (h->core_type == CoreType::AIV && cur_aiv_ready_count > 0) {
-                        dispatched = try_dispatch_task(core_id,
-                            reg_addr,
-                            CoreType::AIV,
-                            thread_idx,
-                            cur_ready_queue_aiv,
-                            cur_aiv_head,
-                            cur_aiv_ready_count,
-                            profiling_enabled,
-                            runtime);
+                    } else if (h->core_type == CoreType::AIV) {
+                        if (cur_aiv_compute_ready_count > 0) {
+                            dispatched = try_dispatch_task(core_id,
+                                reg_addr,
+                                CoreType::AIV,
+                                thread_idx,
+                                cur_ready_queue_aiv_compute,
+                                cur_aiv_compute_head,
+                                cur_aiv_compute_ready_count,
+                                profiling_enabled,
+                                runtime);
+                        } else if (cur_aiv_comm_ready_count > 0) {
+                            dispatched = try_dispatch_task(core_id,
+                                reg_addr,
+                                CoreType::AIV,
+                                thread_idx,
+                                cur_ready_queue_aiv_comm,
+                                cur_aiv_comm_head,
+                                cur_aiv_comm_ready_count,
+                                profiling_enabled,
+                                runtime);
+                        }
                     }
                 }
 
@@ -806,9 +916,12 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                     cur_ready_queue_aic,
                     cur_aic_tail,
                     cur_aic_ready_count,
-                    cur_ready_queue_aiv,
-                    cur_aiv_tail,
-                    cur_aiv_ready_count);
+                    cur_ready_queue_aiv_compute,
+                    cur_aiv_compute_tail,
+                    cur_aiv_compute_ready_count,
+                    cur_ready_queue_aiv_comm,
+                    cur_aiv_comm_tail,
+                    cur_aiv_comm_ready_count);
 
                 made_progress = true;
 
@@ -832,17 +945,31 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
                             runtime)) {
                         made_progress = true;
                     }
-                } else if (h->core_type == CoreType::AIV && cur_aiv_ready_count > 0) {
-                    if (try_dispatch_task(core_id,
-                            reg_addr,
-                            CoreType::AIV,
-                            thread_idx,
-                            cur_ready_queue_aiv,
-                            cur_aiv_head,
-                            cur_aiv_ready_count,
-                            profiling_enabled,
-                            runtime)) {
-                        made_progress = true;
+                } else if (h->core_type == CoreType::AIV) {
+                    if (cur_aiv_compute_ready_count > 0) {
+                        if (try_dispatch_task(core_id,
+                                reg_addr,
+                                CoreType::AIV,
+                                thread_idx,
+                                cur_ready_queue_aiv_compute,
+                                cur_aiv_compute_head,
+                                cur_aiv_compute_ready_count,
+                                profiling_enabled,
+                                runtime)) {
+                            made_progress = true;
+                        }
+                    } else if (cur_aiv_comm_ready_count > 0) {
+                        if (try_dispatch_task(core_id,
+                                reg_addr,
+                                CoreType::AIV,
+                                thread_idx,
+                                cur_ready_queue_aiv_comm,
+                                cur_aiv_comm_head,
+                                cur_aiv_comm_ready_count,
+                                profiling_enabled,
+                                runtime)) {
+                            made_progress = true;
+                        }
                     }
                 }
             }
@@ -869,23 +996,43 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             }
         }
 
-        if (cur_aiv_ready_count == 0) {
-            if (ready_count_aiv_.load(std::memory_order_acquire) > 0) {
-                std::lock_guard<std::mutex> lock(ready_queue_aiv_mutex_);
-                int available = ready_count_aiv_.load(std::memory_order_relaxed);
+        if (cur_aiv_compute_ready_count == 0) {
+            if (ready_count_aiv_compute_.load(std::memory_order_acquire) > 0) {
+                std::lock_guard<std::mutex> lock(ready_queue_aiv_compute_mutex_);
+                int available = ready_count_aiv_compute_.load(std::memory_order_relaxed);
                 int to_grab = (available < aiv_per_thread_) ? available : aiv_per_thread_;
 
                 for (int i = 0; i < to_grab; i++) {
-                    int task_id = ready_queue_aiv_[ready_queue_aiv_head_];
-                    ready_queue_aiv_head_ = (ready_queue_aiv_head_ + 1) % RUNTIME_MAX_TASKS;
-                    cur_ready_queue_aiv[cur_aiv_tail] = task_id;
-                    cur_aiv_tail = (cur_aiv_tail + 1) % MAX_CORES_PER_THREAD;
+                    int task_id = ready_queue_aiv_compute_[ready_queue_aiv_compute_head_];
+                    ready_queue_aiv_compute_head_ = (ready_queue_aiv_compute_head_ + 1) % RUNTIME_MAX_TASKS;
+                    cur_ready_queue_aiv_compute[cur_aiv_compute_tail] = task_id;
+                    cur_aiv_compute_tail = (cur_aiv_compute_tail + 1) % MAX_CORES_PER_THREAD;
                 }
-                ready_count_aiv_.fetch_sub(to_grab, std::memory_order_release);
-                cur_aiv_ready_count += to_grab;
+                ready_count_aiv_compute_.fetch_sub(to_grab, std::memory_order_release);
+                cur_aiv_compute_ready_count += to_grab;
 
-                LOG_INFO(
-                    "Thread %d: Grabbed %d AIV tasks from shared queue (available=%d)", thread_idx, to_grab, available);
+                LOG_INFO("Thread %d: Grabbed %d AIV_compute tasks from shared queue (available=%d)",
+                         thread_idx, to_grab, available);
+            }
+        }
+
+        if (cur_aiv_comm_ready_count == 0) {
+            if (ready_count_aiv_comm_.load(std::memory_order_acquire) > 0) {
+                std::lock_guard<std::mutex> lock(ready_queue_aiv_comm_mutex_);
+                int available = ready_count_aiv_comm_.load(std::memory_order_relaxed);
+                int to_grab = (available < aiv_per_thread_) ? available : aiv_per_thread_;
+
+                for (int i = 0; i < to_grab; i++) {
+                    int task_id = ready_queue_aiv_comm_[ready_queue_aiv_comm_head_];
+                    ready_queue_aiv_comm_head_ = (ready_queue_aiv_comm_head_ + 1) % RUNTIME_MAX_TASKS;
+                    cur_ready_queue_aiv_comm[cur_aiv_comm_tail] = task_id;
+                    cur_aiv_comm_tail = (cur_aiv_comm_tail + 1) % MAX_CORES_PER_THREAD;
+                }
+                ready_count_aiv_comm_.fetch_sub(to_grab, std::memory_order_release);
+                cur_aiv_comm_ready_count += to_grab;
+
+                LOG_INFO("Thread %d: Grabbed %d AIV_comm tasks from shared queue (available=%d)",
+                         thread_idx, to_grab, available);
             }
         }
 
@@ -919,12 +1066,11 @@ int AicpuExecutor::resolve_and_dispatch(Runtime& runtime, int thread_idx, const 
             if (all_cores_idle) {
                 // Truly complete: counter reached and all cores idle
                 int aic_remaining = ready_count_aic_.load(std::memory_order_acquire);
-                int aiv_remaining = ready_count_aiv_.load(std::memory_order_acquire);
-                if (aic_remaining > 0 || aiv_remaining > 0) {
-                    LOG_WARN("Thread %d: Queues not empty after completion! AIC=%d, AIV=%d",
-                        thread_idx,
-                        aic_remaining,
-                        aiv_remaining);
+                int aiv_compute_remaining = ready_count_aiv_compute_.load(std::memory_order_acquire);
+                int aiv_comm_remaining = ready_count_aiv_comm_.load(std::memory_order_acquire);
+                if (aic_remaining > 0 || aiv_compute_remaining > 0 || aiv_comm_remaining > 0) {
+                    LOG_WARN("Thread %d: Queues not empty after completion! AIC=%d, AIV_compute=%d, AIV_comm=%d",
+                             thread_idx, aic_remaining, aiv_compute_remaining, aiv_comm_remaining);
                 }
                 break;  // Exit main loop
             }
@@ -1001,12 +1147,15 @@ int AicpuExecutor::run(Runtime* runtime) {
 
 void AicpuExecutor::deinit() {
     ready_count_aic_.store(0, std::memory_order_release);
-    ready_count_aiv_.store(0, std::memory_order_release);
+    ready_count_aiv_compute_.store(0, std::memory_order_release);
+    ready_count_aiv_comm_.store(0, std::memory_order_release);
 
     ready_queue_aic_head_ = 0;
     ready_queue_aic_tail_ = 0;
-    ready_queue_aiv_head_ = 0;
-    ready_queue_aiv_tail_ = 0;
+    ready_queue_aiv_compute_head_ = 0;
+    ready_queue_aiv_compute_tail_ = 0;
+    ready_queue_aiv_comm_head_ = 0;
+    ready_queue_aiv_comm_tail_ = 0;
 
     for (int i = 0; i < RUNTIME_MAX_WORKER; i++) {
         dispatch_timestamps_[i] = 0;
@@ -1019,8 +1168,10 @@ void AicpuExecutor::deinit() {
     for (int t = 0; t < MAX_AICPU_THREADS; t++) {
         cur_ready_queue_aic_head_[t] = 0;
         cur_ready_queue_aic_tail_[t] = 0;
-        cur_ready_queue_aiv_head_[t] = 0;
-        cur_ready_queue_aiv_tail_[t] = 0;
+        cur_ready_queue_aiv_compute_head_[t] = 0;
+        cur_ready_queue_aiv_compute_tail_[t] = 0;
+        cur_ready_queue_aiv_comm_head_[t] = 0;
+        cur_ready_queue_aiv_comm_tail_[t] = 0;
     }
 
     completed_tasks_.store(0, std::memory_order_release);
@@ -1045,8 +1196,9 @@ void AicpuExecutor::diagnose_stuck_state(
     LOG_ERROR("Progress: %d/%d tasks (%.1f%%)", completed, total, total > 0 ? completed * 100.0 / total : 0.0);
 
     int aic_ready = ready_count_aic_.load(std::memory_order_acquire);
-    int aiv_ready = ready_count_aiv_.load(std::memory_order_acquire);
-    LOG_ERROR("Ready Queues: AIC=%d, AIV=%d", aic_ready, aiv_ready);
+    int aiv_compute_ready = ready_count_aiv_compute_.load(std::memory_order_acquire);
+    int aiv_comm_ready = ready_count_aiv_comm_.load(std::memory_order_acquire);
+    LOG_ERROR("Ready Queues: AIC=%d, AIV_compute=%d, AIV_comm=%d", aic_ready, aiv_compute_ready, aiv_comm_ready);
 
     int busy_cores = 0;
     int idle_cores = 0;

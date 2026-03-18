@@ -22,6 +22,7 @@ Runtime::Runtime() {
         tasks[i].num_args = 0;
         tasks[i].function_bin_addr = 0;
         tasks[i].core_type = CoreType::AIV;  // Default to AIV
+        tasks[i].aiv_task_tag = 0;           // Default to compute
         tasks[i].fanin = 0;
         tasks[i].fanout_count = 0;
         tasks[i].start_time = 0;
@@ -70,6 +71,7 @@ int Runtime::add_task(uint64_t* args, int num_args, int func_id, CoreType core_t
     }
     task->function_bin_addr = 0;    // Will be set by host before copying to device
     task->core_type = core_type;    // Set core type
+    task->aiv_task_tag = 0;         // Default to compute; orchestration may override for comm tasks
     task->fanin = 0;
     task->fanout_count = 0;
     memset(task->fanout, 0, sizeof(task->fanout));

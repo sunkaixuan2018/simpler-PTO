@@ -239,6 +239,7 @@ int build_paged_attention_allgather_graph(Runtime* runtime, uint64_t* args, int 
         static_cast<uint64_t>(GATHER_COUNT)
     };
     int t_wmin = runtime->add_task(args_wmin, 3, FUNC_WIN_MEMCOPY_IN, CoreType::AIV);
+    runtime->tasks[t_wmin].aiv_task_tag = 1;  // COMM
     for (int t : last_pa_tasks) {
         runtime->add_successor(t, t_wmin);
     }
@@ -248,6 +249,7 @@ int build_paged_attention_allgather_graph(Runtime* runtime, uint64_t* args, int 
         static_cast<uint64_t>(n_ranks), static_cast<uint64_t>(0)
     };
     int t_barrier_pre = runtime->add_task(args_barrier_pre, 4, FUNC_COMM_BARRIER, CoreType::AIV);
+    runtime->tasks[t_barrier_pre].aiv_task_tag = 1;  // COMM
     runtime->add_successor(t_wmin, t_barrier_pre);
 
     uint64_t args_allgather[5] = {
@@ -255,6 +257,7 @@ int build_paged_attention_allgather_graph(Runtime* runtime, uint64_t* args, int 
         static_cast<uint64_t>(n_ranks), static_cast<uint64_t>(rank_id)
     };
     int t_allgather = runtime->add_task(args_allgather, 5, FUNC_ALLGATHER, CoreType::AIV);
+    runtime->tasks[t_allgather].aiv_task_tag = 1;  // COMM
     runtime->add_successor(t_barrier_pre, t_allgather);
 
     uint64_t args_wmout[3] = {
@@ -263,6 +266,7 @@ int build_paged_attention_allgather_graph(Runtime* runtime, uint64_t* args, int 
         static_cast<uint64_t>(n_ranks * GATHER_COUNT)
     };
     int t_wmout = runtime->add_task(args_wmout, 3, FUNC_WIN_MEMCOPY_OUT, CoreType::AIV);
+    runtime->tasks[t_wmout].aiv_task_tag = 1;  // COMM
     runtime->add_successor(t_allgather, t_wmout);
 
     uint64_t args_barrier_post[4] = {
@@ -270,6 +274,7 @@ int build_paged_attention_allgather_graph(Runtime* runtime, uint64_t* args, int 
         static_cast<uint64_t>(n_ranks), static_cast<uint64_t>(0)
     };
     int t_barrier_post = runtime->add_task(args_barrier_post, 4, FUNC_COMM_BARRIER, CoreType::AIV);
+    runtime->tasks[t_barrier_post].aiv_task_tag = 1;  // COMM
     runtime->add_successor(t_wmout, t_barrier_post);
 
     delete[] dev_sij_arr;
