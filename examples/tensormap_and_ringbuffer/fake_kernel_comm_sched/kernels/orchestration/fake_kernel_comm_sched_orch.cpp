@@ -5,6 +5,11 @@
  * uses pto2_rt_submit_variant_task() to let the scheduler pick between
  * GatherSync (func_id=1) and GatherAsync (func_id=2) at dispatch time.
  *
+ * Scheduler strategy (in aicpu_executor.cpp select_variant_kernel):
+ *   - Large data (>= 4KB) → Async (SDMA bulk transfer)
+ *   - Small data + all other cores busy → Async (don't block AICore)
+ *   - Small data + idle cores available → Sync (lower latency)
+ *
  * Args (11): [0] dev_src, [1] dev_out, [2] size_src, [3] size_out,
  *   [4] device_ctx_ptr, [5] win_in_base, [6] win_out_base,
  *   [7] n_ranks, [8] root, [9] rank_id, [10] sdma_workspace_ptr

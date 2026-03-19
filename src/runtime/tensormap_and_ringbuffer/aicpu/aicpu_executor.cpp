@@ -447,19 +447,48 @@ int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* 
     return 0;
 }
 
-// Pseudo-random state for scheduler-level variant selection
-static uint32_t s_variant_rand_state = 0xDEADBEEF;
-static int variant_pseudo_random(int num_variants) {
-    s_variant_rand_state ^= s_variant_rand_state << 13;
-    s_variant_rand_state ^= s_variant_rand_state >> 17;
-    s_variant_rand_state ^= s_variant_rand_state << 5;
-    return static_cast<int>(s_variant_rand_state % static_cast<uint32_t>(num_variants));
+// Variant selection: data size threshold (bytes). Above this, prefer Async.
+static constexpr int64_t VARIANT_DATA_SIZE_THRESHOLD = 4096;
+
+/**
+ * Select variant kernel based on communication data size and core busyness.
+ *
+ * Convention: variant_kernel_ids[0] = Sync, variant_kernel_ids[1] = Async.
+ *
+ * Strategy:
+ *   1. Large data → Async (SDMA more efficient for bulk transfer)
+ *   2. Small data + all other cores busy → Async (don't block AICore compute)
+ *   3. Small data + idle cores available → Sync (lower latency)
+ */
+static int32_t select_variant_kernel(PTO2TaskDescriptor* task,
+                                      int cur_tasks_in_flight, int core_num) {
+    // Estimate communication data size from first output tensor
+    int64_t data_size = 0;
+    for (int i = 0; i < task->param_count; i++) {
+        if (task->params[i].type == PTOParamType::OUTPUT) {
+            data_size = task->params[i].tensor.numel * task->params[i].tensor.elem_size;
+            break;
+        }
+    }
+
+    // Current core is idle (being dispatched to), so "all others busy" means in_flight >= core_num - 1
+    bool all_other_cores_busy = (cur_tasks_in_flight >= core_num - 1);
+
+    int idx;
+    if (data_size >= VARIANT_DATA_SIZE_THRESHOLD || all_other_cores_busy) {
+        idx = (task->num_variants > 1) ? 1 : 0;  // Async
+    } else {
+        idx = 0;  // Sync
+    }
+
+    return task->variant_kernel_ids[idx];
 }
 
 // Build PTO2DispatchPayload from PTO2TaskDescriptor.
 static void build_pto2_payload(PTO2DispatchPayload* out, Runtime* runtime,
                                PTO2TaskDescriptor* task, PTO2TaskDescriptor* task_descriptors,
-                               PTO2DepListEntry* dep_list_pool, int32_t window_size) {
+                               PTO2DepListEntry* dep_list_pool, int32_t window_size,
+                               int cur_tasks_in_flight, int core_num) {
     (void)task_descriptors;
     (void)dep_list_pool;
     (void)window_size;
@@ -468,10 +497,9 @@ static void build_pto2_payload(PTO2DispatchPayload* out, Runtime* runtime,
     // Scheduler-level variant selection
     int32_t selected_kernel_id = task->kernel_id;
     if (task->num_variants > 0) {
-        int idx = variant_pseudo_random(task->num_variants);
-        selected_kernel_id = task->variant_kernel_ids[idx];
-        DEV_INFO("Variant selection: task %d, picked variant %d (kernel_id=%d) from %d candidates",
-                 task->task_id, idx, selected_kernel_id, task->num_variants);
+        selected_kernel_id = select_variant_kernel(task, cur_tasks_in_flight, core_num);
+        DEV_INFO("Variant selection: task %d, kernel_id=%d (data-size/core-busy strategy, in_flight=%d/%d)",
+                 task->task_id, selected_kernel_id, cur_tasks_in_flight, core_num);
     }
 
     out->kernel_id = selected_kernel_id;
@@ -886,7 +914,8 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                     if (task_id >= 0) {
                         PTO2TaskDescriptor* task = &task_descriptors[task_id & window_mask];
                         PTO2DispatchPayload* payload = &s_pto2_payload_per_core[core_id];
-                        build_pto2_payload(payload, runtime, task, task_descriptors, dep_list_pool, window_size);
+                        build_pto2_payload(payload, runtime, task, task_descriptors, dep_list_pool, window_size,
+                                           cur_thread_tasks_in_flight, core_num);
                         // Performance profiling: check if buffer needs switching
                         if (profiling_enabled) {
                             dispatch_timestamps_[core_id] = get_sys_cnt_aicpu();
