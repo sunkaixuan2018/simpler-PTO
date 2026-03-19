@@ -32,7 +32,8 @@ typedef enum {
     PTO2_WORKER_VECTOR = 1,
     PTO2_WORKER_AI_CPU = 2,
     PTO2_WORKER_ACCELERATOR = 3,
-    PTO2_NUM_WORKER_TYPES = 4
+    PTO2_WORKER_VECTOR_COMM = 4,  // AIV communication (barrier, allgather, memcopy)
+    PTO2_NUM_WORKER_TYPES = 5
 } PTO2WorkerType;
 
 // =============================================================================

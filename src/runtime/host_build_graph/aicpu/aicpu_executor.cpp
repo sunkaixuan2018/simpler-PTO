@@ -1259,7 +1259,7 @@ void AicpuExecutor::diagnose_stuck_state(
     LOG_ERROR("Summary: %d busy, %d idle", busy_cores, idle_cores);
 
     // Diagnose deadlock vs livelock
-    if (busy_cores == 0 && aic_ready == 0 && aiv_ready == 0 && completed < total) {
+    if (busy_cores == 0 && aic_ready == 0 && aiv_compute_ready == 0 && aiv_comm_ready == 0 && completed < total) {
         LOG_ERROR("*** DEADLOCK DETECTED ***");
         LOG_ERROR("All cores idle, no ready tasks, but %d tasks incomplete", total - completed);
 

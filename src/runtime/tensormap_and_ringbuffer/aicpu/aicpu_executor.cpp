@@ -126,6 +126,11 @@ struct AicpuExecutor {
     int ready_queue_aiv_head_[MAX_AICPU_THREADS]{0};
     int ready_queue_aiv_tail_[MAX_AICPU_THREADS]{0};
 
+    SpinLock ready_queue_aiv_comm_lock_[MAX_AICPU_THREADS];
+    int ready_queue_aiv_comm_[MAX_AICPU_THREADS][AICPU_MAX_READY_TASKS];
+    int ready_queue_aiv_comm_head_[MAX_AICPU_THREADS]{0};
+    int ready_queue_aiv_comm_tail_[MAX_AICPU_THREADS]{0};
+
     // Task execution tracking
     std::atomic<int> completed_tasks_{0};
     std::atomic<int> total_tasks_{0};
@@ -209,6 +214,13 @@ inline void AicpuExecutor::enqueue_ready_task_with_profiling(
 #endif
         ready_queue_aic_[my_shard][ready_queue_aic_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
         ready_queue_aic_lock_[my_shard].unlock();
+    } else if (worker_type == PTO2_WORKER_VECTOR_COMM) {
+        ready_queue_aiv_comm_lock_[my_shard].lock();
+#if PTO2_ORCH_PROFILING
+        _l1 = get_sys_cnt_aicpu();
+#endif
+        ready_queue_aiv_comm_[my_shard][ready_queue_aiv_comm_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
+        ready_queue_aiv_comm_lock_[my_shard].unlock();
     } else {
         ready_queue_aiv_lock_[my_shard].lock();
 #if PTO2_ORCH_PROFILING
@@ -407,6 +419,8 @@ int AicpuExecutor::init(Runtime* runtime) {
         ready_queue_aic_tail_[s] = 0;
         ready_queue_aiv_head_[s] = 0;
         ready_queue_aiv_tail_[s] = 0;
+        ready_queue_aiv_comm_head_[s] = 0;
+        ready_queue_aiv_comm_tail_[s] = 0;
     }
 
     // Reset per-core dispatch timestamps and task counters
@@ -457,6 +471,7 @@ static void build_pto2_payload(PTO2DispatchPayload* out, Runtime* runtime,
     out->task_id = task->task_id;
     out->kernel_id = task->kernel_id;
     out->core_type = (task->worker_type == PTO2_WORKER_CUBE) ? CoreType::AIC : CoreType::AIV;
+    // Both PTO2_WORKER_VECTOR and PTO2_WORKER_VECTOR_COMM map to AIV cores
     out->function_bin_addr = runtime->get_function_bin_addr(task->kernel_id);
     int n = 0;
 
@@ -830,6 +845,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
 #endif
                         }
                     } else {
+                        // AIV core: try compute queue first, then comm queue
                         for (int k = 0; k < active_shards_ && task_id < 0; k++) {
                             int shard = (my_shard + k) % active_shards_;
 #if PTO2_ORCH_PROFILING
@@ -857,6 +873,36 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                             sched_dispatch_miss_wait += (_l1 - _l0);
                             sched_dispatch_miss_hold += (_l2 - _l1);
 #endif
+                        }
+                        if (task_id < 0) {
+                            for (int k = 0; k < active_shards_ && task_id < 0; k++) {
+                                int shard = (my_shard + k) % active_shards_;
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l0 = get_sys_cnt_aicpu();
+#endif
+                                ready_queue_aiv_comm_lock_[shard].lock();
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l1 = get_sys_cnt_aicpu();
+#endif
+                                if (ready_queue_aiv_comm_head_[shard] < ready_queue_aiv_comm_tail_[shard]) {
+                                    task_id = ready_queue_aiv_comm_[shard][ready_queue_aiv_comm_head_[shard]++ & AICPU_READY_MASK];
+                                    ready_queue_aiv_comm_lock_[shard].unlock();
+#if PTO2_ORCH_PROFILING
+                                    uint64_t _l2 = get_sys_cnt_aicpu();
+                                    sched_dispatch_hit_wait += (_l1 - _l0);
+                                    sched_dispatch_hit_hold += (_l2 - _l1);
+                                    found_task = true;
+                                    is_stolen = (k != 0);
+#endif
+                                    break;
+                                }
+                                ready_queue_aiv_comm_lock_[shard].unlock();
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l2 = get_sys_cnt_aicpu();
+                                sched_dispatch_miss_wait += (_l1 - _l0);
+                                sched_dispatch_miss_hold += (_l2 - _l1);
+#endif
+                            }
                         }
                     }
 #if PTO2_ORCH_PROFILING
@@ -1383,6 +1429,8 @@ void AicpuExecutor::deinit() {
         ready_queue_aic_tail_[s] = 0;
         ready_queue_aiv_head_[s] = 0;
         ready_queue_aiv_tail_[s] = 0;
+        ready_queue_aiv_comm_head_[s] = 0;
+        ready_queue_aiv_comm_tail_[s] = 0;
     }
 
     // Reset per-core dispatch timestamps and task counters
@@ -1438,12 +1486,13 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int thread_idx,
     DEV_ALWAYS("Progress: %d/%d tasks (%.1f%%)",
              completed, total, total > 0 ? completed * 100.0 / total : 0.0);
 
-    int aic_ready = 0, aiv_ready = 0;
+    int aic_ready = 0, aiv_ready = 0, aiv_comm_ready = 0;
     for (int s = 0; s < active_shards_; s++) {
         aic_ready += ready_queue_aic_tail_[s] - ready_queue_aic_head_[s];
         aiv_ready += ready_queue_aiv_tail_[s] - ready_queue_aiv_head_[s];
+        aiv_comm_ready += ready_queue_aiv_comm_tail_[s] - ready_queue_aiv_comm_head_[s];
     }
-    DEV_ALWAYS("Ready Queues (%d shards, per-thread push + work-steal pop): AIC=%d, AIV=%d", active_shards_, aic_ready, aiv_ready);
+    DEV_ALWAYS("Ready Queues (%d shards): AIC=%d, AIV_compute=%d, AIV_comm=%d", active_shards_, aic_ready, aiv_ready, aiv_comm_ready);
 
     int busy_cores = 0;
     int idle_cores = 0;
@@ -1481,7 +1530,7 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int thread_idx,
     DEV_ALWAYS("Summary: %d busy, %d idle", busy_cores, idle_cores);
 
     // Diagnose deadlock vs livelock
-    if (busy_cores == 0 && aic_ready == 0 && aiv_ready == 0 && completed < total) {
+    if (busy_cores == 0 && aic_ready == 0 && aiv_ready == 0 && aiv_comm_ready == 0 && completed < total) {
         DEV_ALWAYS("*** DEADLOCK DETECTED ***");
         DEV_ALWAYS("All cores idle, no ready tasks, but %d tasks incomplete", total - completed);
         DEV_ALWAYS("Check PTO2 shared memory for task dependency state");

@@ -225,12 +225,13 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     Tensor barrier_post_t = make_tensor_external(reinterpret_cast<void*>(barrier_base_post), barrier_shapes, 1, DataType::INT32);
 
     PTO2_SCOPE(rt) {
+        // Phase 2: Communication tasks (use PTO2_WORKER_VECTOR_COMM)
         PTOParam params_wmin[] = {
             make_output_param(win_src_t),
             make_input_param(dev_src_t),
             make_scalar_param(static_cast<uint64_t>(GATHER_COUNT)),
         };
-        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 3);
+        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR_COMM, params_wmin, 3);
 
         PTOParam params_barrier_pre[] = {
             make_input_param(barrier_pre_t),
@@ -240,7 +241,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             make_input_param(win_src_t),
             make_output_param(sync_done_t),
         };
-        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_pre, 6);
+        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR_COMM, params_barrier_pre, 6);
 
         PTOParam params_allgather[] = {
             make_output_param(win_dst_t),
@@ -250,14 +251,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             make_scalar_param(static_cast<uint64_t>(n_ranks)),
             make_scalar_param(static_cast<uint64_t>(rank_id)),
         };
-        pto2_rt_submit_task(rt, FUNC_ALLGATHER, PTO2_WORKER_VECTOR, params_allgather, 6);
+        pto2_rt_submit_task(rt, FUNC_ALLGATHER, PTO2_WORKER_VECTOR_COMM, params_allgather, 6);
 
         PTOParam params_wmout[] = {
             make_output_param(dev_out_t),
             make_input_param(win_dst_t),
             make_scalar_param(static_cast<uint64_t>(n_ranks * GATHER_COUNT)),
         };
-        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
+        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR_COMM, params_wmout, 3);
 
         Tensor sync_post_t = make_tensor(sync_shapes, 1, DataType::INT32);
         PTOParam params_barrier_post[] = {
@@ -268,7 +269,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             make_input_param(win_dst_t),
             make_output_param(sync_post_t),
         };
-        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_post, 6);
+        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR_COMM, params_barrier_post, 6);
     }
 
     LOG_INFO(rt, "paged_attention_allgather_Manual tasks submitted");

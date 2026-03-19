@@ -66,10 +66,11 @@
  */
 typedef enum {
     PTO2_WORKER_CUBE = 0,       // AICore CUBE unit (matrix ops)
-    PTO2_WORKER_VECTOR = 1,     // AICore VECTOR unit (element-wise ops)
+    PTO2_WORKER_VECTOR = 1,     // AICore VECTOR unit (compute: element-wise ops)
     PTO2_WORKER_AI_CPU = 2,     // AI_CPU (scalar ops, control flow)
     PTO2_WORKER_ACCELERATOR = 3,// Fixed-function accelerators (DMA, etc.)
-    PTO2_NUM_WORKER_TYPES = 4
+    PTO2_WORKER_VECTOR_COMM = 4,// AICore VECTOR unit (communication: barrier, allgather, etc.)
+    PTO2_NUM_WORKER_TYPES = 5
 } PTO2WorkerType;
 
 // =============================================================================
