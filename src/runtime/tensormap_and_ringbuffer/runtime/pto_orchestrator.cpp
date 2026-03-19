@@ -289,6 +289,7 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     task->packed_buffer_base = NULL;
     task->packed_buffer_end = NULL;
     task->num_outputs = 0;
+    task->num_variants = 0;
     task->is_active = true;
 
     // Register this task in its owning scope
@@ -461,6 +462,26 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
 #if PTO2_ORCH_PROFILING
     g_orch_submit_count++;
 #endif
+}
+
+void pto2_submit_variant_task(PTO2OrchestratorState* orch,
+    int32_t* variant_kernel_ids,
+    int32_t num_variants,
+    PTO2WorkerType worker_type,
+    PTOParam* params,
+    int32_t num_params) {
+    assert(num_variants > 0 && num_variants <= PTO2_MAX_VARIANTS);
+
+    // Submit as normal task using first variant as default kernel_id
+    pto2_submit_task(orch, variant_kernel_ids[0], worker_type, params, num_params);
+
+    // Patch the just-submitted task with variant info
+    int32_t task_id = orch->task_ring.current_index - 1;
+    PTO2TaskDescriptor* task = pto2_task_ring_get(&orch->task_ring, task_id);
+    task->num_variants = num_variants;
+    for (int i = 0; i < num_variants; i++) {
+        task->variant_kernel_ids[i] = variant_kernel_ids[i];
+    }
 }
 
 // =============================================================================

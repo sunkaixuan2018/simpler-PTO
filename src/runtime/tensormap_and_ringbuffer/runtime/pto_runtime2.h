@@ -70,6 +70,11 @@ struct PTO2RuntimeOps {
     void (*log_always)(const char* func, const char* fmt, ...);
 
     TensorPool* (*get_tensor_pool)(PTO2Runtime* rt);
+
+    // Variant task: submit with multiple candidate kernel_ids for scheduler selection
+    void (*submit_variant_task)(PTO2Runtime* rt, int32_t* variant_kernel_ids,
+                                int32_t num_variants, PTO2WorkerType worker_type,
+                                PTOParam* params, int32_t num_params);
 };
 
 /**

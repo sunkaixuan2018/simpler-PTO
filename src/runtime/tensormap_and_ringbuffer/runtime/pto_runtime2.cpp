@@ -23,6 +23,13 @@ static void submit_task_impl(PTO2Runtime* rt, int32_t kernel_id,
                      params, num_params);
 }
 
+static void submit_variant_task_impl(PTO2Runtime* rt, int32_t* variant_kernel_ids,
+                                      int32_t num_variants, PTO2WorkerType worker_type,
+                                      PTOParam* params, int32_t num_params) {
+    pto2_submit_variant_task(&rt->orchestrator, variant_kernel_ids, num_variants,
+                              worker_type, params, num_params);
+}
+
 void pto2_rt_scope_begin(PTO2Runtime* rt) {
     pto2_scope_begin(&rt->orchestrator);
 }
@@ -50,6 +57,7 @@ static const PTO2RuntimeOps s_runtime_ops = {
     .log_debug            = unified_log_debug,
     .log_always           = unified_log_always,
     .get_tensor_pool      = get_tensor_pool_impl,
+    .submit_variant_task  = submit_variant_task_impl,
 };
 
 // =============================================================================

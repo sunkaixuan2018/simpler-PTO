@@ -447,6 +447,15 @@ int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* 
     return 0;
 }
 
+// Pseudo-random state for scheduler-level variant selection
+static uint32_t s_variant_rand_state = 0xDEADBEEF;
+static int variant_pseudo_random(int num_variants) {
+    s_variant_rand_state ^= s_variant_rand_state << 13;
+    s_variant_rand_state ^= s_variant_rand_state >> 17;
+    s_variant_rand_state ^= s_variant_rand_state << 5;
+    return static_cast<int>(s_variant_rand_state % static_cast<uint32_t>(num_variants));
+}
+
 // Build PTO2DispatchPayload from PTO2TaskDescriptor.
 static void build_pto2_payload(PTO2DispatchPayload* out, Runtime* runtime,
                                PTO2TaskDescriptor* task, PTO2TaskDescriptor* task_descriptors,
@@ -455,9 +464,19 @@ static void build_pto2_payload(PTO2DispatchPayload* out, Runtime* runtime,
     (void)dep_list_pool;
     (void)window_size;
     out->task_id = task->task_id;
-    out->kernel_id = task->kernel_id;
+
+    // Scheduler-level variant selection
+    int32_t selected_kernel_id = task->kernel_id;
+    if (task->num_variants > 0) {
+        int idx = variant_pseudo_random(task->num_variants);
+        selected_kernel_id = task->variant_kernel_ids[idx];
+        DEV_INFO("Variant selection: task %d, picked variant %d (kernel_id=%d) from %d candidates",
+                 task->task_id, idx, selected_kernel_id, task->num_variants);
+    }
+
+    out->kernel_id = selected_kernel_id;
     out->core_type = (task->worker_type == PTO2_WORKER_CUBE) ? CoreType::AIC : CoreType::AIV;
-    out->function_bin_addr = runtime->get_function_bin_addr(task->kernel_id);
+    out->function_bin_addr = runtime->get_function_bin_addr(selected_kernel_id);
     int n = 0;
 
     for (int i = 0; i < task->param_count; i++) {

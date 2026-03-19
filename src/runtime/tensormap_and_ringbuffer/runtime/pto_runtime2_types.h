@@ -40,6 +40,7 @@
 #define PTO2_MAX_OUTPUTS          16      // Maximum outputs per task
 #define PTO2_MAX_INPUTS           16      // Maximum inputs per task
 #define PTO2_MAX_INOUTS           8       // Maximum in-out params per task
+#define PTO2_MAX_VARIANTS         4       // Maximum variant kernel candidates per task
 
 // Scope management
 #define PTO2_MAX_SCOPE_DEPTH      64      // Maximum nesting depth
@@ -272,6 +273,9 @@ struct PTO2TaskDescriptor {
     // Status flags
     bool     is_active;           // Task slot is in use
 
+    // Variant support: scheduler picks from candidates at dispatch time
+    int32_t  variant_kernel_ids[PTO2_MAX_VARIANTS];
+    int32_t  num_variants;        // 0 = normal task, >0 = variant task
 
     PTOParam params[16];
     int param_count{0};

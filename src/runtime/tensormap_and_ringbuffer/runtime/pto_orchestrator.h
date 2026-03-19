@@ -186,6 +186,17 @@ void pto2_submit_task(PTO2OrchestratorState* orch,
     PTOParam* params,
     int32_t num_params);
 
+/**
+ * Submit a variant task with multiple candidate kernel_ids.
+ * The scheduler picks from the candidates at dispatch time.
+ */
+void pto2_submit_variant_task(PTO2OrchestratorState* orch,
+    int32_t* variant_kernel_ids,
+    int32_t num_variants,
+    PTO2WorkerType worker_type,
+    PTOParam* params,
+    int32_t num_params);
+
 // =============================================================================
 // Flow Control
 // =============================================================================
