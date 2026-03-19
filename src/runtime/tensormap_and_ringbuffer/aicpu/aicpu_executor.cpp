@@ -466,7 +466,7 @@ static int32_t select_variant_kernel(PTO2TaskDescriptor* task,
     int64_t data_size = 0;
     for (int i = 0; i < task->param_count; i++) {
         if (task->params[i].type == PTOParamType::OUTPUT) {
-            data_size = task->params[i].tensor.numel * task->params[i].tensor.elem_size;
+            data_size = static_cast<int64_t>(task->params[i].tensor.data().buffer.size);
             break;
         }
     }
