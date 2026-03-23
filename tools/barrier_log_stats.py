@@ -27,6 +27,10 @@ class BarrierEvent:
     view: str
     ts_us: float
     dur_us: float
+    end_us: float
+    pre_event_name: str | None = None
+    pre_event_ts_us: float | None = None
+    pre_event_dur_us: float | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -72,6 +76,12 @@ def parse_args() -> argparse.Namespace:
         type=str,
         default="CommBarrier",
         help="要统计的事件名前缀，默认 CommBarrier",
+    )
+    parser.add_argument(
+        "--pre-event",
+        type=str,
+        default="WindowMemCopyIn",
+        help="用于定位 barrier 前慢点的前序事件名前缀，默认 WindowMemCopyIn；传空字符串可关闭",
     )
     return parser.parse_args()
 
@@ -127,7 +137,9 @@ def parse_barrier_events(path: Path, event_prefix: str) -> list[BarrierEvent]:
     result: list[BarrierEvent] = []
     dev_id = _extract_device_id(path.name)
 
-    for ev in events:
+    x_events = [ev for ev in events if ev.get("ph") == "X"]
+
+    for ev in x_events:
         if ev.get("ph") != "X":
             continue
         name = str(ev.get("name", ""))
@@ -140,6 +152,7 @@ def parse_barrier_events(path: Path, event_prefix: str) -> list[BarrierEvent]:
 
         ts_us = float(ev.get("ts", 0.0))
         dur_us = float(ev.get("dur", 0.0))
+        end_us = ts_us + dur_us
         result.append(
             BarrierEvent(
                 file_name=path.name,
@@ -147,25 +160,87 @@ def parse_barrier_events(path: Path, event_prefix: str) -> list[BarrierEvent]:
                 view=view,
                 ts_us=ts_us,
                 dur_us=dur_us,
+                end_us=end_us,
             )
         )
 
     return result
 
 
-def summarize(events: list[BarrierEvent], view: str) -> None:
+def attach_pre_event(events: list[BarrierEvent], log_dir: Path, pre_event_prefix: str) -> None:
+    if not pre_event_prefix:
+        return
+
+    by_file: dict[str, list[BarrierEvent]] = {}
+    for e in events:
+        by_file.setdefault(e.file_name, []).append(e)
+
+    for file_name, barrier_list in by_file.items():
+        path = log_dir / file_name
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        x_events = [ev for ev in payload.get("traceEvents", []) if ev.get("ph") == "X"]
+
+        # 按 (pid, tid) 分组，匹配同一个 lane 上 barrier 之前最后一个 pre_event
+        lane_events: dict[tuple[int, int], list[dict]] = {}
+        for ev in x_events:
+            pid = int(ev.get("pid", -1))
+            tid = int(ev.get("tid", -1))
+            lane_events.setdefault((pid, tid), []).append(ev)
+        for lane in lane_events:
+            lane_events[lane].sort(key=lambda x: float(x.get("ts", 0.0)))
+
+        for b in barrier_list:
+            target_pid = 1 if b.view == "aicore" else 2
+            best_match: dict | None = None
+            best_end = -1.0
+            for (pid, _tid), arr in lane_events.items():
+                if pid != target_pid:
+                    continue
+                for ev in arr:
+                    name = str(ev.get("name", ""))
+                    if not name.startswith(pre_event_prefix):
+                        continue
+                    ev_ts = float(ev.get("ts", 0.0))
+                    ev_dur = float(ev.get("dur", 0.0))
+                    ev_end = ev_ts + ev_dur
+                    if ev_end <= b.ts_us and ev_end > best_end:
+                        best_end = ev_end
+                        best_match = ev
+            if best_match is not None:
+                b.pre_event_name = str(best_match.get("name", ""))
+                b.pre_event_ts_us = float(best_match.get("ts", 0.0))
+                b.pre_event_dur_us = float(best_match.get("dur", 0.0))
+
+
+def summarize(events: list[BarrierEvent], view: str, pre_event_prefix: str) -> None:
     filtered = [e for e in events if view == "both" or e.view == view]
     if not filtered:
         print("没有匹配到 CommBarrier 事件。")
         return
 
     filtered.sort(key=lambda e: (e.view, e.device_id, e.file_name, e.ts_us))
+    max_end_by_view: dict[str, float] = {}
+    min_start_by_view: dict[str, float] = {}
+    for cur_view in ("aicore", "aicpu"):
+        cur = [e for e in filtered if e.view == cur_view]
+        if not cur:
+            continue
+        max_end_by_view[cur_view] = max(e.end_us for e in cur)
+        min_start_by_view[cur_view] = min(e.ts_us for e in cur)
 
     print("=== 明细（按视图/设备/时间）===")
     for e in filtered:
+        latest_end = max_end_by_view.get(e.view, e.end_us)
+        wait_to_latest_ms = (latest_end - e.ts_us) / 1000.0
+        relative_end_gap_ms = (latest_end - e.end_us) / 1000.0
         print(
             f"[{e.view:6}] dev={e.device_id:>2}  dur={e.dur_us / 1000.0:9.3f} ms"
-            f"  ts={e.ts_us / 1000.0:9.3f} ms  file={e.file_name}"
+            f"  ts={e.ts_us / 1000.0:9.3f} ms  end={e.end_us / 1000.0:9.3f} ms"
+            f"  wait_to_latest_end={wait_to_latest_ms:8.3f} ms"
+            f"  end_gap={relative_end_gap_ms:8.3f} ms  file={e.file_name}"
         )
 
     print("\n=== 汇总（按视图）===")
@@ -174,9 +249,11 @@ def summarize(events: list[BarrierEvent], view: str) -> None:
         if not cur:
             continue
         durs_ms = [e.dur_us / 1000.0 for e in cur]
+        window_ms = (max_end_by_view[cur_view] - min_start_by_view[cur_view]) / 1000.0
         print(
             f"{cur_view:6}: count={len(cur):>2}, min={min(durs_ms):.3f} ms, "
-            f"max={max(durs_ms):.3f} ms, avg={mean(durs_ms):.3f} ms"
+            f"max={max(durs_ms):.3f} ms, avg={mean(durs_ms):.3f} ms, "
+            f"barrier_window={window_ms:.3f} ms"
         )
 
     print("\n=== 每设备（同视图下可能有多条，取最大值）===")
@@ -186,6 +263,47 @@ def summarize(events: list[BarrierEvent], view: str) -> None:
         by_key[key] = max(by_key.get(key, 0.0), e.dur_us / 1000.0)
     for (cur_view, dev), dur_ms in sorted(by_key.items(), key=lambda x: (x[0][0], x[0][1])):
         print(f"[{cur_view:6}] dev={dev:>2}  max_barrier={dur_ms:.3f} ms")
+
+    print("\n=== 问题定位（按视图）===")
+    for cur_view in ("aicore", "aicpu"):
+        cur = [e for e in filtered if e.view == cur_view]
+        if not cur:
+            continue
+        earliest = min(cur, key=lambda x: x.ts_us)
+        latest = max(cur, key=lambda x: x.end_us)
+        shortest = min(cur, key=lambda x: x.dur_us)
+        longest = max(cur, key=lambda x: x.dur_us)
+        print(f"[{cur_view}]")
+        print(
+            f"  - 最早进 barrier: dev={earliest.device_id}, ts={earliest.ts_us/1000.0:.3f} ms"
+        )
+        print(
+            f"  - 最晚出 barrier: dev={latest.device_id}, end={latest.end_us/1000.0:.3f} ms"
+        )
+        print(
+            f"  - 等待最长: dev={longest.device_id}, dur={longest.dur_us/1000.0:.3f} ms"
+        )
+        print(
+            f"  - 等待最短(通常最后到): dev={shortest.device_id}, dur={shortest.dur_us/1000.0:.3f} ms"
+        )
+
+    if pre_event_prefix:
+        print(f"\n=== 前序事件关联（{pre_event_prefix} -> CommBarrier）===")
+        for cur_view in ("aicore", "aicpu"):
+            cur = [e for e in filtered if e.view == cur_view]
+            if not cur:
+                continue
+            print(f"[{cur_view}]")
+            for e in sorted(cur, key=lambda x: x.device_id):
+                if e.pre_event_name is None:
+                    print(f"  - dev={e.device_id}: 未找到前序事件")
+                    continue
+                pre_end_us = (e.pre_event_ts_us or 0.0) + (e.pre_event_dur_us or 0.0)
+                gap_ms = (e.ts_us - pre_end_us) / 1000.0
+                print(
+                    f"  - dev={e.device_id}: {e.pre_event_name} dur={(e.pre_event_dur_us or 0.0)/1000.0:.3f} ms, "
+                    f"pre_end={pre_end_us/1000.0:.3f} ms, barrier_start={e.ts_us/1000.0:.3f} ms, gap={gap_ms:.3f} ms"
+                )
 
 
 def main() -> int:
@@ -227,7 +345,8 @@ def main() -> int:
             print(f"  - {msg}")
         print("")
 
-    summarize(all_events, args.view)
+    attach_pre_event(all_events, log_dir=log_dir, pre_event_prefix=args.pre_event.strip())
+    summarize(all_events, args.view, pre_event_prefix=args.pre_event.strip())
     return 0
 
 
