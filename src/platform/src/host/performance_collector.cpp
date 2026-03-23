@@ -338,8 +338,15 @@ int PerformanceCollector::export_swimlane_json(const std::string& output_path) {
     std::tm* timeinfo = std::localtime(&now);
     char time_buffer[32];
     std::strftime(time_buffer, sizeof(time_buffer), "%Y%m%d_%H%M%S", timeinfo);
+    // Add device suffix to avoid filename collisions in multi-card profiling runs.
+    std::string device_suffix = "_d";
+    if (device_id_ >= 0) {
+        device_suffix += std::to_string(device_id_);
+    } else {
+        device_suffix += "unknown";
+    }
     std::string filepath = output_path + "/perf_swimlane_"
-                          + std::string(time_buffer) + ".json";
+                          + std::string(time_buffer) + device_suffix + ".json";
 
     // Step 6: Open JSON file for writing
     std::ofstream outfile(filepath);
