@@ -950,11 +950,16 @@ def run_on_device_comm(
     Worker for requires_comm: init HCCL, create CodeRunner, run with comm_context.
     When requires_sdma is True, also initializes SDMA workspace and passes it in comm_context.
     """
-    from hccl_bindings import hccl_init_comm
+    from hccl_bindings import hccl_barrier, hccl_init_comm
 
     comm, device_ctx_ptr, win_in_base, win_out_base, stream, actual_rank_id = hccl_init_comm(
         rank_id, n_ranks, n_devices, first_device_id, root_info
     )
+    # Global sync right after comm/window setup.
+    # This mirrors upstream distributed runner behavior and reduces
+    # rank skew before entering runtime initialization/launch.
+    hccl_barrier(comm, stream)
+    logger.info("HcclBarrier (post-comm-init) done: rank=%d actual_rank=%d", rank_id, actual_rank_id)
 
     comm_context = {
         "device_ctx_ptr": device_ctx_ptr,
@@ -989,6 +994,9 @@ def run_on_device_comm(
     try:
         runner.run(comm_context=comm_context)
     finally:
+        # Final sync before this worker exits to reduce cross-rank tail skew.
+        hccl_barrier(comm, stream)
+        logger.info("HcclBarrier (pre-exit) done: rank=%d actual_rank=%d", rank_id, actual_rank_id)
         if requires_sdma:
             from sdma_bindings import sdma_finalize
             sdma_finalize()
