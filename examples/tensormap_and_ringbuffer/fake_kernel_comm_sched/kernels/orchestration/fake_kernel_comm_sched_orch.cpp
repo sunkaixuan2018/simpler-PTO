@@ -74,15 +74,27 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     Tensor win_dst_t = make_tensor_external(reinterpret_cast<void*>(win_dst), dst_shapes, 1, DataType::FLOAT32);
 
     PTO2_SCOPE(rt) {
+        Tensor barrier_t = make_tensor_external(reinterpret_cast<void*>(barrier_base), barrier_shapes, 1, DataType::INT32);
+        Tensor sync_t0 = make_tensor(sync_shapes, 1, DataType::INT32);
+        Tensor sync_t = make_tensor(sync_shapes, 1, DataType::INT32);
+
+        // System-start barrier: synchronize ranks before entering copyin/barrier/gather/copyout flow.
+        PTOParam params_barrier0[] = {
+            make_input_param(barrier_t),
+            make_scalar_param(device_ctx_ptr),
+            make_scalar_param(static_cast<uint64_t>(n_ranks)),
+            make_scalar_param(static_cast<uint64_t>(root)),
+            make_input_param(barrier_t),
+            make_output_param(sync_t0),
+        };
+        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier0, 6);
+
         PTOParam params_wmin[] = {
             make_output_param(win_src_t),
             make_input_param(dev_src_t),
             make_scalar_param(static_cast<uint64_t>(GATHER_COUNT)),
         };
         pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 3);
-
-        Tensor barrier_t = make_tensor_external(reinterpret_cast<void*>(barrier_base), barrier_shapes, 1, DataType::INT32);
-        Tensor sync_t = make_tensor(sync_shapes, 1, DataType::INT32);
 
         PTOParam params_barrier[] = {
             make_input_param(barrier_t),
