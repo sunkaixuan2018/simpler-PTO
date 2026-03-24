@@ -49,6 +49,7 @@ import logging
 import os
 import sys
 import time
+import hashlib
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -57,6 +58,34 @@ import torch
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def _file_barrier(
+    sync_dir: Path,
+    tag: str,
+    rank_id: int,
+    n_ranks: int,
+    timeout_s: float = 120.0,
+    poll_s: float = 0.05,
+) -> None:
+    """
+    Cross-process file barrier for multi-card workers.
+
+    Each rank creates one marker and waits until all rank markers exist.
+    """
+    sync_dir.mkdir(parents=True, exist_ok=True)
+    my_marker = sync_dir / f"barrier_{tag}_r{rank_id}.ready"
+    my_marker.write_text("1", encoding="utf-8")
+
+    deadline = time.monotonic() + timeout_s
+    for r in range(n_ranks):
+        marker = sync_dir / f"barrier_{tag}_r{r}.ready"
+        while not marker.exists():
+            if time.monotonic() > deadline:
+                raise TimeoutError(
+                    f"file barrier timeout: tag={tag}, rank={rank_id}, waiting_for_rank={r}, dir={sync_dir}"
+                )
+            time.sleep(poll_s)
 
 
 def _setup_logging_if_needed() -> None:
@@ -955,6 +984,11 @@ def run_on_device_comm(
     comm, device_ctx_ptr, win_in_base, win_out_base, stream, actual_rank_id = hccl_init_comm(
         rank_id, n_ranks, n_devices, first_device_id, root_info
     )
+    # Extra all-rank handshake after comm resource setup (similar to upstream
+    # distributed worker's init-stage synchronization).
+    sync_tag = hashlib.sha1(root_info).hexdigest()[:16]
+    sync_dir = Path("/dev/shm") / f"simpler_comm_sync_{sync_tag}"
+    _file_barrier(sync_dir, "post_hccl_init", rank_id, n_ranks)
     # Global sync right after comm/window setup.
     # This mirrors upstream distributed runner behavior and reduces
     # rank skew before entering runtime initialization/launch.
@@ -997,6 +1031,8 @@ def run_on_device_comm(
         # Final sync before this worker exits to reduce cross-rank tail skew.
         hccl_barrier(comm, stream)
         logger.info("HcclBarrier (pre-exit) done: rank=%d actual_rank=%d", rank_id, actual_rank_id)
+        # Keep this symmetric so all workers complete together before teardown.
+        _file_barrier(sync_dir, "pre_exit", rank_id, n_ranks)
         if requires_sdma:
             from sdma_bindings import sdma_finalize
             sdma_finalize()
