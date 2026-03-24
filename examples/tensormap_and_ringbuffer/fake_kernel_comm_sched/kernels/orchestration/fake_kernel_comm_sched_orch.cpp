@@ -93,8 +93,10 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             make_output_param(win_src_t),
             make_input_param(dev_src_t),
             make_scalar_param(static_cast<uint64_t>(GATHER_COUNT)),
+            // Dependency only: enforce barrier0 completion before copyin.
+            make_input_param(sync_t0),
         };
-        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 3);
+        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 4);
 
         PTOParam params_barrier[] = {
             make_input_param(barrier_t),
