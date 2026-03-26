@@ -4,8 +4,17 @@ fake_kernel_comm_sched: Scheduler-level variant selection.
 Same as fake_kernel_comm but variant selection happens in the AICPU scheduler
 (at dispatch time) instead of in orchestration (at submit time).
 Orchestration submits a variant task; scheduler picks sync or async at dispatch.
+
+Environment variables:
+    GATHER_COUNT    Elements per rank (default 256). Used by golden.py for tensor sizing.
+                    The orchestration derives this at runtime from the src tensor byte size.
+    GATHER_STRATEGY Gather kernel strategy: hybrid (default), mte, sdma.
+                    Passed to orchestration as args[11] via golden.py.
+    N_DEVICES       Number of devices/ranks (default 4).
+    FIRST_DEVICE    First device ID (default 0).
 """
 
+import os
 from pathlib import Path
 
 _KERNELS_ROOT = Path(__file__).parent
@@ -27,8 +36,8 @@ RUNTIME_CONFIG = {
     "runtime": "tensormap_and_ringbuffer",
     "aicpu_thread_num": 4,
     "block_dim": 24,
-    "n_devices": 2,
-    "first_device_id": 0,
+    "n_devices": int(os.environ.get("N_DEVICES", "4")),
+    "first_device_id": int(os.environ.get("FIRST_DEVICE", "0")),
     "requires_comm": True,
     "requires_sdma": True,
 }

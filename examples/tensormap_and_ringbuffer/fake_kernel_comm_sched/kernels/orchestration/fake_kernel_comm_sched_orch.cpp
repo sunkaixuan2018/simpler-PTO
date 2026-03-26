@@ -10,9 +10,12 @@
  *   - Small data + all other cores busy → Async (don't block AICore)
  *   - Small data + idle cores available → Sync (lower latency)
  *
- * Args (11): [0] dev_src, [1] dev_out, [2] size_src, [3] size_out,
+ * Args (12): [0] dev_src, [1] dev_out, [2] size_src, [3] size_out,
  *   [4] device_ctx_ptr, [5] win_in_base, [6] win_out_base,
- *   [7] n_ranks, [8] root, [9] rank_id, [10] sdma_workspace_ptr
+ *   [7] n_ranks, [8] root, [9] rank_id, [10] sdma_workspace_ptr,
+ *   [11] strategy (0=hybrid, 1=mte/sync, 2=sdma/async)
+ *
+ * gather_count is derived at runtime from size_src / sizeof(float).
  */
 
 #include <stddef.h>
@@ -20,7 +23,6 @@
 
 #include "pto_orchestration_api.h"
 
-constexpr int GATHER_COUNT = 256;
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 
 #define FUNC_WIN_MEMCOPY_IN  0
@@ -36,17 +38,17 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 11,
+        .expected_arg_count = 12,
     };
 }
 
 __attribute__((visibility("default")))
 void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
-    (void)arg_count;
     pto2_rt_init_tensor_pool(rt);
 
     void* dev_src = reinterpret_cast<void*>(args[0]);
     void* dev_out = reinterpret_cast<void*>(args[1]);
+    int64_t size_src = static_cast<int64_t>(args[2]);
     uint64_t device_ctx_ptr = args[4];
     uint64_t win_in_base = args[5];
     (void)args[6];
@@ -54,17 +56,22 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     int root = static_cast<int>(args[8]);
     int rank_id = static_cast<int>(args[9]);
     uint64_t sdma_workspace_ptr = args[10];
+    // strategy: 0=hybrid (scheduler selects), 1=mte/sync, 2=sdma/async
+    int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
 
-    LOG_INFO(rt, "fake_kernel_comm_sched: scheduler will select variant, n_ranks=%d rank=%d",
-             n_ranks, rank_id);
+    // Derive gather_count at runtime from src tensor byte size
+    int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
+
+    LOG_INFO(rt, "fake_kernel_comm_sched: strategy=%d gather_count=%d n_ranks=%d rank=%d",
+             strategy, gather_count, n_ranks, rank_id);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
     uint64_t win_src = barrier_base + barrier_size;
-    uint64_t win_dst = win_src + GATHER_COUNT * sizeof(float);
+    uint64_t win_dst = win_src + static_cast<uint64_t>(gather_count) * sizeof(float);
 
-    uint64_t src_shapes[1] = {GATHER_COUNT};
-    uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * GATHER_COUNT};
+    uint64_t src_shapes[1] = {static_cast<uint64_t>(gather_count)};
+    uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
 
@@ -92,7 +99,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
         PTOParam params_wmin[] = {
             make_output_param(win_src_t),
             make_input_param(dev_src_t),
-            make_scalar_param(static_cast<uint64_t>(GATHER_COUNT)),
+            make_scalar_param(static_cast<uint64_t>(gather_count)),
             // Dependency only: enforce barrier0 completion before copyin.
             make_input_param(sync_t0),
         };
@@ -118,15 +125,21 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 make_scalar_param(static_cast<uint64_t>(root)),
                 make_scalar_param(sdma_workspace_ptr),
             };
-            // Scheduler-level selection: provide both variants, let scheduler pick
-            int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
-            pto2_rt_submit_variant_task(rt, gather_variants, 2,
-                                         PTO2_WORKER_VECTOR, params_gather, 7);
+            // strategy=0: hybrid (scheduler picks), 1: mte/sync only, 2: sdma/async only
+            if (strategy == 1) {
+                pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+            } else if (strategy == 2) {
+                pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+            } else {
+                int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
+                pto2_rt_submit_variant_task(rt, gather_variants, 2,
+                                             PTO2_WORKER_VECTOR, params_gather, 7);
+            }
 
             PTOParam params_wmout[] = {
                 make_output_param(dev_out_t),
                 make_input_param(win_dst_t),
-                make_scalar_param(static_cast<uint64_t>(n_ranks * GATHER_COUNT)),
+                make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
             };
             pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
         }

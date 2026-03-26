@@ -45,8 +45,33 @@ def read_perf_data(filepath):
     Raises:
         ValueError: If JSON format is invalid
     """
-    with open(filepath, 'r') as f:
-        data = json.load(f)
+    with open(filepath, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    try:
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        # Common when a file contains two JSON objects back-to-back (e.g. accidental append)
+        # or NDJSON; accept the first complete object and warn.
+        if "Extra data" in str(e):
+            decoder = json.JSONDecoder()
+            lead = len(content) - len(content.lstrip())
+            try:
+                data, end_rel = decoder.raw_decode(content.lstrip())
+            except json.JSONDecodeError:
+                raise e from None
+            end = lead + end_rel
+            trailing = content[end:].strip()
+            if trailing:
+                extra_line = content[:end].count("\n") + 1
+                print(
+                    f"Warning: {filepath} has extra data after the first JSON object "
+                    f"(extra begins around line {extra_line}). "
+                    "Using only the first object. Remove the duplicate or split into separate files.",
+                    file=sys.stderr,
+                )
+        else:
+            raise
 
     # Validate required fields
     required_fields = ['version', 'tasks']
@@ -65,7 +90,7 @@ def load_kernel_config(config_path):
     """Load kernel configuration from kernel_config.py file.
 
     Args:
-        config_path: Path to kernel_config.py file
+        config_path: Path to kernel_config.py file, or a directory containing it
 
     Returns:
         dict: Mapping from func_id (as string) to function name
@@ -79,6 +104,17 @@ def load_kernel_config(config_path):
 
     if not config_path.exists():
         raise ValueError(f"Kernel config file not found: {config_path}")
+
+    # Accept either kernel_config.py or its parent directory (common UX mistake)
+    if config_path.is_dir():
+        candidate = config_path / "kernel_config.py"
+        if candidate.is_file():
+            config_path = candidate
+        else:
+            raise ValueError(
+                f"Kernel config path is a directory without kernel_config.py: {config_path}. "
+                f"Pass the file explicitly, e.g. {candidate}"
+            )
 
     # Load the Python module dynamically
     spec = importlib.util.spec_from_file_location("kernel_config", config_path)
@@ -548,7 +584,10 @@ Examples:
 
     parser.add_argument('input', nargs='?', help='Input JSON file (.json). If not specified, uses the latest perf_swimlane_*.json file in outputs/ directory')
     parser.add_argument('-o', '--output', help='Output JSON file (default: outputs/merged_swimlane_<timestamp>.json)')
-    parser.add_argument('-k', '--kernel-config', help='Path to kernel_config.py file for func_id to function name mapping')
+    parser.add_argument(
+        '-k', '--kernel-config',
+        help='Path to kernel_config.py (or its parent kernels/ directory) for func_id -> name mapping',
+    )
     parser.add_argument('--device-log', help='Device log file/path/glob override used for scheduler analysis')
     parser.add_argument('-d', '--device-id', help='Device id for auto-selection from device-<id>')
     parser.add_argument('-v', '--verbose', action='store_true', help='Verbose output')

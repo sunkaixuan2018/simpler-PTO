@@ -1,17 +1,27 @@
 """
 Golden reference for fake_kernel_comm_sched: scheduler-level variant selection.
 
-Variant selection is transparent — no variant_id parameter needed.
-The scheduler internally picks sync or async gather at dispatch time.
+Variant selection is transparent — the scheduler internally picks sync or async
+gather at dispatch time, or a forced strategy is passed via args[11].
 
 Args layout: [src, out, size_src, size_out, device_ctx_ptr, win_in_base,
-              win_out_base, n_ranks, root, rank_id, sdma_workspace_ptr]
+              win_out_base, n_ranks, root, rank_id, sdma_workspace_ptr, strategy]
+
+Environment variables:
+    GATHER_COUNT    Elements per rank (default 256). Controls tensor sizes.
+    GATHER_STRATEGY Gather strategy: hybrid (default), mte, sdma.
+                    Encoded as int and passed as args[11] to orchestration.
 """
 
 import ctypes
+import os
+
 import numpy as np
 
-GATHER_COUNT = 256
+GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
+
+# Strategy encoding: 0=hybrid, 1=mte/sync, 2=sdma/async
+_STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 
 __outputs__ = ["out"]
 RTOL = 1e-4
@@ -20,12 +30,15 @@ ATOL = 1e-4
 
 def generate_inputs(params: dict) -> list:
     rank_id = params.get("rank_id", 0)
-    n_ranks = params.get("n_ranks", 2)
+    n_ranks = params.get("n_ranks", 4)
     root = params.get("root", 0)
 
     np.random.seed(42 + rank_id)
     src = np.random.randn(GATHER_COUNT).astype(np.float32) * 0.1
     out = np.zeros((n_ranks * GATHER_COUNT,), dtype=np.float32)
+
+    strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
+    strategy_int = _STRATEGY_MAP.get(strategy_str, 0)
 
     result = [
         ("src", src),
@@ -43,6 +56,7 @@ def generate_inputs(params: dict) -> list:
             ("root", ctypes.c_int32(root)),
             ("rank_id", ctypes.c_int32(rank_id)),
             ("sdma_workspace_ptr", ctypes.c_uint64(params.get("sdma_workspace_ptr", 0))),
+            ("strategy", ctypes.c_int32(strategy_int)),
         ])
 
     return result
@@ -50,7 +64,7 @@ def generate_inputs(params: dict) -> list:
 
 def compute_golden(tensors: dict, params: dict) -> None:
     rank_id = params.get("rank_id", 0)
-    n_ranks = params.get("n_ranks", 2)
+    n_ranks = params.get("n_ranks", 4)
     root = params.get("root", 0)
 
     out = tensors["out"]

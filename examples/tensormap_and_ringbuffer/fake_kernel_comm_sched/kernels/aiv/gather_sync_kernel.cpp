@@ -30,7 +30,10 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-static constexpr size_t GATHER_COUNT = 256;
+// MAX_GATHER_COUNT covers the largest benchmark size (256K total / 4 ranks / 4 bytes = 16384).
+// TileData is allocated at this maximum size; actual gather count is derived from the dst
+// tensor at runtime so the same compiled kernel handles all benchmark data sizes.
+static constexpr size_t MAX_GATHER_COUNT = 16384;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ TensorData* dst_td = reinterpret_cast<__gm__ TensorData*>(args[0]);
@@ -44,18 +47,21 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ float* dst = reinterpret_cast<__gm__ float*>(dst_td->buffer.addr);
     __gm__ float* src = reinterpret_cast<__gm__ float*>(src_td->buffer.addr);
 
+    // Derive actual gather_count from dst tensor size at runtime
+    size_t gather_count = dst_td->buffer.size / (static_cast<size_t>(nranks) * sizeof(float));
+
     using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
     using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
     using Global = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
-    using TileData = pto::Tile<pto::TileType::Vec, float, 1, GATHER_COUNT, pto::BLayout::RowMajor, -1, -1>;
+    using TileData = pto::Tile<pto::TileType::Vec, float, 1, MAX_GATHER_COUNT, pto::BLayout::RowMajor, -1, -1>;
 
     int my_rank = static_cast<int>(hcclCtx->rankId);
 
-    ShapeDyn srcShape(1, 1, 1, 1, GATHER_COUNT);
-    StrideDyn srcStride(GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, 1);
+    ShapeDyn srcShape(1, 1, 1, 1, gather_count);
+    StrideDyn srcStride(gather_count, gather_count, gather_count, gather_count, 1);
 
-    ShapeDyn dstShape(1, 1, 1, nranks, GATHER_COUNT);
-    StrideDyn dstStride(nranks * GATHER_COUNT, nranks * GATHER_COUNT, nranks * GATHER_COUNT, GATHER_COUNT, 1);
+    ShapeDyn dstShape(1, 1, 1, nranks, gather_count);
+    StrideDyn dstStride(nranks * gather_count, nranks * gather_count, nranks * gather_count, gather_count, 1);
     Global dstG(dst, dstShape, dstStride);
 
     Global tensors[16];
@@ -67,7 +73,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     pto::comm::ParallelGroup<Global> pg(tensors, actual_nranks, root);
 
-    TileData ubTile(1, GATHER_COUNT);
+    TileData ubTile(1, MAX_GATHER_COUNT);
     TASSIGN(ubTile, 0x0);
 
     if (my_rank == root) {

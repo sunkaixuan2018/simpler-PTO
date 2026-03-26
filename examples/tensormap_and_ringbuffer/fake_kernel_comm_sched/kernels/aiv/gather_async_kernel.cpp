@@ -31,8 +31,6 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-static constexpr size_t GATHER_COUNT = 256;
-
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ TensorData* dst_td = reinterpret_cast<__gm__ TensorData*>(args[0]);
     __gm__ TensorData* src_td = reinterpret_cast<__gm__ TensorData*>(args[1]);
@@ -44,6 +42,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     __gm__ float* dst = reinterpret_cast<__gm__ float*>(dst_td->buffer.addr);
     __gm__ float* src = reinterpret_cast<__gm__ float*>(src_td->buffer.addr);
+
+    // Derive actual gather_count from dst tensor size at runtime
+    size_t gather_count = dst_td->buffer.size / (static_cast<size_t>(nranks) * sizeof(float));
 
     int my_rank = static_cast<int>(hcclCtx->rankId);
 
@@ -57,8 +58,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     using Global = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
     using ScratchTile = pto::Tile<pto::TileType::Vec, uint8_t, 1, pto::comm::sdma::UB_ALIGN_SIZE>;
 
-    ShapeDyn shape(1, 1, 1, 1, GATHER_COUNT);
-    StrideDyn stride(GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, GATHER_COUNT, 1);
+    ShapeDyn shape(1, 1, 1, 1, gather_count);
+    StrideDyn stride(gather_count, gather_count, gather_count, gather_count, 1);
 
     // Build async session
     ScratchTile scratchTile;
@@ -76,8 +77,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     for (int target_rank = 0; target_rank < nranks; ++target_rank) {
         if (target_rank == root) {
-            // Local copy: root's own data goes to dst[root * GATHER_COUNT]
-            __gm__ float* localDst = dst + root * GATHER_COUNT;
+            // Local copy: root's own data goes to dst[root * gather_count]
+            __gm__ float* localDst = dst + root * gather_count;
             Global localDstG(localDst, shape, stride);
             Global localSrcG(src, shape, stride);
             if (issued >= kEventSlots) {
@@ -89,7 +90,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         }
 
         __gm__ float* remoteSrc = HcclRemotePtr(hcclCtx, src, target_rank);
-        __gm__ float* localDst = dst + target_rank * GATHER_COUNT;
+        __gm__ float* localDst = dst + target_rank * gather_count;
         Global remoteSrcG(remoteSrc, shape, stride);
         Global localDstG(localDst, shape, stride);
 
