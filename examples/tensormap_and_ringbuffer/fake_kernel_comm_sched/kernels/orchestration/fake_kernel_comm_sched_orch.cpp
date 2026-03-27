@@ -16,6 +16,10 @@
  *   [11] strategy (0=hybrid, 1=mte/sync, 2=sdma/async)
  *
  * gather_count is derived at runtime from size_src / sizeof(float).
+ *
+ * N_ITER gather pipelines are submitted in one invocation for benchmarking.
+ * The first N_WARMUP iterations serve as warm-up; the host benchmark script
+ * averages the remaining (N_ITER - N_WARMUP) samples from the perf JSON.
  */
 
 #include <stddef.h>
@@ -24,6 +28,7 @@
 #include "pto_orchestration_api.h"
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
+constexpr int N_ITER = 100;
 
 #define FUNC_WIN_MEMCOPY_IN  0
 #define FUNC_GATHER_SYNC     1
@@ -83,7 +88,6 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     PTO2_SCOPE(rt) {
         Tensor barrier_t = make_tensor_external(reinterpret_cast<void*>(barrier_base), barrier_shapes, 1, DataType::INT32);
         Tensor sync_t0 = make_tensor(sync_shapes, 1, DataType::INT32);
-        Tensor sync_t = make_tensor(sync_shapes, 1, DataType::INT32);
 
         // System-start barrier: synchronize ranks before entering copyin/barrier/gather/copyout flow.
         PTOParam params_barrier0[] = {
@@ -96,52 +100,63 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
         };
         pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier0, 6);
 
-        PTOParam params_wmin[] = {
-            make_output_param(win_src_t),
-            make_input_param(dev_src_t),
-            make_scalar_param(static_cast<uint64_t>(gather_count)),
-            // Dependency only: enforce barrier0 completion before copyin.
-            make_input_param(sync_t0),
-        };
-        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 4);
+        // prev_barrier_sync chains iterations: each copyin waits for the previous barrier.
+        Tensor prev_barrier_sync = sync_t0;
 
-        PTOParam params_barrier[] = {
-            make_input_param(barrier_t),
-            make_scalar_param(device_ctx_ptr),
-            make_scalar_param(static_cast<uint64_t>(n_ranks)),
-            make_scalar_param(static_cast<uint64_t>(root)),
-            make_input_param(win_src_t),
-            make_output_param(sync_t),
-        };
-        pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
+        for (int iter = 0; iter < N_ITER; ++iter) {
+            Tensor sync_after_barrier = make_tensor(sync_shapes, 1, DataType::INT32);
 
-        if (rank_id == root) {
-            PTOParam params_gather[] = {
-                make_output_param(win_dst_t),
-                make_input_param(win_src_t),
-                make_input_param(sync_t),
+            PTOParam params_wmin[] = {
+                make_output_param(win_src_t),
+                make_input_param(dev_src_t),
+                make_scalar_param(static_cast<uint64_t>(gather_count)),
+                // Dependency only: enforce prior barrier completion before copyin.
+                make_input_param(prev_barrier_sync),
+            };
+            pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 4);
+
+            PTOParam params_barrier[] = {
+                make_input_param(barrier_t),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
-                make_scalar_param(sdma_workspace_ptr),
+                make_input_param(win_src_t),
+                make_output_param(sync_after_barrier),
             };
-            // strategy=0: hybrid (scheduler picks), 1: mte/sync only, 2: sdma/async only
-            if (strategy == 1) {
-                pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather, 7);
-            } else if (strategy == 2) {
-                pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather, 7);
-            } else {
-                int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
-                pto2_rt_submit_variant_task(rt, gather_variants, 2,
-                                             PTO2_WORKER_VECTOR, params_gather, 7);
+            pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
+
+            if (rank_id == root) {
+                Tensor gather_out = (iter == N_ITER - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+
+                PTOParam params_gather[] = {
+                    make_output_param(gather_out),
+                    make_input_param(win_src_t),
+                    make_input_param(sync_after_barrier),
+                    make_scalar_param(device_ctx_ptr),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                    make_scalar_param(static_cast<uint64_t>(root)),
+                    make_scalar_param(sdma_workspace_ptr),
+                };
+                // strategy=0: hybrid (scheduler picks), 1: mte/sync only, 2: sdma/async only
+                if (strategy == 1) {
+                    pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+                } else if (strategy == 2) {
+                    pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+                } else {
+                    int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
+                    pto2_rt_submit_variant_task(rt, gather_variants, 2,
+                                                 PTO2_WORKER_VECTOR, params_gather, 7);
+                }
+
+                PTOParam params_wmout[] = {
+                    make_output_param(dev_out_t),
+                    make_input_param(gather_out),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
+                };
+                pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
             }
 
-            PTOParam params_wmout[] = {
-                make_output_param(dev_out_t),
-                make_input_param(win_dst_t),
-                make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
-            };
-            pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
+            prev_barrier_sync = sync_after_barrier;
         }
     }
 

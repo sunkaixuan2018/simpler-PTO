@@ -2,8 +2,11 @@
 """
 Batch benchmark for fake_kernel_comm_sched: gather operator performance.
 
-Tests MTE (sync TGATHER), SDMA (async TGET_ASYNC), and Hybrid (scheduler-
-adaptive) strategies across multiple total communication sizes on 4 cards.
+Tests MTE (sync TGATHER) and SDMA (async TGET_ASYNC) strategies across
+multiple total communication sizes on 4 cards.
+
+Each invocation runs N_ITER=100 gather pipelines back-to-back. The first
+N_WARMUP=50 are discarded; the remaining 50 are averaged for the result.
 
 Usage:
     python tools/bench_gather_comm_sched.py --platform a2a3 --first-device 4
@@ -13,8 +16,8 @@ Usage:
 
 import argparse
 import csv
+import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -28,26 +31,39 @@ from pathlib import Path
 STRATEGY_NAMES = ["mte", "sdma", "hybrid"]
 
 # Total communication volumes in bytes (all ranks combined, float32 gather)
-SIZE_LABELS = ["1K", "4K", "8K", "16K", "32K", "64K", "256K"]
+SIZE_LABELS = [
+    "1K", "2K", "4K", "8K", "16K", "32K", "64K",
+    "128K", "256K", "512K", "1M", "2M", "4M", "8M",
+]
 SIZE_BYTES = {
-    "1K":   1 * 1024,
-    "4K":   4 * 1024,
-    "8K":   8 * 1024,
-    "16K": 16 * 1024,
-    "32K": 32 * 1024,
-    "64K": 64 * 1024,
+    "1K":    1 * 1024,
+    "2K":    2 * 1024,
+    "4K":    4 * 1024,
+    "8K":    8 * 1024,
+    "16K":  16 * 1024,
+    "32K":  32 * 1024,
+    "64K":  64 * 1024,
+    "128K": 128 * 1024,
     "256K": 256 * 1024,
+    "512K": 512 * 1024,
+    "1M":   1 * 1024 ** 2,
+    "2M":   2 * 1024 ** 2,
+    "4M":   4 * 1024 ** 2,
+    "8M":   8 * 1024 ** 2,
 }
 
 # Gather func_ids in the profiling data
 FUNC_ID_GATHER_SYNC  = 1  # GatherSync  (MTE / TGATHER)
 FUNC_ID_GATHER_ASYNC = 2  # GatherAsync (SDMA / TGET_ASYNC)
 
+N_ITER   = 100  # total gather iterations per invocation (must match C++ N_ITER)
+N_WARMUP = 50   # warm-up iterations to discard
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
 
-_SCRIPT_DIR  = Path(__file__).parent.resolve()
+_SCRIPT_DIR   = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 _OUTPUTS_DIR  = _PROJECT_ROOT / "outputs"
 
@@ -56,7 +72,6 @@ _KERNELS_DIR = _PROJECT_ROOT / "examples" / "tensormap_and_ringbuffer" / \
 _GOLDEN_PATH  = _PROJECT_ROOT / "examples" / "tensormap_and_ringbuffer" / \
                "fake_kernel_comm_sched" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
-_CONVERTER    = _PROJECT_ROOT / "tools" / "swimlane_converter.py"
 
 
 def _gather_count_for(total_bytes: int, n_ranks: int) -> int:
@@ -82,50 +97,58 @@ def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _run_converter(perf_file: Path) -> str:
-    """Run swimlane_converter.py on perf_file; return combined stdout+stderr."""
-    cmd = [
-        sys.executable, str(_CONVERTER),
-        str(perf_file),
-        "-k", str(_KERNELS_DIR),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
-    return result.stdout + result.stderr
-
-
-def _parse_gather_stats(converter_output: str) -> dict | None:
+def _parse_gather_stats(perf_file: Path) -> dict | None:
     """
-    Parse gather func_id stats from swimlane_converter output.
-
-    The statistics table has lines like:
-        1        GatherSync   1      200.00/300.00   50.00/75.00  ...
-        2        GatherAsync  1      120.00/180.00   30.00/45.00  ...
+    Parse gather task stats from the raw perf JSON, averaging the last
+    (N_ITER - N_WARMUP) gather samples by dispatch time order.
 
     Returns a dict with keys:
-        func_id, func_name, count, avg_exec_us, avg_latency_us
-    or None if no gather task was found.
+        func_id, func_name, total_count, measured_count, avg_exec_us, avg_latency_us
+    or None if no gather tasks were found.
     """
-    # Match: func_id  name  count  total_exec/total_lat  avg_exec/avg_lat  ...
-    pattern = re.compile(
-        r'^\s*([12])\s+(\S+)\s+(\d+)\s+[\d.]+/[\d.]+\s+([\d.]+)/([\d.]+)',
-        re.MULTILINE
-    )
-    best = None
-    for m in pattern.finditer(converter_output):
-        func_id   = int(m.group(1))
-        func_name = m.group(2)
-        count     = int(m.group(3))
-        avg_exec  = float(m.group(4))
-        avg_lat   = float(m.group(5))
-        if func_id in (FUNC_ID_GATHER_SYNC, FUNC_ID_GATHER_ASYNC) and count > 0:
-            best = {
-                "func_id":        func_id,
-                "func_name":      func_name,
-                "count":          count,
-                "avg_exec_us":    avg_exec,
-                "avg_latency_us": avg_lat,
-            }
-    return best
+    with open(perf_file, encoding="utf-8") as f:
+        data = json.load(f)
+
+    tasks = data.get("tasks", [])
+
+    gather_tasks = [
+        t for t in tasks
+        if t.get("func_id") in (FUNC_ID_GATHER_SYNC, FUNC_ID_GATHER_ASYNC)
+    ]
+    if not gather_tasks:
+        return None
+
+    # Sort chronologically by dispatch time (fall back to start time)
+    gather_tasks.sort(key=lambda t: t.get("dispatch_time_us", t.get("start_time_us", 0)))
+
+    total_count = len(gather_tasks)
+    measured = gather_tasks[N_WARMUP:]
+    if not measured:
+        measured = gather_tasks  # fewer than N_WARMUP samples; use all
+
+    exec_vals    = [t["duration_us"] for t in measured]
+    latency_vals = [
+        t["finish_time_us"] - t["dispatch_time_us"]
+        for t in measured
+        if "finish_time_us" in t and "dispatch_time_us" in t
+    ]
+
+    avg_exec    = sum(exec_vals) / len(exec_vals)
+    avg_latency = sum(latency_vals) / len(latency_vals) if latency_vals else avg_exec
+
+    # Determine which gather kernel was used (most frequent in measured window)
+    func_ids = [t["func_id"] for t in measured]
+    func_id  = max(set(func_ids), key=func_ids.count)
+    func_name = "GatherSync" if func_id == FUNC_ID_GATHER_SYNC else "GatherAsync"
+
+    return {
+        "func_id":         func_id,
+        "func_name":       func_name,
+        "total_count":     total_count,
+        "measured_count":  len(measured),
+        "avg_exec_us":     avg_exec,
+        "avg_latency_us":  avg_latency,
+    }
 
 
 def run_case(
@@ -148,6 +171,7 @@ def run_case(
     env["GATHER_STRATEGY"] = strategy
     env["N_DEVICES"]       = str(n_ranks)
     env["FIRST_DEVICE"]    = str(first_device)
+    env["N_ITER"]          = str(N_ITER)
 
     cmd = [
         sys.executable, str(_RUNNER),
@@ -164,16 +188,20 @@ def run_case(
     proc = subprocess.run(cmd, env=env, capture_output=not verbose, text=True)
 
     result = {
-        "strategy":       strategy,
-        "size":           size_label,
-        "total_bytes":    total_bytes,
-        "gather_count":   gather_count,
-        "n_ranks":        n_ranks,
-        "run_ok":         proc.returncode == 0,
-        "func_id":        None,
-        "func_name":      None,
-        "avg_exec_us":    None,
-        "avg_latency_us": None,
+        "strategy":        strategy,
+        "size":            size_label,
+        "total_bytes":     total_bytes,
+        "gather_count":    gather_count,
+        "n_ranks":         n_ranks,
+        "n_iter":          N_ITER,
+        "warmup_samples":  N_WARMUP,
+        "measured_samples": N_ITER - N_WARMUP,
+        "run_ok":          proc.returncode == 0,
+        "func_id":         None,
+        "func_name":       None,
+        "total_count":     None,
+        "avg_exec_us":     None,
+        "avg_latency_us":  None,
     }
 
     if not result["run_ok"]:
@@ -194,22 +222,24 @@ def run_case(
         print("  WARN: no perf file found")
         return result
 
-    converter_out = _run_converter(perf_file)
-    stats = _parse_gather_stats(converter_out)
+    stats = _parse_gather_stats(perf_file)
 
     if stats:
         result.update({
-            "func_id":        stats["func_id"],
-            "func_name":      stats["func_name"],
-            "avg_exec_us":    stats["avg_exec_us"],
-            "avg_latency_us": stats["avg_latency_us"],
+            "func_id":         stats["func_id"],
+            "func_name":       stats["func_name"],
+            "total_count":     stats["total_count"],
+            "avg_exec_us":     stats["avg_exec_us"],
+            "avg_latency_us":  stats["avg_latency_us"],
         })
         kernel_tag = "GatherSync→MTE" if stats["func_id"] == FUNC_ID_GATHER_SYNC else "GatherAsync→SDMA"
-        print(f"  exec={stats['avg_exec_us']:.1f}us  lat={stats['avg_latency_us']:.1f}us  [{kernel_tag}]")
+        measured   = stats["measured_count"]
+        print(f"  exec={stats['avg_exec_us']:.1f}us  lat={stats['avg_latency_us']:.1f}us"
+              f"  [n={measured}]  [{kernel_tag}]")
     else:
-        print("  WARN: gather stats not found in converter output")
+        print("  WARN: gather stats not found in perf JSON")
         if verbose:
-            print(converter_out[-600:])
+            print(f"  (perf file: {perf_file})")
 
     return result
 
@@ -226,7 +256,7 @@ def print_summary(results: list[dict]) -> None:
     sep = "-" * len(header)
     print()
     print("=" * len(header))
-    print("Gather Performance Summary")
+    print("Gather Performance Summary  (avg of last 50 / 100 iterations)")
     print("=" * len(header))
     print(header)
     print(sep)
@@ -253,7 +283,8 @@ def print_summary(results: list[dict]) -> None:
 def save_csv(results: list[dict], out_path: Path) -> None:
     fields = [
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
-        "run_ok", "func_id", "func_name", "avg_exec_us", "avg_latency_us",
+        "n_iter", "warmup_samples", "measured_samples",
+        "run_ok", "func_id", "func_name", "total_count", "avg_exec_us", "avg_latency_us",
     ]
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -284,9 +315,9 @@ Examples:
                         help="First device ID (default: 0)")
     parser.add_argument("--n-devices", type=int, default=4,
                         help="Number of devices/ranks (default: 4)")
-    parser.add_argument("--strategies", nargs="+", default=STRATEGY_NAMES,
+    parser.add_argument("--strategies", nargs="+", default=["mte", "sdma"],
                         choices=STRATEGY_NAMES,
-                        help="Strategies to test (default: all)")
+                        help="Strategies to test (default: mte sdma)")
     parser.add_argument("--sizes", nargs="+", default=SIZE_LABELS,
                         choices=list(SIZE_BYTES.keys()),
                         help="Total comm sizes to test (default: all)")
@@ -301,6 +332,7 @@ Examples:
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
     print(f"  sizes={args.sizes}")
+    print(f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, {N_ITER - N_WARMUP} measured")
     print()
 
     results = []
