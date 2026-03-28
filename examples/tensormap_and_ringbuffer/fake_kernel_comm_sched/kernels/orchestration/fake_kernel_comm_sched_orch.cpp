@@ -81,19 +81,22 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
-    uint64_t debug_shapes[1] = {static_cast<uint64_t>(n_ranks)};
+    // Full debug buffer: N_ITER rows × n_ranks columns (each iteration writes one row)
+    uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(N_ITER) * static_cast<uint64_t>(n_ranks)};
+    uint64_t debug_row_shapes[1] = {static_cast<uint64_t>(n_ranks)};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
     Tensor dev_out_t = make_tensor_external(dev_out, dst_shapes, 1, DataType::FLOAT32);
     Tensor win_src_t = make_tensor_external(reinterpret_cast<void*>(win_src), src_shapes, 1, DataType::FLOAT32);
     Tensor win_dst_t = make_tensor_external(reinterpret_cast<void*>(win_dst), dst_shapes, 1, DataType::FLOAT32);
 
-    // Debug poll counts tensor: kernel writes SDMA poll iteration counts here
+    // Debug poll counts tensor: full flat buffer [N_ITER * n_ranks]; each iteration
+    // writes its n_ranks poll counts into one row via a pointer-offset slice.
     Tensor dev_debug_t;
     if (dev_debug != nullptr) {
-        dev_debug_t = make_tensor_external(dev_debug, debug_shapes, 1, DataType::INT32);
+        dev_debug_t = make_tensor_external(dev_debug, debug_all_shapes, 1, DataType::INT32);
     } else {
-        dev_debug_t = make_tensor(debug_shapes, 1, DataType::INT32);
+        dev_debug_t = make_tensor(debug_all_shapes, 1, DataType::INT32);
     }
 
     PTO2_SCOPE(rt) {
@@ -138,8 +141,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
             if (rank_id == root) {
                 Tensor gather_out = (iter == N_ITER - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
-                // Last iteration writes to host-visible debug tensor; others use throwaway
-                Tensor debug_out = (iter == N_ITER - 1) ? dev_debug_t : make_tensor(debug_shapes, 1, DataType::INT32);
+                // Each iteration writes poll counts to its own row in the debug buffer.
+                void* iter_debug_ptr = (dev_debug != nullptr)
+                    ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
+                          + static_cast<size_t>(iter) * static_cast<size_t>(n_ranks) * sizeof(int32_t))
+                    : nullptr;
+                Tensor debug_out = (iter_debug_ptr != nullptr)
+                    ? make_tensor_external(iter_debug_ptr, debug_row_shapes, 1, DataType::INT32)
+                    : make_tensor(debug_row_shapes, 1, DataType::INT32);
 
                 PTOParam params_gather[] = {
                     make_output_param(gather_out),

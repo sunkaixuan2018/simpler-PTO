@@ -439,6 +439,54 @@ def print_summary(results: list[dict]) -> None:
     print("=" * len(header))
 
 
+def print_poll_stats(results: list[dict]) -> None:
+    """Print SDMA poll count statistics read from per-case JSON files written by golden.py."""
+    sdma_results = [r for r in results if r.get("func_id") == FUNC_ID_GATHER_ASYNC and r.get("run_ok")]
+    if not sdma_results:
+        return
+
+    header = (
+        f"  {'Size':5s}  {'n_ranks':7s}  {'p50':>8s}  {'p80':>8s}  {'p90':>8s}  "
+        f"{'p99':>8s}  {'max':>10s}  {'pct_1M':>8s}"
+    )
+    sep = "-" * (len(header))
+    print()
+    print("=" * len(header))
+    print("SDMA Poll Count Statistics  (ranks combined, last 50 of 100 iterations)")
+    print("=" * len(header))
+    print(header)
+    print(sep)
+
+    for r in sdma_results:
+        fname = _OUTPUTS_DIR / f"poll_counts_sdma_gc{r['gather_count']}_r{r['n_ranks']}.json"
+        if not fname.exists():
+            print(f"  {r['size']:5s}  (no poll data)")
+            continue
+
+        with open(fname) as f:
+            data = json.load(f)
+
+        poll = data["poll_counts"]   # list[list[int]]: [N_ITER][n_ranks]
+        measured = poll[N_WARMUP:]   # discard warm-up
+        all_vals = [v for row in measured for v in row]
+
+        if not all_vals:
+            continue
+
+        stats = _compute_distribution_stats(all_vals)
+        s = sorted(all_vals)
+        p80 = s[int(len(s) * 0.80)]
+        pct_1m = sum(1 for v in all_vals if v >= 1_000_000) / len(all_vals) * 100
+
+        print(
+            f"  {r['size']:5s}  {r['n_ranks']:7d}  "
+            f"{stats['p50']:>8.0f}  {p80:>8.0f}  {stats['p90']:>8.0f}  "
+            f"{stats['p99']:>8.0f}  {stats['max']:>10.0f}  {pct_1m:>7.1f}%"
+        )
+
+    print("=" * len(header))
+
+
 def save_csv(results: list[dict], out_path: Path) -> None:
     fields = [
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
@@ -515,6 +563,7 @@ Examples:
         print()
 
     print_summary(results)
+    print_poll_stats(results)
 
     # Save CSV
     args.output_dir.mkdir(parents=True, exist_ok=True)
