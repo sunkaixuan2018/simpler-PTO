@@ -55,6 +55,7 @@ SIZE_BYTES = {
 # Gather func_ids in the profiling data
 FUNC_ID_GATHER_SYNC  = 1  # GatherSync  (MTE / TGATHER)
 FUNC_ID_GATHER_ASYNC = 2  # GatherAsync (SDMA / TGET_ASYNC)
+FUNC_ID_COMM_BARRIER = 4  # CommBarrier
 
 N_ITER   = 100  # total gather iterations per invocation (must match C++ N_ITER)
 N_WARMUP = 50   # warm-up iterations to discard
@@ -80,8 +81,143 @@ def _gather_count_for(total_bytes: int, n_ranks: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Run one benchmark case
+# Diagnostic helpers
 # ---------------------------------------------------------------------------
+
+def _compute_distribution_stats(values: list[float]) -> dict:
+    """Compute p50/p90/p99/max/min/avg and outlier percentage for a list of values."""
+    if not values:
+        return {"count": 0, "avg": 0, "min": 0, "p50": 0, "p90": 0, "p99": 0, "max": 0, "pct_gt_2x_p50": 0}
+    s = sorted(values)
+    n = len(s)
+    p50 = s[n // 2]
+    p90 = s[int(n * 0.90)]
+    p99 = s[int(n * 0.99)]
+    gt_2x = sum(1 for v in s if v > 2 * p50)
+    return {
+        "count": n,
+        "avg": sum(s) / n,
+        "min": s[0],
+        "p50": p50,
+        "p90": p90,
+        "p99": p99,
+        "max": s[-1],
+        "pct_gt_2x_p50": gt_2x / n * 100,
+    }
+
+
+def _parse_gather_detail(perf_file: Path) -> tuple[list[dict], list[dict]]:
+    """
+    Parse per-iteration timing breakdown from perf JSON.
+
+    Returns (gather_rows, barrier_rows) where each row is a dict with:
+        iter, dispatch_time_us, start_time_us, end_time_us, finish_time_us,
+        head_oh_us, exec_us, tail_oh_us, latency_us
+    """
+    with open(perf_file, encoding="utf-8") as f:
+        data = json.load(f)
+
+    tasks = data.get("tasks", [])
+
+    gather_tasks = [
+        t for t in tasks
+        if t.get("func_id") in (FUNC_ID_GATHER_SYNC, FUNC_ID_GATHER_ASYNC)
+    ]
+    barrier_tasks = [
+        t for t in tasks
+        if t.get("func_id") == FUNC_ID_COMM_BARRIER
+    ]
+
+    def _to_rows(task_list):
+        task_list.sort(key=lambda t: t.get("dispatch_time_us", t.get("start_time_us", 0)))
+        rows = []
+        for i, t in enumerate(task_list):
+            dispatch = t.get("dispatch_time_us", 0)
+            start = t.get("start_time_us", 0)
+            end = t.get("end_time_us", 0)
+            finish = t.get("finish_time_us", 0)
+            rows.append({
+                "iter": i,
+                "func_id": t.get("func_id"),
+                "dispatch_time_us": dispatch,
+                "start_time_us": start,
+                "end_time_us": end,
+                "finish_time_us": finish,
+                "head_oh_us": start - dispatch,
+                "exec_us": t.get("duration_us", end - start),
+                "tail_oh_us": finish - end,
+                "latency_us": finish - dispatch,
+            })
+        return rows
+
+    return _to_rows(gather_tasks), _to_rows(barrier_tasks)
+
+
+def _print_diagnostic_report(
+    strategy: str,
+    size_label: str,
+    gather_rows: list[dict],
+    barrier_rows: list[dict],
+) -> None:
+    """Print per-segment distribution stats and anomaly correlation."""
+    if not gather_rows:
+        print("    [diagnostic] No gather data found.")
+        return
+
+    measured = gather_rows[N_WARMUP:]
+    if not measured:
+        measured = gather_rows
+
+    # --- Per-segment distribution ---
+    segments = ["head_oh_us", "exec_us", "tail_oh_us", "latency_us"]
+    stats = {seg: _compute_distribution_stats([r[seg] for r in measured]) for seg in segments}
+
+    print(f"\n    === Diagnostic: {strategy.upper()} {size_label} (n={len(measured)} measured) ===")
+    print(f"    {'Segment':<14s} {'avg':>10s} {'p50':>10s} {'p90':>10s} {'p99':>10s} {'max':>10s} {'>2x_p50':>8s}")
+    print(f"    {'-'*66}")
+    for seg in segments:
+        s = stats[seg]
+        label = seg.replace("_us", "")
+        print(f"    {label:<14s} {s['avg']:>10.1f} {s['p50']:>10.1f} {s['p90']:>10.1f} "
+              f"{s['p99']:>10.1f} {s['max']:>10.1f} {s['pct_gt_2x_p50']:>7.1f}%")
+
+    # --- Identify dominant anomaly segment ---
+    max_range = 0
+    dominant_seg = ""
+    for seg in ["head_oh_us", "exec_us", "tail_oh_us"]:
+        rng = stats[seg]["max"] - stats[seg]["p50"]
+        if rng > max_range:
+            max_range = rng
+            dominant_seg = seg
+    print(f"    >> Dominant anomaly segment: {dominant_seg.replace('_us', '')} "
+          f"(max-p50 = {max_range:.1f} us)")
+
+    # --- Anomaly correlation with barrier ---
+    p50_lat = stats["latency_us"]["p50"]
+    anomaly_iters = [r for r in measured if r["latency_us"] > 2 * p50_lat]
+    if anomaly_iters and barrier_rows:
+        # Build barrier lookup by approximate iteration index
+        # Barrier tasks: 1 startup + N_ITER per-iteration = N_ITER+1 total
+        # Per-iteration barriers start at index 1, gather iterations at index 0
+        barrier_measured = barrier_rows[N_WARMUP + 1:] if len(barrier_rows) > N_WARMUP + 1 else barrier_rows[1:]
+        print(f"\n    Anomaly iterations (latency > 2x p50 = {2*p50_lat:.1f} us): {len(anomaly_iters)}/{len(measured)}")
+        print(f"    {'iter':>6s} {'gather_exec':>12s} {'gather_lat':>12s} {'barrier_exec':>13s} {'barrier_tail':>13s}")
+        shown = 0
+        for r in anomaly_iters:
+            idx = r["iter"] - N_WARMUP
+            b_exec = ""
+            b_tail = ""
+            if 0 <= idx < len(barrier_measured):
+                b = barrier_measured[idx]
+                b_exec = f"{b['exec_us']:.1f}"
+                b_tail = f"{b['tail_oh_us']:.1f}"
+            print(f"    {r['iter']:>6d} {r['exec_us']:>12.1f} {r['latency_us']:>12.1f} {b_exec:>13s} {b_tail:>13s}")
+            shown += 1
+            if shown >= 15:
+                print(f"    ... ({len(anomaly_iters) - shown} more)")
+                break
+    print()
+
 
 def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
     """Return the newest perf_swimlane_*_d{root_device}.json created after after_mtime."""
@@ -158,7 +294,8 @@ def run_case(
     first_device: int,
     platform: str,
     verbose: bool,
-) -> dict:
+    diagnostic: bool = False,
+) -> tuple[dict, list[dict]]:
     """Run one (strategy, size) case and return result dict."""
     total_bytes   = SIZE_BYTES[size_label]
     gather_count  = _gather_count_for(total_bytes, n_ranks)
@@ -208,7 +345,7 @@ def run_case(
         print(f"  FAILED (exit {proc.returncode})")
         if verbose and proc.stderr:
             print(proc.stderr[-800:])
-        return result
+        return result, []
 
     # Find profiling file
     perf_file = None
@@ -220,7 +357,7 @@ def run_case(
 
     if not perf_file:
         print("  WARN: no perf file found")
-        return result
+        return result, []
 
     stats = _parse_gather_stats(perf_file)
 
@@ -241,7 +378,29 @@ def run_case(
         if verbose:
             print(f"  (perf file: {perf_file})")
 
-    return result
+    # Diagnostic: per-iteration breakdown
+    detail_rows = []
+    if diagnostic:
+        gather_rows, barrier_rows = _parse_gather_detail(perf_file)
+        _print_diagnostic_report(strategy, size_label, gather_rows, barrier_rows)
+        for r in gather_rows:
+            # Find paired barrier row
+            b_idx = r["iter"]  # barrier index offset: +1 for startup barrier
+            b_exec = None
+            b_tail = None
+            if b_idx + 1 < len(barrier_rows):
+                b = barrier_rows[b_idx + 1]
+                b_exec = b["exec_us"]
+                b_tail = b["tail_oh_us"]
+            detail_rows.append({
+                "strategy": strategy,
+                "size": size_label,
+                **r,
+                "barrier_exec_us": b_exec,
+                "barrier_tail_oh_us": b_tail,
+            })
+
+    return result, detail_rows
 
 
 # ---------------------------------------------------------------------------
@@ -323,6 +482,8 @@ Examples:
                         help="Total comm sizes to test (default: all)")
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show subprocess output")
+    parser.add_argument("--diagnostic", action="store_true",
+                        help="Enable per-iteration timing breakdown and anomaly analysis")
     parser.add_argument("--output-dir", type=Path, default=_OUTPUTS_DIR,
                         help="Output directory for CSV (default: outputs/)")
 
@@ -336,18 +497,21 @@ Examples:
     print()
 
     results = []
+    all_detail_rows = []
     for strategy in args.strategies:
         print(f"--- Strategy: {strategy.upper()} ---")
         for size_label in args.sizes:
-            r = run_case(
+            r, detail = run_case(
                 strategy=strategy,
                 size_label=size_label,
                 n_ranks=args.n_devices,
                 first_device=args.first_device,
                 platform=args.platform,
                 verbose=args.verbose,
+                diagnostic=args.diagnostic,
             )
             results.append(r)
+            all_detail_rows.extend(detail)
         print()
 
     print_summary(results)
@@ -357,6 +521,21 @@ Examples:
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     csv_path = args.output_dir / f"bench_gather_{ts}.csv"
     save_csv(results, csv_path)
+
+    # Save per-iteration detail CSV when diagnostic is enabled
+    if args.diagnostic and all_detail_rows:
+        detail_fields = [
+            "strategy", "size", "iter", "func_id",
+            "dispatch_time_us", "start_time_us", "end_time_us", "finish_time_us",
+            "head_oh_us", "exec_us", "tail_oh_us", "latency_us",
+            "barrier_exec_us", "barrier_tail_oh_us",
+        ]
+        detail_path = args.output_dir / f"bench_gather_detail_{ts}.csv"
+        with open(detail_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=detail_fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(all_detail_rows)
+        print(f"Detail CSV saved: {detail_path}")
 
     return 0
 
