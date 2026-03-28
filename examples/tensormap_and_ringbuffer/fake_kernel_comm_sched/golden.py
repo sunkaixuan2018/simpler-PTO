@@ -5,7 +5,8 @@ Variant selection is transparent — the scheduler internally picks sync or asyn
 gather at dispatch time, or a forced strategy is passed via args[11].
 
 Args layout: [src, out, size_src, size_out, device_ctx_ptr, win_in_base,
-              win_out_base, n_ranks, root, rank_id, sdma_workspace_ptr, strategy]
+              win_out_base, n_ranks, root, rank_id, sdma_workspace_ptr,
+              strategy, debug_poll_counts]
 
 Environment variables:
     GATHER_COUNT    Elements per rank (default 256). Controls tensor sizes.
@@ -23,7 +24,7 @@ GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
 # Strategy encoding: 0=hybrid, 1=mte/sync, 2=sdma/async
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 
-__outputs__ = ["out"]
+__outputs__ = ["out", "debug_poll_counts"]
 RTOL = 1e-4
 ATOL = 1e-4
 
@@ -39,6 +40,9 @@ def generate_inputs(params: dict) -> list:
 
     strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
     strategy_int = _STRATEGY_MAP.get(strategy_str, 0)
+
+    # Debug tensor: SDMA poll counts per rank (written by gather_async_kernel)
+    debug_poll_counts = np.zeros((n_ranks,), dtype=np.int32)
 
     result = [
         ("src", src),
@@ -57,6 +61,7 @@ def generate_inputs(params: dict) -> list:
             ("rank_id", ctypes.c_int32(rank_id)),
             ("sdma_workspace_ptr", ctypes.c_uint64(params.get("sdma_workspace_ptr", 0))),
             ("strategy", ctypes.c_int32(strategy_int)),
+            ("debug_poll_counts", debug_poll_counts),
         ])
 
     return result

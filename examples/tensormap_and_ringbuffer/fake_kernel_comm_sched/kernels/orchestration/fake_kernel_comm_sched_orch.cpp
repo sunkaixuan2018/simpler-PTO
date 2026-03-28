@@ -10,10 +10,11 @@
  *   - Small data + all other cores busy → Async (don't block AICore)
  *   - Small data + idle cores available → Sync (lower latency)
  *
- * Args (12): [0] dev_src, [1] dev_out, [2] size_src, [3] size_out,
+ * Args (13): [0] dev_src, [1] dev_out, [2] size_src, [3] size_out,
  *   [4] device_ctx_ptr, [5] win_in_base, [6] win_out_base,
  *   [7] n_ranks, [8] root, [9] rank_id, [10] sdma_workspace_ptr,
- *   [11] strategy (0=hybrid, 1=mte/sync, 2=sdma/async)
+ *   [11] strategy (0=hybrid, 1=mte/sync, 2=sdma/async),
+ *   [12] dev_debug_poll_counts
  *
  * gather_count is derived at runtime from size_src / sizeof(float).
  *
@@ -43,7 +44,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 12,
+        .expected_arg_count = 13,
     };
 }
 
@@ -63,6 +64,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t sdma_workspace_ptr = args[10];
     // strategy: 0=hybrid (scheduler selects), 1=mte/sync, 2=sdma/async
     int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
+    void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
 
     // Derive gather_count at runtime from src tensor byte size
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
@@ -79,11 +81,20 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
+    uint64_t debug_shapes[1] = {static_cast<uint64_t>(n_ranks)};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
     Tensor dev_out_t = make_tensor_external(dev_out, dst_shapes, 1, DataType::FLOAT32);
     Tensor win_src_t = make_tensor_external(reinterpret_cast<void*>(win_src), src_shapes, 1, DataType::FLOAT32);
     Tensor win_dst_t = make_tensor_external(reinterpret_cast<void*>(win_dst), dst_shapes, 1, DataType::FLOAT32);
+
+    // Debug poll counts tensor: kernel writes SDMA poll iteration counts here
+    Tensor dev_debug_t;
+    if (dev_debug != nullptr) {
+        dev_debug_t = make_tensor_external(dev_debug, debug_shapes, 1, DataType::INT32);
+    } else {
+        dev_debug_t = make_tensor(debug_shapes, 1, DataType::INT32);
+    }
 
     PTO2_SCOPE(rt) {
         Tensor barrier_t = make_tensor_external(reinterpret_cast<void*>(barrier_base), barrier_shapes, 1, DataType::INT32);
@@ -127,6 +138,8 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
             if (rank_id == root) {
                 Tensor gather_out = (iter == N_ITER - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+                // Last iteration writes to host-visible debug tensor; others use throwaway
+                Tensor debug_out = (iter == N_ITER - 1) ? dev_debug_t : make_tensor(debug_shapes, 1, DataType::INT32);
 
                 PTOParam params_gather[] = {
                     make_output_param(gather_out),
@@ -136,16 +149,17 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
                     make_scalar_param(sdma_workspace_ptr),
+                    make_output_param(debug_out),
                 };
                 // strategy=0: hybrid (scheduler picks), 1: mte/sync only, 2: sdma/async only
                 if (strategy == 1) {
-                    pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+                    pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather, 8);
                 } else if (strategy == 2) {
-                    pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather, 7);
+                    pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather, 8);
                 } else {
                     int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
                     pto2_rt_submit_variant_task(rt, gather_variants, 2,
-                                                 PTO2_WORKER_VECTOR, params_gather, 7);
+                                                 PTO2_WORKER_VECTOR, params_gather, 8);
                 }
 
                 PTOParam params_wmout[] = {

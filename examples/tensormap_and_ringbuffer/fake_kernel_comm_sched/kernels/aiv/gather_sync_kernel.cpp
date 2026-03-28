@@ -2,7 +2,7 @@
  * GatherSync: synchronous TGATHER collective kernel.
  * Interchangeable with GatherAsync — same args, same result.
  *
- * Args (7):
+ * Args (8):
  *   args[0] = dst (TensorData*)
  *   args[1] = src (TensorData*)
  *   args[2] = sync_done (TensorData*, dependency only)
@@ -10,6 +10,7 @@
  *   args[4] = nranks (scalar)
  *   args[5] = root (scalar)
  *   args[6] = sdma_workspace_ptr (scalar, unused by sync variant)
+ *   args[7] = debug_poll_counts (TensorData*, unused by sync variant)
  */
 
 #include <cstdint>
@@ -43,6 +44,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     int nranks = static_cast<int>(args[4]);
     int root = static_cast<int>(args[5]);
     (void)args[6];  // sdma_workspace_ptr unused in sync variant
+    (void)args[7];  // debug_poll_counts unused in sync variant
 
     __gm__ float* dst = reinterpret_cast<__gm__ float*>(dst_td->buffer.addr);
     __gm__ float* src = reinterpret_cast<__gm__ float*>(src_td->buffer.addr);
