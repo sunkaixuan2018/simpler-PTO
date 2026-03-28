@@ -403,7 +403,11 @@ class DistributedCodeRunner:
             seed_outputs[name] = list(struct.unpack(f"<{count}{fmt_char}", raw))
 
         expected_outputs = {n: v.copy() for n, v in seed_outputs.items()}
-        params = {"nranks": self.nranks, "root": self.root}
+        params = {
+            "nranks": self.nranks,
+            "root": self.root,
+            "artifact_dir": str(self.artifact_dir),
+        }
         golden.compute_golden(expected_outputs, params)
 
         rtol = getattr(golden, "RTOL", 1e-5)

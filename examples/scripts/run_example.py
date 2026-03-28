@@ -303,6 +303,19 @@ Golden.py interface:
         logger.error(f"kernel_config.py not found in {kernels_path}")
         return 1
 
+    # kernel_config.py is evaluated at import time; many examples branch on PTO_PLATFORM.
+    # Keep it aligned with --platform so `-p a2a3` works without a separate export.
+    os.environ["PTO_PLATFORM"] = args.platform
+    requested_nranks = None
+    if args.devices is not None:
+        requested_nranks = len(_parse_device_spec(args.devices))
+    elif args.device_range is not None:
+        requested_nranks = len(_parse_device_spec(args.device_range))
+    elif args.nranks is not None:
+        requested_nranks = args.nranks
+    if requested_nranks is not None:
+        os.environ["PTO_NRANKS"] = str(requested_nranks)
+
     # Import and run
     try:
         # Detect DISTRIBUTED_CONFIG to choose runner
@@ -333,6 +346,7 @@ Golden.py interface:
                     f"--nranks={args.nranks} conflicts with device list "
                     f"({effective_nranks} devices)"
                 )
+            os.environ["PTO_NRANKS"] = str(effective_nranks)
 
             runner = DistributedCodeRunner(
                 kernels_dir=str(args.kernels),
