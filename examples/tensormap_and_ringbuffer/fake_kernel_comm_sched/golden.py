@@ -86,23 +86,32 @@ def compute_golden(tensors: dict, params: dict) -> None:
             src_r = np.random.randn(GATHER_COUNT).astype(np.float32) * 0.1
             out_np[r * GATHER_COUNT : (r + 1) * GATHER_COUNT] = src_r[:GATHER_COUNT]
 
-    # Write poll counts to file for bench analysis (root rank only).
-    # tensors["debug_poll_counts"] here contains the actual device values (pre-overwrite),
-    # so set expected = actual to suppress the mismatch warning.
-    debug = tensors.get("debug_poll_counts")
-    if debug is not None:
-        if rank_id == root:
-            poll_np = debug.cpu().numpy().reshape(_N_ITER, n_ranks)
-            strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
-            _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
-            fname = _OUTPUTS_DIR / f"poll_counts_{strategy_str}_gc{GATHER_COUNT}_r{n_ranks}.json"
-            with open(fname, "w") as f:
-                json.dump({
-                    "strategy": strategy_str,
-                    "gather_count": GATHER_COUNT,
-                    "n_ranks": n_ranks,
-                    "n_iter": _N_ITER,
-                    "poll_counts": poll_np.tolist(),
-                }, f)
-        # Set expected = actual so the framework reports PASS (no mismatch warning)
-        debug[:] = debug
+    # Keep debug output unconstrained in golden to avoid introducing
+    # a fake expected value before device execution.
+
+
+def post_run_collect(outputs: dict, params: dict) -> None:
+    """
+    Optional runtime hook called by CodeRunner after runtime.finalize().
+    Writes real debug poll counts from device outputs for bench analysis.
+    """
+    rank_id = params.get("rank_id", 0)
+    n_ranks = params.get("n_ranks", 4)
+    root = params.get("root", 0)
+
+    debug = outputs.get("debug_poll_counts")
+    if debug is None or rank_id != root:
+        return
+
+    poll_np = debug.cpu().numpy().reshape(_N_ITER, n_ranks)
+    strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
+    _OUTPUTS_DIR.mkdir(parents=True, exist_ok=True)
+    fname = _OUTPUTS_DIR / f"poll_counts_{strategy_str}_gc{GATHER_COUNT}_r{n_ranks}.json"
+    with open(fname, "w") as f:
+        json.dump({
+            "strategy": strategy_str,
+            "gather_count": GATHER_COUNT,
+            "n_ranks": n_ranks,
+            "n_iter": _N_ITER,
+            "poll_counts": poll_np.tolist(),
+        }, f)

@@ -851,6 +851,10 @@ class CodeRunner:
             logger.info("=== Finalizing Runtime ===")
             runtime.finalize()
 
+            # Optional post-run collection hook in golden.py.
+            # Runs after finalize so outputs contain real device values.
+            self._run_post_run_collect(outputs, params)
+
             # Compute golden and compare
             logger.info("=== Comparing Results ===")
             self._compare_with_golden(outputs, golden)
@@ -913,6 +917,22 @@ class CodeRunner:
             else:
                 matched = torch.isclose(actual, expected, rtol=self.rtol, atol=self.atol).sum().item()
                 logger.info(f"  {name}: PASS ({matched}/{actual.numel()} elements matched)")
+
+    def _run_post_run_collect(
+        self,
+        outputs: Dict[str, torch.Tensor],
+        params: Dict[str, Any],
+    ) -> None:
+        """
+        Optional post-run hook.
+
+        If golden.py defines post_run_collect(outputs, params), call it after
+        runtime.finalize() so hooks can consume real device outputs.
+        """
+        collect_fn = getattr(self._golden_module, "post_run_collect", None)
+        if not callable(collect_fn):
+            return
+        collect_fn(outputs, params)
 
 
 def create_code_runner(kernels_dir, golden_path, device_id=None, platform="a2a3",
