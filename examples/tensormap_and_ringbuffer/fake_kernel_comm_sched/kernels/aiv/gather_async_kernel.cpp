@@ -11,8 +11,7 @@
  *   args[5] = root (scalar)
  *   args[6] = sdma_workspace_ptr (scalar)
  *   args[7] = debug_poll_counts (TensorData*, shape={nranks}, dtype=INT32)
- *             Each element receives the SdmaWaitEvent poll iteration count
- *             for the corresponding rank's TGET_ASYNC operation.
+ *             Each element receives 1 when Wait() succeeds, 0 otherwise.
  */
 
 #include <cstdint>
@@ -75,8 +74,8 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         return;
     }
 
-    // Poll count tracking per rank
-    uint32_t poll_counts[16] = {};
+    // Wait status tracking per rank (1 = success, 0 = timeout/failure).
+    uint32_t wait_status[16] = {};
 
     // Async gather: TGET_ASYNC from each remote rank into local dst
     constexpr int kEventSlots = pto::comm::sdma::SDMA_EVENT_SLOT_COUNT;
@@ -91,7 +90,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
             Global localSrcG(src, shape, stride);
             if (issued >= kEventSlots) {
                 int recycled = issued - kEventSlots;
-                poll_counts[recycled] = events[issued % kEventSlots].WaitCounted(session);
+                wait_status[recycled] = events[issued % kEventSlots].Wait(session) ? 1U : 0U;
             }
             events[issued % kEventSlots] = pto::comm::TGET_ASYNC(localDstG, localSrcG, session);
             issued++;
@@ -105,7 +104,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
         if (issued >= kEventSlots) {
             int recycled = issued - kEventSlots;
-            poll_counts[recycled] = events[issued % kEventSlots].WaitCounted(session);
+            wait_status[recycled] = events[issued % kEventSlots].Wait(session) ? 1U : 0U;
         }
         events[issued % kEventSlots] = pto::comm::TGET_ASYNC(localDstG, remoteSrcG, session);
         issued++;
@@ -115,16 +114,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     const int pending = (issued < kEventSlots) ? issued : kEventSlots;
     const int first_unwaited = issued - pending;
     for (int i = 0; i < pending; ++i) {
-        poll_counts[first_unwaited + i] = events[i].WaitCounted(session);
+        wait_status[first_unwaited + i] = events[i].Wait(session) ? 1U : 0U;
     }
 
-    // Write poll counts to debug tensor via GM DMA
+    // Write wait status to debug tensor via GM DMA
     auto &tmpBuf = session.sdmaSession.eventCtx.tmpBuf;
     uint32_t syncId = session.sdmaSession.eventCtx.syncId;
     for (int i = 0; i < nranks && i < 16; ++i) {
         pto::comm::sdma::detail::SetValue<int32_t>(
             reinterpret_cast<__gm__ uint8_t *>(debug_poll + i),
-            tmpBuf, syncId, static_cast<int32_t>(poll_counts[i]));
+            tmpBuf, syncId, static_cast<int32_t>(wait_status[i]));
     }
 
     pipe_barrier(PIPE_ALL);
