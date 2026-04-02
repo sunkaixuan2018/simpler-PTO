@@ -94,9 +94,12 @@ struct AicpuExecutor {
 
     int thread_num_{0};
     int cores_total_num_{0};
-    int thread_cores_num_{0};  // Cores per scheduler thread (0 for orchestrator when thread_num_==4)
+    int thread_cores_num_{0};  // Approximate cores per scheduler thread
     int core_count_per_thread_[MAX_AICPU_THREADS];  // Actual core count per thread
     int core_assignments_[MAX_AICPU_THREADS][MAX_CORES_PER_THREAD];
+    int orchestrator_thread_idx_{-1};  // -1 means no dedicated orchestrator thread
+    bool composite_orchestrator_scheduler_{false};  // Single-thread mode: one thread does orch + scheduling
+    bool extreme_single_aicore_dual_aiv_{false};  // Restrict AIV pool to two lanes on the same AICore
 
     // Core discovery arrays (with register addresses)
     CoreInfo aic_cores_[MAX_CORES_PER_THREAD];
@@ -143,6 +146,7 @@ struct AicpuExecutor {
     volatile int32_t* orch_ready_tail_{nullptr};
     volatile int32_t* orch_ready_head_{nullptr};
     int32_t orch_ready_capacity_{0};
+    PTO2Runtime* orch_runtime_keepalive_{nullptr};  // Composite mode keeps runtime alive until scheduling finishes
 
     // Orchestration SO handle - defer dlclose until all tasks complete
     void* orch_so_handle_{nullptr};
@@ -155,7 +159,8 @@ struct AicpuExecutor {
     // ===== Methods =====
     int init(Runtime* runtime);
     int handshake_all_cores(Runtime* runtime);
-    void assign_cores_to_threads();
+    void maybe_apply_extreme_aiv_mask();
+    void assign_cores_to_threads(Runtime* runtime);
     int resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num);
     int shutdown_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num);
     int run(Runtime* runtime);
@@ -184,6 +189,16 @@ static int s_pto2_fanin_refcount[PTO2_MAX_SLOTS];
 static volatile int32_t s_pto2_task_completed[PTO2_MAX_SLOTS];
 static int32_t s_pto2_completed_by_task[PTO2_MAX_SLOTS];  // task_id that set completed state (for slot-reuse validation)
 static PTO2DispatchPayload s_pto2_payload_per_core[RUNTIME_MAX_WORKER];
+
+static bool env_flag_enabled(const char* env_name) {
+    const char* v = std::getenv(env_name);
+    if (v == nullptr || v[0] == '\0') return false;
+    return !(std::strcmp(v, "0") == 0 ||
+             std::strcmp(v, "false") == 0 ||
+             std::strcmp(v, "FALSE") == 0 ||
+             std::strcmp(v, "off") == 0 ||
+             std::strcmp(v, "OFF") == 0);
+}
 
 // ===== AicpuExecutor Method Implementations =====
 
@@ -288,51 +303,114 @@ int AicpuExecutor::handshake_all_cores(Runtime* runtime) {
     return 0;
 }
 
+void AicpuExecutor::maybe_apply_extreme_aiv_mask() {
+    if (!extreme_single_aicore_dual_aiv_) {
+        return;
+    }
+    if (aiv_count_ <= 2) {
+        DEV_ALWAYS(
+            "Extreme dual-AIV mode enabled but only %d AIV discovered; no filtering applied.",
+            aiv_count_);
+        return;
+    }
+
+    int chosen_i0 = -1;
+    int chosen_i1 = -1;
+    int chosen_group = -1;
+
+    // Group AIVs by AICore id derived from physical_core_id.
+    for (int i = 0; i < aiv_count_ && chosen_i0 < 0; ++i) {
+        int group_i = static_cast<int>(aiv_cores_[i].physical_core_id / PLATFORM_SUB_CORES_PER_AICORE);
+        for (int j = i + 1; j < aiv_count_; ++j) {
+            int group_j = static_cast<int>(aiv_cores_[j].physical_core_id / PLATFORM_SUB_CORES_PER_AICORE);
+            if (group_i == group_j) {
+                chosen_i0 = i;
+                chosen_i1 = j;
+                chosen_group = group_i;
+                break;
+            }
+        }
+    }
+
+    if (chosen_i0 < 0) {
+        // Fallback: keep first two AIVs to preserve progress and make behavior explicit in logs.
+        chosen_i0 = 0;
+        chosen_i1 = 1;
+        DEV_ALWAYS(
+            "Extreme dual-AIV mode: no same-AICore AIV pair found. Fallback to first two AIV worker_ids=%d,%d",
+            aiv_cores_[chosen_i0].worker_id, aiv_cores_[chosen_i1].worker_id);
+    } else {
+        DEV_ALWAYS(
+            "Extreme dual-AIV mode: selected same-AICore group=%d with AIV worker_ids=%d,%d (physical_core_id=%u,%u)",
+            chosen_group,
+            aiv_cores_[chosen_i0].worker_id, aiv_cores_[chosen_i1].worker_id,
+            aiv_cores_[chosen_i0].physical_core_id, aiv_cores_[chosen_i1].physical_core_id);
+    }
+
+    CoreInfo selected0 = aiv_cores_[chosen_i0];
+    CoreInfo selected1 = aiv_cores_[chosen_i1];
+    aiv_cores_[0] = selected0;
+    aiv_cores_[1] = selected1;
+    aiv_count_ = 2;
+}
+
 /**
- * Assign discovered cores to scheduler threads
- * (Aligned with host_build_graph mechanism)
+ * Assign discovered cores to scheduler threads.
+ * Supports both dedicated orchestrator thread and composite single-thread mode.
  */
-void AicpuExecutor::assign_cores_to_threads() {
-    // When thread_num_ == 4: 3 schedulers + 1 orchestrator
-    int scheduler_thread_num = (thread_num_ == 4) ? 3 : thread_num_;
+void AicpuExecutor::assign_cores_to_threads(Runtime* runtime) {
+    bool device_orch = (runtime != nullptr) && !runtime->get_orch_built_on_host();
+    composite_orchestrator_scheduler_ = device_orch && (thread_num_ == 1);
+    orchestrator_thread_idx_ = device_orch ? (thread_num_ - 1) : -1;
 
-    int aic_per_thread = aic_count_ / scheduler_thread_num;
-    int aiv_per_thread = aiv_count_ / scheduler_thread_num;
+    int scheduler_thread_num = thread_num_;
+    if (orchestrator_thread_idx_ >= 0 && !composite_orchestrator_scheduler_) {
+        scheduler_thread_num = thread_num_ - 1;
+    }
+    if (scheduler_thread_num < 1) scheduler_thread_num = 1;
 
-    DEV_INFO("Assigning cores: %d AIC per thread, %d AIV per thread", aic_per_thread, aiv_per_thread);
+    DEV_INFO(
+        "Assign cores: sched_threads=%d orch_thread=%d composite=%d",
+        scheduler_thread_num, orchestrator_thread_idx_, composite_orchestrator_scheduler_ ? 1 : 0);
+
+    int next_aic = 0;
+    int next_aiv = 0;
+    int sched_slot = 0;
+    int max_cores_per_sched = 0;
 
     for (int t = 0; t < thread_num_; t++) {
-        if (t >= scheduler_thread_num) {
-            // Orchestrator thread: no cores
+        bool dedicated_orch = (t == orchestrator_thread_idx_) && !composite_orchestrator_scheduler_;
+        if (dedicated_orch) {
             core_count_per_thread_[t] = 0;
-            DEV_INFO("Thread %d: orchestrator (0 cores)", t);
+            DEV_INFO("Thread %d: dedicated orchestrator (0 cores)", t);
             continue;
         }
 
-        int core_idx = 0;
+        int aic_take = aic_count_ / scheduler_thread_num;
+        if (sched_slot < (aic_count_ % scheduler_thread_num)) aic_take++;
 
-        // Assign AIC cores
-        int aic_start = t * aic_per_thread;
-        for (int i = 0; i < aic_per_thread; i++) {
-            int worker_id = aic_cores_[aic_start + i].worker_id;
+        int aiv_take = aiv_count_ / scheduler_thread_num;
+        if (sched_slot < (aiv_count_ % scheduler_thread_num)) aiv_take++;
+
+        int core_idx = 0;
+        for (int i = 0; i < aic_take && next_aic < aic_count_; ++i) {
+            int worker_id = aic_cores_[next_aic++].worker_id;
             core_assignments_[t][core_idx++] = worker_id;
             DEV_INFO("Thread %d: assigned AIC worker_id=%d", t, worker_id);
         }
-
-        // Assign AIV cores
-        int aiv_start = t * aiv_per_thread;
-        for (int i = 0; i < aiv_per_thread; i++) {
-            int worker_id = aiv_cores_[aiv_start + i].worker_id;
+        for (int i = 0; i < aiv_take && next_aiv < aiv_count_; ++i) {
+            int worker_id = aiv_cores_[next_aiv++].worker_id;
             core_assignments_[t][core_idx++] = worker_id;
             DEV_INFO("Thread %d: assigned AIV worker_id=%d", t, worker_id);
         }
 
         core_count_per_thread_[t] = core_idx;
-
+        if (core_idx > max_cores_per_sched) max_cores_per_sched = core_idx;
         DEV_INFO("Thread %d: total %d cores", t, core_idx);
+        sched_slot++;
     }
 
-    thread_cores_num_ = aic_per_thread + aiv_per_thread;
+    thread_cores_num_ = max_cores_per_sched;
 }
 
 int AicpuExecutor::init(Runtime* runtime) {
@@ -358,6 +436,8 @@ int AicpuExecutor::init(Runtime* runtime) {
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
+    extreme_single_aicore_dual_aiv_ = env_flag_enabled("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
+    DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV=%d", extreme_single_aicore_dual_aiv_ ? 1 : 0);
 
     // Use handshake mechanism to discover cores (aligned with host_build_graph)
     int rc = handshake_all_cores(runtime);
@@ -366,9 +446,10 @@ int AicpuExecutor::init(Runtime* runtime) {
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
+    maybe_apply_extreme_aiv_mask();
 
     // Dynamically assign cores to threads
-    assign_cores_to_threads();
+    assign_cores_to_threads(runtime);
 
     if (cores_total_num_ > MAX_CORES_PER_THREAD * MAX_AICPU_THREADS) {
         DEV_ERROR("Total cores %d exceeds maximum", cores_total_num_);
@@ -392,7 +473,8 @@ int AicpuExecutor::init(Runtime* runtime) {
         total_tasks_.store(0, std::memory_order_release);
     }
     completed_tasks_.store(0, std::memory_order_release);
-    // Host orchestration: graph already built, no wait needed. Device orch: Thread 3 will set this.
+    // Host orchestration: graph already built, no wait needed.
+    // Device orchestration: orchestrator thread will set this when submission finishes.
     bool orch_on_host = runtime->get_orch_built_on_host();
     DEV_INFO("Init: orch_built_on_host=%d", orch_on_host ? 1 : 0);
     orchestrator_done_.store(orch_on_host, std::memory_order_release);
@@ -1144,13 +1226,14 @@ int AicpuExecutor::run(Runtime* runtime) {
 
     const int* cur_thread_cores = core_assignments_[thread_idx];
     int my_cores = core_count_per_thread_[thread_idx];
+    bool is_orchestrator_thread = (thread_idx == orchestrator_thread_idx_);
+    bool run_scheduler = !is_orchestrator_thread || composite_orchestrator_scheduler_;
 
-    // Thread 3 when 4 AICPU threads: orchestrator (no cores)
-    if (thread_num_ == 4 && thread_idx == 3) {
+    if (is_orchestrator_thread) {
         if (runtime->get_orch_built_on_host()) {
-            DEV_INFO("Thread 3: Host orchestration mode, no-op");
+            DEV_INFO("Orchestrator thread %d: Host orchestration mode, no-op", thread_idx);
         } else {
-            DEV_INFO("Thread 3: Device orchestration, loading SO via dlopen");
+            DEV_INFO("Orchestrator thread %d: Device orchestration, loading SO via dlopen", thread_idx);
 
             // Get SO binary from runtime
             const void* so_data = runtime->get_device_orch_so_data();
@@ -1307,8 +1390,21 @@ int AicpuExecutor::run(Runtime* runtime) {
                 return -1;
             }
 
-            // Wait for scheduler's one-time init to complete (ensures memset has executed)
-            while (!pto2_init_complete_.load(std::memory_order_acquire)) {
+            // Wait for scheduler's one-time init to complete (ensures memset has executed).
+            // In composite single-thread mode there is no separate scheduler thread, so do init here.
+            if (composite_orchestrator_scheduler_) {
+                if (!pto2_init_done_.exchange(true, std::memory_order_acq_rel)) {
+                    std::memset(s_pto2_fanin_refcount, 0, sizeof(s_pto2_fanin_refcount));
+                    std::memset((void*)s_pto2_task_completed, 0, sizeof(s_pto2_task_completed));
+                    std::memset(s_pto2_completed_by_task, -1, sizeof(s_pto2_completed_by_task));
+                    if (runtime->enable_profiling) {
+                        perf_aicpu_init_profiling(runtime);
+                    }
+                    pto2_init_complete_.store(true, std::memory_order_release);
+                }
+            } else {
+                while (!pto2_init_complete_.load(std::memory_order_acquire)) {
+                }
             }
 
             // Set orchestrator's aicpu parallel mode pointers
@@ -1385,21 +1481,34 @@ int AicpuExecutor::run(Runtime* runtime) {
             DEV_ALWAYS("PTO2 total submitted tasks = %d", pto2_task_count);
             total_tasks_.store(pto2_task_count, std::memory_order_release);
             orchestrator_done_.store(true, std::memory_order_release);
-            DEV_INFO("Thread 3: Set orchestrator_done=true, waiting for scheduler threads");
+            if (composite_orchestrator_scheduler_) {
+                orch_runtime_keepalive_ = rt;
+                DEV_INFO("Orchestrator thread %d: composite mode, defer runtime destroy", thread_idx);
+            } else {
+                DEV_INFO("Orchestrator thread %d: waiting for scheduler threads to finish", thread_idx);
+            }
 
             // Wait for all scheduler threads (0, 1, 2) to finish before destroying
             // runtime. Scheduler threads access TensorPool via orch_ready_queue_
             // and tensor.data() in build_pto2_payload — freeing early is use-after-free.
-            while (finished_count_.load(std::memory_order_acquire) < thread_num_ - 1) {
-                std::this_thread::yield();
+            if (!composite_orchestrator_scheduler_) {
+                while (finished_count_.load(std::memory_order_acquire) < thread_num_ - 1) {
+                    std::this_thread::yield();
+                }
             }
-            DEV_INFO("Thread 3: All scheduler threads finished, destroying runtime");
+            if (!composite_orchestrator_scheduler_) {
+                DEV_INFO("Orchestrator thread %d: scheduler threads done, destroying runtime", thread_idx);
+            }
 
             // Safe to destroy — no scheduler thread accesses runtime data anymore
-            pto2_runtime_destroy(rt);
+            if (!composite_orchestrator_scheduler_) {
+                pto2_runtime_destroy(rt);
+            }
         }
-        DEV_INFO("Thread 3: Orchestrator completed");
-    } else {
+        DEV_INFO("Orchestrator thread %d: completed", thread_idx);
+    }
+
+    if (run_scheduler) {
         // Note: Handshake already completed in init() via handshake_all_cores()
 
         DEV_INFO("Thread %d: Starting PTO2 dispatch", thread_idx);
@@ -1411,7 +1520,12 @@ int AicpuExecutor::run(Runtime* runtime) {
             return rc;
         }
 
-        DEV_INFO("Thread %d: Completed", thread_idx);
+        if (composite_orchestrator_scheduler_ && is_orchestrator_thread && orch_runtime_keepalive_ != nullptr) {
+            pto2_runtime_destroy(orch_runtime_keepalive_);
+            orch_runtime_keepalive_ = nullptr;
+            DEV_INFO("Thread %d: Composite mode runtime destroyed after dispatch", thread_idx);
+        }
+        DEV_INFO("Thread %d: Scheduler completed", thread_idx);
     }
 
     // Check if this is the last thread to finish
@@ -1452,10 +1566,14 @@ void AicpuExecutor::deinit() {
     orch_ready_tail_ = nullptr;
     orch_ready_head_ = nullptr;
     orch_ready_capacity_ = 0;
+    orch_runtime_keepalive_ = nullptr;
 
     // Reset core discovery state
     aic_count_ = 0;
     aiv_count_ = 0;
+    orchestrator_thread_idx_ = -1;
+    composite_orchestrator_scheduler_ = false;
+    extreme_single_aicore_dual_aiv_ = false;
 
     // Reset register-related state
     for (int i = 0; i < MAX_CORES_PER_THREAD; i++) {

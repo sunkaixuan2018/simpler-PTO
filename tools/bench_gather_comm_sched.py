@@ -70,10 +70,11 @@ _SCRIPT_DIR   = Path(__file__).parent.resolve()
 _PROJECT_ROOT = _SCRIPT_DIR.parent
 _OUTPUTS_DIR  = _PROJECT_ROOT / "outputs"
 
-_KERNELS_DIR = _PROJECT_ROOT / "examples" / "tensormap_and_ringbuffer" / \
-               "fake_kernel_comm_sched" / "kernels"
-_GOLDEN_PATH  = _PROJECT_ROOT / "examples" / "tensormap_and_ringbuffer" / \
-               "fake_kernel_comm_sched" / "golden.py"
+_BASE_EXAMPLE_DIR = _PROJECT_ROOT / "examples" / "tensormap_and_ringbuffer"
+_NORMAL_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched" / "kernels"
+_NORMAL_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched" / "golden.py"
+_EXTREME_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_extreme" / "kernels"
+_EXTREME_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_extreme" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
 
 
@@ -318,6 +319,9 @@ def run_case(
     platform: str,
     verbose: bool,
     trim_ratio: float,
+    kernels_dir: Path,
+    golden_path: Path,
+    extreme_mode: bool,
     diagnostic: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Run one (strategy, size) case and return result dict."""
@@ -333,11 +337,13 @@ def run_case(
     env["N_DEVICES"]       = str(n_ranks)
     env["FIRST_DEVICE"]    = str(first_device)
     env["N_ITER"]          = str(N_ITER)
+    if extreme_mode:
+        env["GATHER_CASE"] = "extreme"
 
     cmd = [
         sys.executable, str(_RUNNER),
-        "-k", str(_KERNELS_DIR),
-        "-g", str(_GOLDEN_PATH),
+        "-k", str(kernels_dir),
+        "-g", str(golden_path),
         "--n-devices", str(n_ranks),
         "--first-device", str(first_device),
         "-p", platform,
@@ -358,6 +364,7 @@ def run_case(
         "warmup_samples":  N_WARMUP,
         "measured_samples": N_ITER - N_WARMUP,
         "trim_ratio":      trim_ratio,
+        "extreme_mode":    extreme_mode,
         "run_ok":          proc.returncode == 0,
         "func_id":         None,
         "func_name":       None,
@@ -502,7 +509,8 @@ def print_wait_status_stats(results: list[dict]) -> None:
     print(sep)
 
     for r in sdma_results:
-        fname = _OUTPUTS_DIR / f"poll_counts_sdma_gc{r['gather_count']}_r{r['n_ranks']}.json"
+        prefix = "poll_counts_extreme" if r.get("extreme_mode") else "poll_counts"
+        fname = _OUTPUTS_DIR / f"{prefix}_sdma_gc{r['gather_count']}_r{r['n_ranks']}.json"
         if not fname.exists():
             print(f"  {r['size']:5s}  (no poll data)")
             continue
@@ -534,7 +542,7 @@ def print_wait_status_stats(results: list[dict]) -> None:
 def save_csv(results: list[dict], out_path: Path) -> None:
     fields = [
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
-        "n_iter", "warmup_samples", "measured_samples", "trim_ratio",
+        "n_iter", "warmup_samples", "measured_samples", "trim_ratio", "extreme_mode",
         "run_ok", "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
     ]
     with open(out_path, "w", newline="") as f:
@@ -572,6 +580,11 @@ Examples:
     parser.add_argument("--sizes", nargs="+", default=SIZE_LABELS,
                         choices=list(SIZE_BYTES.keys()),
                         help="Total comm sizes to test (default: all)")
+    parser.add_argument(
+        "--extreme-case",
+        action="store_true",
+        help="Run fake_kernel_comm_sched_extreme (single AICPU + same-AICore dual AIV stress case)",
+    )
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show subprocess output")
     parser.add_argument("--diagnostic", action="store_true",
@@ -595,7 +608,10 @@ Examples:
     if args.trim_ratio < 0 or args.trim_ratio >= 0.5:
         parser.error("--trim-ratio must be in [0.0, 0.5)")
 
-    print(f"Benchmark: fake_kernel_comm_sched gather")
+    case_name = "fake_kernel_comm_sched_extreme" if args.extreme_case else "fake_kernel_comm_sched"
+    kernels_dir = _EXTREME_KERNELS_DIR if args.extreme_case else _NORMAL_KERNELS_DIR
+    golden_path = _EXTREME_GOLDEN_PATH if args.extreme_case else _NORMAL_GOLDEN_PATH
+    print(f"Benchmark: {case_name} gather")
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
     print(f"  sizes={args.sizes}")
@@ -618,6 +634,9 @@ Examples:
                 platform=args.platform,
                 verbose=args.verbose,
                 trim_ratio=args.trim_ratio,
+                kernels_dir=kernels_dir,
+                golden_path=golden_path,
+                extreme_mode=args.extreme_case,
                 diagnostic=args.diagnostic,
             )
             results.append(r)
