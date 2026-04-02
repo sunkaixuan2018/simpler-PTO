@@ -5,8 +5,9 @@ Batch benchmark for fake_kernel_comm_sched: gather operator performance.
 Tests MTE (sync TGATHER) and SDMA (async TGET_ASYNC) strategies across
 multiple total communication sizes on 4 cards.
 
-Each invocation runs N_ITER=100 gather pipelines back-to-back. The first
-N_WARMUP=50 are discarded; the remaining 50 are averaged for the result.
+Each invocation runs N_ITER=200 gather pipelines back-to-back. The first
+N_WARMUP=100 are discarded; the remaining measured window is averaged after
+trimming both tails by a configurable ratio (default 10%).
 
 Usage:
     python tools/bench_gather_comm_sched.py --platform a2a3 --first-device 4
@@ -57,8 +58,9 @@ FUNC_ID_GATHER_SYNC  = 1  # GatherSync  (MTE / TGATHER)
 FUNC_ID_GATHER_ASYNC = 2  # GatherAsync (SDMA / TGET_ASYNC)
 FUNC_ID_COMM_BARRIER = 4  # CommBarrier
 
-N_ITER   = 100  # total gather iterations per invocation (must match C++ N_ITER)
-N_WARMUP = 50   # warm-up iterations to discard
+N_ITER   = 200  # total gather iterations per invocation (must match C++ N_ITER)
+N_WARMUP = 100  # warm-up iterations to discard
+TRIM_RATIO_DEFAULT = 0.10  # trim this ratio from both tails before averaging
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -233,13 +235,28 @@ def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
-def _parse_gather_stats(perf_file: Path) -> dict | None:
+def _trimmed_mean(values: list[float], trim_ratio: float) -> tuple[float, int]:
+    """Return (trimmed_mean, effective_sample_count)."""
+    if not values:
+        return 0.0, 0
+    s = sorted(values)
+    n = len(s)
+    k = int(n * trim_ratio)
+    if 2 * k >= n:
+        return sum(s) / n, n
+    core = s[k:n - k]
+    return sum(core) / len(core), len(core)
+
+
+def _parse_gather_stats(perf_file: Path, trim_ratio: float) -> dict | None:
     """
-    Parse gather task stats from the raw perf JSON, averaging the last
-    (N_ITER - N_WARMUP) gather samples by dispatch time order.
+    Parse gather task stats from the raw perf JSON.
+    Keep the last (N_ITER - N_WARMUP) gather samples by dispatch order, then
+    compute trimmed means by removing trim_ratio at both tails.
 
     Returns a dict with keys:
-        func_id, func_name, total_count, measured_count, avg_exec_us, avg_latency_us
+        func_id, func_name, total_count, measured_count, trimmed_count,
+        trim_ratio, avg_exec_us, avg_latency_us
     or None if no gather tasks were found.
     """
     with open(perf_file, encoding="utf-8") as f:
@@ -269,8 +286,12 @@ def _parse_gather_stats(perf_file: Path) -> dict | None:
         if "finish_time_us" in t and "dispatch_time_us" in t
     ]
 
-    avg_exec    = sum(exec_vals) / len(exec_vals)
-    avg_latency = sum(latency_vals) / len(latency_vals) if latency_vals else avg_exec
+    avg_exec, trimmed_exec_count = _trimmed_mean(exec_vals, trim_ratio)
+    if latency_vals:
+        avg_latency, trimmed_lat_count = _trimmed_mean(latency_vals, trim_ratio)
+    else:
+        avg_latency, trimmed_lat_count = avg_exec, trimmed_exec_count
+    trimmed_count = min(trimmed_exec_count, trimmed_lat_count)
 
     # Determine which gather kernel was used (most frequent in measured window)
     func_ids = [t["func_id"] for t in measured]
@@ -282,6 +303,8 @@ def _parse_gather_stats(perf_file: Path) -> dict | None:
         "func_name":       func_name,
         "total_count":     total_count,
         "measured_count":  len(measured),
+        "trimmed_count":   trimmed_count,
+        "trim_ratio":      trim_ratio,
         "avg_exec_us":     avg_exec,
         "avg_latency_us":  avg_latency,
     }
@@ -294,6 +317,7 @@ def run_case(
     first_device: int,
     platform: str,
     verbose: bool,
+    trim_ratio: float,
     diagnostic: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Run one (strategy, size) case and return result dict."""
@@ -333,10 +357,12 @@ def run_case(
         "n_iter":          N_ITER,
         "warmup_samples":  N_WARMUP,
         "measured_samples": N_ITER - N_WARMUP,
+        "trim_ratio":      trim_ratio,
         "run_ok":          proc.returncode == 0,
         "func_id":         None,
         "func_name":       None,
         "total_count":     None,
+        "trimmed_count":   None,
         "avg_exec_us":     None,
         "avg_latency_us":  None,
     }
@@ -359,20 +385,22 @@ def run_case(
         print("  WARN: no perf file found")
         return result, []
 
-    stats = _parse_gather_stats(perf_file)
+    stats = _parse_gather_stats(perf_file, trim_ratio=trim_ratio)
 
     if stats:
         result.update({
             "func_id":         stats["func_id"],
             "func_name":       stats["func_name"],
             "total_count":     stats["total_count"],
+            "trimmed_count":   stats["trimmed_count"],
             "avg_exec_us":     stats["avg_exec_us"],
             "avg_latency_us":  stats["avg_latency_us"],
         })
         kernel_tag = "GatherSync→MTE" if stats["func_id"] == FUNC_ID_GATHER_SYNC else "GatherAsync→SDMA"
         measured   = stats["measured_count"]
+        trimmed    = stats["trimmed_count"]
         print(f"  exec={stats['avg_exec_us']:.1f}us  lat={stats['avg_latency_us']:.1f}us"
-              f"  [n={measured}]  [{kernel_tag}]")
+              f"  [n={measured}, trimmed={trimmed}]  [{kernel_tag}]")
     else:
         print("  WARN: gather stats not found in perf JSON")
         if verbose:
@@ -415,7 +443,19 @@ def print_summary(results: list[dict]) -> None:
     sep = "-" * len(header)
     print()
     print("=" * len(header))
-    print("Gather Performance Summary  (avg of last 50 / 100 iterations)")
+    if results:
+        n_iter = results[0].get("n_iter", N_ITER)
+        warmup = results[0].get("warmup_samples", N_WARMUP)
+        trim_ratio = float(results[0].get("trim_ratio", TRIM_RATIO_DEFAULT))
+    else:
+        n_iter = N_ITER
+        warmup = N_WARMUP
+        trim_ratio = TRIM_RATIO_DEFAULT
+    measured = n_iter - warmup
+    print(
+        "Gather Performance Summary  "
+        f"(avg of last {measured} / {n_iter} iterations, trim={trim_ratio * 100:.1f}% each tail)"
+    )
     print("=" * len(header))
     print(header)
     print(sep)
@@ -452,7 +492,14 @@ def print_poll_stats(results: list[dict]) -> None:
     sep = "-" * (len(header))
     print()
     print("=" * len(header))
-    print("SDMA Poll Count Statistics  (ranks combined, last 50 of 100 iterations)")
+    if results:
+        n_iter = results[0].get("n_iter", N_ITER)
+        warmup = results[0].get("warmup_samples", N_WARMUP)
+    else:
+        n_iter = N_ITER
+        warmup = N_WARMUP
+    measured = n_iter - warmup
+    print(f"SDMA Poll Count Statistics  (ranks combined, last {measured} of {n_iter} iterations)")
     print("=" * len(header))
     print(header)
     print(sep)
@@ -490,8 +537,8 @@ def print_poll_stats(results: list[dict]) -> None:
 def save_csv(results: list[dict], out_path: Path) -> None:
     fields = [
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
-        "n_iter", "warmup_samples", "measured_samples",
-        "run_ok", "func_id", "func_name", "total_count", "avg_exec_us", "avg_latency_us",
+        "n_iter", "warmup_samples", "measured_samples", "trim_ratio",
+        "run_ok", "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
     ]
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
@@ -532,16 +579,28 @@ Examples:
                         help="Show subprocess output")
     parser.add_argument("--diagnostic", action="store_true",
                         help="Enable per-iteration timing breakdown and anomaly analysis")
+    parser.add_argument(
+        "--trim-ratio",
+        type=float,
+        default=TRIM_RATIO_DEFAULT,
+        help="Trim ratio per tail for mean stats after warm-up (default: 0.10)",
+    )
     parser.add_argument("--output-dir", type=Path, default=_OUTPUTS_DIR,
                         help="Output directory for CSV (default: outputs/)")
 
     args = parser.parse_args()
 
+    if args.trim_ratio < 0 or args.trim_ratio >= 0.5:
+        parser.error("--trim-ratio must be in [0.0, 0.5)")
+
     print(f"Benchmark: fake_kernel_comm_sched gather")
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
     print(f"  sizes={args.sizes}")
-    print(f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, {N_ITER - N_WARMUP} measured")
+    print(
+        f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, "
+        f"{N_ITER - N_WARMUP} measured, trim={args.trim_ratio * 100:.1f}% per tail"
+    )
     print()
 
     results = []
@@ -556,6 +615,7 @@ Examples:
                 first_device=args.first_device,
                 platform=args.platform,
                 verbose=args.verbose,
+                trim_ratio=args.trim_ratio,
                 diagnostic=args.diagnostic,
             )
             results.append(r)

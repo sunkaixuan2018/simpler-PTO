@@ -29,7 +29,7 @@
 #include "pto_orchestration_api.h"
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
-constexpr int N_ITER = 100;
+constexpr int N_ITER = 200;
 
 #define FUNC_WIN_MEMCOPY_IN  0
 #define FUNC_GATHER_SYNC     1

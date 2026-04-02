@@ -22,7 +22,7 @@ from pathlib import Path
 import numpy as np
 
 GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
-_N_ITER = int(os.environ.get("N_ITER", "100"))
+_N_ITER = int(os.environ.get("N_ITER", "200"))
 
 # Strategy encoding: 0=hybrid, 1=mte/sync, 2=sdma/async
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
