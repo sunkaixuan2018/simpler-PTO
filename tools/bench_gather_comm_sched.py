@@ -479,16 +479,13 @@ def print_summary(results: list[dict]) -> None:
     print("=" * len(header))
 
 
-def print_poll_stats(results: list[dict]) -> None:
-    """Print SDMA poll count statistics read from per-case JSON files written by golden.py."""
+def print_wait_status_stats(results: list[dict]) -> None:
+    """Print SDMA wait status statistics read from per-case JSON files written by golden.py."""
     sdma_results = [r for r in results if r.get("func_id") == FUNC_ID_GATHER_ASYNC and r.get("run_ok")]
     if not sdma_results:
         return
 
-    header = (
-        f"  {'Size':5s}  {'n_ranks':7s}  {'p50':>8s}  {'p80':>8s}  {'p90':>8s}  "
-        f"{'p99':>8s}  {'max':>10s}  {'pct_1M':>8s}"
-    )
+    header = f"  {'Size':5s}  {'n_ranks':7s}  {'success':>10s}  {'fail':>10s}  {'samples':>10s}"
     sep = "-" * (len(header))
     print()
     print("=" * len(header))
@@ -499,7 +496,7 @@ def print_poll_stats(results: list[dict]) -> None:
         n_iter = N_ITER
         warmup = N_WARMUP
     measured = n_iter - warmup
-    print(f"SDMA Poll Count Statistics  (ranks combined, last {measured} of {n_iter} iterations)")
+    print(f"SDMA Wait Status Statistics  (ranks combined, last {measured} of {n_iter} iterations)")
     print("=" * len(header))
     print(header)
     print(sep)
@@ -520,15 +517,15 @@ def print_poll_stats(results: list[dict]) -> None:
         if not all_vals:
             continue
 
-        stats = _compute_distribution_stats(all_vals)
-        s = sorted(all_vals)
-        p80 = s[int(len(s) * 0.80)]
-        pct_1m = sum(1 for v in all_vals if v >= 1_000_000) / len(all_vals) * 100
+        total = len(all_vals)
+        success = sum(1 for v in all_vals if int(v) != 0)
+        fail = total - success
+        success_pct = success / total * 100
+        fail_pct = fail / total * 100
 
         print(
             f"  {r['size']:5s}  {r['n_ranks']:7d}  "
-            f"{stats['p50']:>8.0f}  {p80:>8.0f}  {stats['p90']:>8.0f}  "
-            f"{stats['p99']:>8.0f}  {stats['max']:>10.0f}  {pct_1m:>7.1f}%"
+            f"{success_pct:>9.1f}%  {fail_pct:>9.1f}%  {total:>10d}"
         )
 
     print("=" * len(header))
@@ -580,6 +577,11 @@ Examples:
     parser.add_argument("--diagnostic", action="store_true",
                         help="Enable per-iteration timing breakdown and anomaly analysis")
     parser.add_argument(
+        "--show-sdma-wait-stats",
+        action="store_true",
+        help="Show SDMA wait status statistics from debug JSON (default: off)",
+    )
+    parser.add_argument(
         "--trim-ratio",
         type=float,
         default=TRIM_RATIO_DEFAULT,
@@ -623,7 +625,8 @@ Examples:
         print()
 
     print_summary(results)
-    print_poll_stats(results)
+    if args.show_sdma_wait_stats:
+        print_wait_status_stats(results)
 
     # Save CSV
     args.output_dir.mkdir(parents=True, exist_ok=True)
