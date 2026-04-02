@@ -27,7 +27,7 @@ ORCHESTRATION = {
 }
 
 KERNELS = [
-    {"func_id": 0, "name": "QK", "source": str(_PA_KERNELS_ROOT / "aic" / "aic_qk_matmul.cpp"), "core_type": "aic"},
+    {"func_id": 0, "name": "QK", "source": str(_KERNELS_ROOT / "aic" / "aic_qk_matmul.cpp"), "core_type": "aic"},
     {"func_id": 1, "name": "SF", "source": str(_PA_KERNELS_ROOT / "aiv" / "aiv_softmax_prepare.cpp"), "core_type": "aiv"},
     {"func_id": 2, "name": "PV", "source": str(_PA_KERNELS_ROOT / "aic" / "aic_pv_matmul.cpp"), "core_type": "aic"},
     {"func_id": 3, "name": "UP", "source": str(_PA_KERNELS_ROOT / "aiv" / "aiv_online_update.cpp"), "core_type": "aiv"},
@@ -35,6 +35,7 @@ KERNELS = [
     {"func_id": 5, "name": "AIV_HUB", "source": str(_PA_KERNELS_ROOT / "aiv" / "aiv_hub.cpp"), "core_type": "aiv"},
     {"func_id": 6, "name": "PA_NOTIFY_READY", "source": str(_KERNELS_ROOT / "aiv" / "aiv_pa_notify_ready.cpp"), "core_type": "aiv"},
     {"func_id": 7, "name": "ALLREDUCE_ADD", "source": str(_KERNELS_ROOT / "aiv" / "aiv_allreduce_add.cpp"), "core_type": "aiv"},
+    {"func_id": 8, "name": "COMM_BARRIER", "source": str(_KERNELS_ROOT / "aiv" / "comm_barrier_kernel.cpp"), "core_type": "aiv"},
 ]
 
 RUNTIME_CONFIG = {
@@ -72,6 +73,7 @@ DISTRIBUTED_CONFIG = {
         {"name": "out", "dtype": "float32", "count": _OUT_ELEMS, "placement": "device"},
         {"name": "config", "dtype": "int64", "count": 8, "placement": "device"},
         {"name": "notify_counter", "dtype": "int32", "count": _NUM_CHUNKS, "placement": "window"},
+        {"name": "comm_barrier", "dtype": "int32", "count": 4, "placement": "window"},
     ],
     "inputs": [
         "query",
@@ -83,6 +85,7 @@ DISTRIBUTED_CONFIG = {
         "out",
         "config",
         "notify_counter",
+        "comm_barrier",
     ],
     "outputs": ["out"],
     "args": [
@@ -95,6 +98,7 @@ DISTRIBUTED_CONFIG = {
         "out",
         "config",
         "notify_counter",
+        "comm_barrier",
         "deviceCtx",
     ],
 }

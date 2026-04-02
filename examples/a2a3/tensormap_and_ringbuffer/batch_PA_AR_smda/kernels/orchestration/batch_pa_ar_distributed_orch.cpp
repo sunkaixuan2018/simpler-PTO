@@ -23,6 +23,7 @@
 #define FUNC_PA_NOTIFY_READY 6
 #define FUNC_TGET_PEER_OUT 7
 #define FUNC_ALLREDUCE_ADD 8
+#define FUNC_COMM_BARRIER 9
 
 static uint64_t float_to_u64(float f) {
     union {
@@ -159,13 +160,31 @@ static void run_batch_paged_attention_phase(
     Tensor out = make_tensor_external(host_local_out, out_shapes, 2, DataType::FLOAT32);
     void* peer_out_ptr = distributed ? (void*)(uintptr_t)args[9] : nullptr;
     void* notify_counter_ptr = distributed ? (void*)(uintptr_t)args[10] : nullptr;
-    auto* comm_ctx = distributed ? reinterpret_cast<CommDeviceContext*>((uintptr_t)args[11]) : nullptr;
+    void* barrier_ptr = distributed ? (void*)(uintptr_t)args[11] : nullptr;
+    auto* comm_ctx = distributed ? reinterpret_cast<CommDeviceContext*>((uintptr_t)args[12]) : nullptr;
+    int nranks = (int)comm_ctx->rankNum;
+    constexpr int kRootRank = 0;
+    uint32_t barrier_shapes[1] = {(uint32_t)nranks};
+    uint32_t sync_shapes[1] = {1};
 
     uint64_t bt_addr = (uint64_t)(uintptr_t)host_block_table;
     uint64_t cl_addr = (uint64_t)(uintptr_t)host_context_lens;
 
     uint64_t IN_CORE_BATCH = 16;
     uint64_t num_chunks = (batch + IN_CORE_BATCH - 1) / IN_CORE_BATCH;
+
+             
+    Tensor barrier_t = make_tensor_external(barrier_ptr, barrier_shapes, 1, DataType::INT32);
+    Tensor barrier_sync = make_tensor(sync_shapes, 1, DataType::INT32);
+
+    // Submit global comm barrier first, so all device compute tasks are launched after it.
+    PTOParam params_barrier;
+    params_barrier.add_input(barrier_t);
+    params_barrier.add_output(barrier_sync);
+    params_barrier.add_scalar((uint64_t)(uintptr_t)comm_ctx);
+    params_barrier.add_scalar((uint64_t)nranks);
+    params_barrier.add_scalar((uint64_t)kRootRank);
+    pto2_rt_submit_aiv_task(FUNC_COMM_BARRIER, params_barrier);
 
     for (uint64_t chunk_idx = orch_thread_index; chunk_idx < num_chunks; chunk_idx += orch_thread_num) {
         uint64_t chunk_bc = batch - chunk_idx * IN_CORE_BATCH;
@@ -183,6 +202,7 @@ static void run_batch_paged_attention_phase(
                 Tensor mi_batch = make_tensor(scalar_acc_shapes, 1, DataType::FLOAT32);
 
                 PTOParam params_hub;
+                params_hub.add_input(barrier_sync);
                 params_hub.add_output(oi_batch);
                 params_hub.add_output(li_batch);
                 params_hub.add_output(mi_batch);
@@ -202,6 +222,7 @@ static void run_batch_paged_attention_phase(
                     PTOParam params_qk;
                     params_qk.add_input(query);
                     params_qk.add_input(key_cache);
+                    params_qk.add_input(barrier_sync);
                     params_qk.add_output(sij_b);
                     params_qk.add_scalar(bt_addr);
                     params_qk.add_scalar(chunk_bc);

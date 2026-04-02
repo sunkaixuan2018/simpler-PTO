@@ -22,6 +22,7 @@ _KERNELS_PA = [
     {"func_id": 1, "name": "SF", "source": str(_KERNELS_ROOT / "aiv" / "aiv_softmax_prepare.cpp"), "core_type": "aiv"},
     {"func_id": 3, "name": "UP", "source": str(_KERNELS_ROOT / "aiv" / "aiv_online_update.cpp"), "core_type": "aiv"},
     {"func_id": 5, "name": "AIV_HUB", "source": str(_KERNELS_ROOT / "aiv" / "aiv_hub.cpp"), "core_type": "aiv"},
+    {"func_id": 9, "name": "BARRIER", "source": str(_KERNELS_ROOT / "aiv" / "comm_barrier_kernel.cpp"), "core_type": "aiv"},
 ]
 
 _KERNELS_DIST = [
@@ -41,7 +42,7 @@ RUNTIME_CONFIG = {
 }
 
 # Case1 参数（batch > 16，覆盖两个 chunk）
-_PA_BATCH = 20
+_PA_BATCH = 32
 _PA_NUM_HEADS = 16
 _PA_HEAD_DIM = 16
 _PA_KV_HEAD_NUM = 1
@@ -91,6 +92,7 @@ if _platform == "a2a3":
             {"name": "key_cache_size_buf", "dtype": "int64", "count": 1, "placement": "device"},
             {"name": "peer_out", "dtype": "float32", "count": _PA_PEER_OUT_FLOATS, "placement": "device"},
             {"name": "notify_counter", "dtype": "int32", "count": _PA_NOTIFY_SLOTS, "placement": "window"},
+            {"name": "comm_barrier", "dtype": "int32", "count": 2, "placement": "window"},
         ],
         "inputs": [
             "query",
@@ -103,6 +105,7 @@ if _platform == "a2a3":
             "config",
             "key_cache_size_buf",
             "notify_counter",
+            "comm_barrier",
         ],
         "outputs": ["out"],
         "args": [
@@ -117,6 +120,7 @@ if _platform == "a2a3":
             "key_cache_size_buf",
             "peer_out",
             "notify_counter",
+            "comm_barrier",
             "deviceCtx",
         ],
     }

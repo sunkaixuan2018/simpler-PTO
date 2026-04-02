@@ -14,7 +14,7 @@ ATOL = 2e-2
 
 # 与 kernel_config.py 中的 Case1 保持一致；batch > 16 用于观察 chunk 流水。
 PA_CASE = {
-    "batch": 20,
+    "batch": 32,
     "num_heads": 16,
     "kv_head_num": 1,
     "head_dim": 16,

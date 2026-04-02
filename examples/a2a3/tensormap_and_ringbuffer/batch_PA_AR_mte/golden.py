@@ -53,7 +53,7 @@ def _read_binary(path: Path, dtype: str) -> torch.Tensor:
     return torch.tensor(values, dtype=torch_dtype)
 
 
-def _build_rank_inputs(rank: int):
+def _build_rank_inputs(rank: int, nranks: int):
     with torch.random.fork_rng():
         torch.manual_seed(2026 + rank)
         pa_inputs = dict(_generate_pa_inputs(PA_CASE, return_all_sizes=False))
@@ -89,7 +89,6 @@ def _build_rank_inputs(rank: int):
     out_elems = batch * num_heads * head_dim
     num_chunks = (batch + 16 - 1) // 16
     zeros = torch.zeros(out_elems, dtype=torch.float32)
-
     return [
         ("query", _to_python_list(query.to(torch.float16))),
         ("key_cache", _to_python_list(key_cache.to(torch.float16))),
@@ -100,6 +99,7 @@ def _build_rank_inputs(rank: int):
         ("out", _to_python_list(zeros)),
         ("config", _to_python_list(config)),
         ("notify_counter", [0] * num_chunks),
+        ("comm_barrier", [0] * nranks),
     ]
 
 
@@ -108,7 +108,7 @@ def generate_distributed_inputs(rank: int, nranks: int, root: int, comm_ctx=None
     del comm_ctx
     if nranks <= 1:
         raise ValueError(f"batch_PA_AR_distributed_v1 expects nranks > 1, got {nranks}")
-    return _build_rank_inputs(rank)
+    return _build_rank_inputs(rank, nranks)
 
 
 def compute_golden(tensors: dict, params: dict) -> None:

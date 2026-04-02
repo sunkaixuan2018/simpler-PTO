@@ -25,6 +25,7 @@
 #define FUNC_AIV_HUB 5
 #define FUNC_PA_NOTIFY_READY 6
 #define FUNC_ALLREDUCE_ADD 7
+#define FUNC_COMM_BARRIER 8
 
 static uint64_t float_to_u64(float f) {
     union {
@@ -43,7 +44,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 10,
+        .expected_arg_count = 11,
     };
 }
 
@@ -63,7 +64,8 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
     void* host_out = (void*)(uintptr_t)args[6];
     int64_t* host_config = (int64_t*)(uintptr_t)args[7];
     void* host_notify_counter = (void*)(uintptr_t)args[8];
-    auto* comm_ctx = reinterpret_cast<CommDeviceContext*>((uintptr_t)args[9]);
+    void* host_comm_barrier = (void*)(uintptr_t)args[9];
+    auto* comm_ctx = reinterpret_cast<CommDeviceContext*>((uintptr_t)args[10]);
 
     uint64_t batch = (uint64_t)(int)host_config[0];
     uint64_t num_heads = (uint64_t)(int)host_config[1];
@@ -96,6 +98,18 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
     Tensor value_cache = make_tensor_external(host_value_cache, value_cache_shapes, 2, data_type);
     Tensor local_out = make_tensor_external(host_local_out, out_shapes, 2, DataType::FLOAT32);
     Tensor out = make_tensor_external(host_out, out_shapes, 2, DataType::FLOAT32);
+    uint32_t barrier_shapes[1] = {(uint32_t)comm_ctx->rankNum};
+    uint32_t sync_shapes[1] = {1};
+    Tensor comm_barrier = make_tensor_external(host_comm_barrier, barrier_shapes, 1, DataType::INT32);
+    Tensor barrier_sync = make_tensor(sync_shapes, 1, DataType::INT32);
+
+    PTOParam params_barrier;
+    params_barrier.add_input(comm_barrier);
+    params_barrier.add_output(barrier_sync);
+    params_barrier.add_scalar((uint64_t)(uintptr_t)comm_ctx);
+    params_barrier.add_scalar((uint64_t)comm_ctx->rankNum);
+    params_barrier.add_scalar((uint64_t)0);
+    pto2_rt_submit_aiv_task(FUNC_COMM_BARRIER, params_barrier);
 
     uint64_t bt_addr = (uint64_t)(uintptr_t)host_block_table;
     uint64_t cl_addr = (uint64_t)(uintptr_t)host_context_lens;
@@ -142,6 +156,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
                 Tensor mi_batch = make_tensor(scalar_acc_shapes, 1, DataType::FLOAT32);
 
                 PTOParam params_hub;
+                params_hub.add_input(barrier_sync);
                 params_hub.add_output(oi_batch);
                 params_hub.add_output(li_batch);
                 params_hub.add_output(mi_batch);
@@ -161,6 +176,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
                     PTOParam params_qk;
                     params_qk.add_input(query);
                     params_qk.add_input(key_cache);
+                    params_qk.add_input(barrier_sync);
                     params_qk.add_output(sij_b);
                     params_qk.add_scalar(bt_addr);
                     params_qk.add_scalar(chunk_bc);
@@ -229,7 +245,7 @@ void aicpu_orchestration_entry(uint64_t* args, int arg_count,
         pto2_rt_expect_notification_counter(params_add, (uint64_t)chunk_notify_ptr,
                                             (uint64_t)comm_ctx->rankNum - 1);
         pto2_rt_submit_aiv_task(FUNC_ALLREDUCE_ADD, params_add);
-    }
+   }
 
     LOG_INFO("batch_PA_AR_distributed_v1: rank=%u submitted chunked PA + notify + gated add",
              (unsigned)comm_ctx->rankId);
