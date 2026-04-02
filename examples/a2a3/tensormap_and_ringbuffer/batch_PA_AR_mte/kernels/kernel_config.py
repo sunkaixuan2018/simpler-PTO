@@ -59,8 +59,12 @@ _OUT_ELEMS = _BATCH * _NUM_HEADS * _HEAD_DIM
 _IN_CORE_BATCH = 16
 _NUM_CHUNKS = (_BATCH + _IN_CORE_BATCH - 1) // _IN_CORE_BATCH
 
+_NRANKS = int(os.environ.get("PTO_NRANKS", "4"))
+if _NRANKS <= 0:
+    raise ValueError("PTO_NRANKS must be positive")
+
 DISTRIBUTED_CONFIG = {
-    "nranks": 4,
+    "nranks": _NRANKS,
     "root": 0,
     "win_sync_prefix": 256,
     "buffers": [
@@ -73,7 +77,7 @@ DISTRIBUTED_CONFIG = {
         {"name": "out", "dtype": "float32", "count": _OUT_ELEMS, "placement": "device"},
         {"name": "config", "dtype": "int64", "count": 8, "placement": "device"},
         {"name": "notify_counter", "dtype": "int32", "count": _NUM_CHUNKS, "placement": "window"},
-        {"name": "comm_barrier", "dtype": "int32", "count": 4, "placement": "window"},
+        {"name": "comm_barrier", "dtype": "int32", "count": _NRANKS, "placement": "window"},
     ],
     "inputs": [
         "query",

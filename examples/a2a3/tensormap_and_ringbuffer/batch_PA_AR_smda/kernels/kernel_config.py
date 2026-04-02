@@ -92,7 +92,7 @@ if _platform == "a2a3":
             {"name": "key_cache_size_buf", "dtype": "int64", "count": 1, "placement": "device"},
             {"name": "peer_out", "dtype": "float32", "count": _PA_PEER_OUT_FLOATS, "placement": "device"},
             {"name": "notify_counter", "dtype": "int32", "count": _PA_NOTIFY_SLOTS, "placement": "window"},
-            {"name": "comm_barrier", "dtype": "int32", "count": 2, "placement": "window"},
+            {"name": "comm_barrier", "dtype": "int32", "count": _NRANKS, "placement": "window"},
         ],
         "inputs": [
             "query",
