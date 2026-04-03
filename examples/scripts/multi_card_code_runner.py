@@ -802,7 +802,22 @@ class CodeRunner:
             logger.info("=== Initializing Runtime ===")
             runtime = Runtime()
 
-            if self.enable_profiling:
+            profiling_enabled_this_rank = self.enable_profiling
+            if profiling_enabled_this_rank and comm_context is not None:
+                profile_root_only_env = os.environ.get("PROFILE_ROOT_ONLY", "1")
+                profile_root_only = profile_root_only_env.lower() not in ("0", "false", "off")
+                rank_for_profile = params.get("rank_id", comm_context.get("rank_id", 0))
+                root_for_profile = params.get("root", comm_context.get("root", 0))
+                if profile_root_only and rank_for_profile != root_for_profile:
+                    profiling_enabled_this_rank = False
+                    logger.info(
+                        "Profiling disabled on non-root rank=%s (root=%s, PROFILE_ROOT_ONLY=%s)",
+                        rank_for_profile,
+                        root_for_profile,
+                        profile_root_only_env,
+                    )
+
+            if profiling_enabled_this_rank:
                 runtime.enable_profiling(True)
                 logger.info("Profiling enabled")
 
