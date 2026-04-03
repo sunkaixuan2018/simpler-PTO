@@ -28,7 +28,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 15,
+        .expected_arg_count = 16,
     };
 }
 
@@ -50,12 +50,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
     int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
+    int dummy_comm_scale = (arg_count > 15) ? static_cast<int>(args[15]) : 10;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
+    if (dummy_comm_scale <= 0) dummy_comm_scale = 1;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
 
-    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d",
-             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy);
+    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_comm_scale=%d",
+             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy, dummy_comm_scale);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -163,7 +165,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
-                make_scalar_param(sdma_workspace_ptr),
+                make_scalar_param(static_cast<uint64_t>(dummy_comm_scale)),
                 make_output_param(dummy_debug_out),
             };
             if (strategy == 1) {

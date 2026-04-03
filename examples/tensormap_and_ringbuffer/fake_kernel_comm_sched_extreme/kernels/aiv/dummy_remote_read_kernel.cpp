@@ -12,7 +12,7 @@
  *   args[3] = device_ctx_ptr (scalar)
  *   args[4] = nranks (scalar)
  *   args[5] = root (scalar)
- *   args[6] = sdma_workspace_ptr (scalar, unused)
+ *   args[6] = dummy_comm_scale (scalar, repeat factor; backward-compatible)
  *   args[7] = debug_poll_counts (TensorData*, unused)
  */
 
@@ -35,9 +35,8 @@ using namespace pto;
 #endif
 
 static constexpr size_t DUMMY_CHUNK = 256;
-// Increase dummy communication pressure by repeating remote-read sweep.
-// This keeps semantics simple while amplifying contention.
-static constexpr int DUMMY_REPEAT = 4;
+static constexpr int DUMMY_REPEAT_DEFAULT = 4;
+static constexpr int DUMMY_REPEAT_MAX = 4096;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ TensorData* dst_td = reinterpret_cast<__gm__ TensorData*>(args[0]);
@@ -46,8 +45,16 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ HcclDeviceContext* hcclCtx = reinterpret_cast<__gm__ HcclDeviceContext*>(args[3]);
     int nranks = static_cast<int>(args[4]);
     int root = static_cast<int>(args[5]);
-    (void)args[6];
+    uint64_t scale_raw = static_cast<uint64_t>(args[6]);
     (void)args[7];
+
+    int dummy_repeat = static_cast<int>(scale_raw);
+    // Backward compatibility:
+    // - old callers pass sdma_workspace_ptr here (large address), treat as default.
+    // - invalid/zero values also fall back to default.
+    if (dummy_repeat <= 0 || dummy_repeat > DUMMY_REPEAT_MAX) {
+        dummy_repeat = DUMMY_REPEAT_DEFAULT;
+    }
 
     int my_rank = static_cast<int>(hcclCtx->rankId);
     if (my_rank != root) {
@@ -69,7 +76,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     TileData ubTile(1, DUMMY_CHUNK);
     TASSIGN(ubTile, 0x0);
 
-    for (int rep = 0; rep < DUMMY_REPEAT; ++rep) {
+    for (int rep = 0; rep < dummy_repeat; ++rep) {
         for (int r = 0; r < actual_nranks; ++r) {
             __gm__ float* remote_src = HcclRemotePtr(hcclCtx, src, r);
             __gm__ float* local_dst = dst + static_cast<ptrdiff_t>(r) * gather_count;
