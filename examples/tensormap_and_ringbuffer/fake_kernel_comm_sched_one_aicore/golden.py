@@ -15,8 +15,7 @@ import numpy as np
 GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
 _N_ITER = int(os.environ.get("N_ITER", "200"))
 _SERIALIZE_DUMMY = int(os.environ.get("EXTREME_SERIALIZE_DUMMY", "0"))
-_DUMMY_COMM_BYTES = 512 * 1024
-_DUMMY_ELEMS = _DUMMY_COMM_BYTES // np.dtype(np.float32).itemsize
+_DUMMY_COMM_SCALE = int(os.environ.get("DUMMY_COMM_SCALE", "10"))
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 
 __outputs__ = ["out", "debug_poll_counts"]
@@ -33,7 +32,7 @@ def generate_inputs(params: dict) -> list:
 
     np.random.seed(42 + rank_id)
     src = np.random.randn(GATHER_COUNT).astype(np.float32) * 0.1
-    dummy_src = np.random.randn(_DUMMY_ELEMS).astype(np.float32) * 0.1
+    dummy_src = np.random.randn(max(1, GATHER_COUNT * _DUMMY_COMM_SCALE)).astype(np.float32) * 0.1
     out = np.zeros((n_ranks * GATHER_COUNT,), dtype=np.float32)
 
     strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
@@ -61,7 +60,7 @@ def generate_inputs(params: dict) -> list:
                 ("debug_poll_counts", debug_poll_counts),
                 ("n_iter", ctypes.c_int32(_N_ITER)),
                 ("serialize_dummy", ctypes.c_int32(_SERIALIZE_DUMMY)),
-                ("dummy_elem_count", ctypes.c_int32(_DUMMY_ELEMS)),
+                ("dummy_comm_scale", ctypes.c_int32(_DUMMY_COMM_SCALE)),
                 ("dummy_src", dummy_src),
             ]
         )
@@ -104,8 +103,7 @@ def post_run_collect(outputs: dict, params: dict) -> None:
                 "gather_count": GATHER_COUNT,
                 "n_ranks": n_ranks,
                 "n_iter": _N_ITER,
-                "dummy_comm_bytes": _DUMMY_COMM_BYTES,
-                "dummy_elem_count": _DUMMY_ELEMS,
+                "dummy_comm_scale": _DUMMY_COMM_SCALE,
                 "poll_counts": poll_np.tolist(),
             },
             f,

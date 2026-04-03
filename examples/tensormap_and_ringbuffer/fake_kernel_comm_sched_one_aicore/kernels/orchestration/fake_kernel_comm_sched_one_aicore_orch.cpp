@@ -50,15 +50,15 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
     int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
-    int dummy_elem_count = (arg_count > 15) ? static_cast<int>(args[15]) : (512 * 1024 / static_cast<int>(sizeof(float)));
+    int dummy_comm_scale = (arg_count > 15) ? static_cast<int>(args[15]) : 10;
     void* dev_dummy_src = (arg_count > 16) ? reinterpret_cast<void*>(args[16]) : dev_src;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
-    if (dummy_elem_count <= 0) dummy_elem_count = 1;
+    if (dummy_comm_scale <= 0) dummy_comm_scale = 1;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
 
-    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_elem_count=%d",
-             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy, dummy_elem_count);
+    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_comm_scale=%d",
+             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy, dummy_comm_scale);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -66,9 +66,9 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t win_dst = win_src + static_cast<uint64_t>(gather_count) * sizeof(float);
 
     uint64_t src_shapes[1] = {static_cast<uint64_t>(gather_count)};
-    uint64_t dummy_src_shapes[1] = {static_cast<uint64_t>(dummy_elem_count)};
+    uint64_t dummy_src_shapes[1] = {static_cast<uint64_t>(gather_count) * static_cast<uint64_t>(dummy_comm_scale)};
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
-    uint64_t dummy_dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(dummy_elem_count)};
+    uint64_t dummy_dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count) * static_cast<uint64_t>(dummy_comm_scale)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
     uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(n_iter) * static_cast<uint64_t>(n_ranks)};
