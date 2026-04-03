@@ -7,6 +7,7 @@ so one-aicore runs do not overwrite baseline outputs.
 
 import ctypes
 import json
+import math
 import os
 from pathlib import Path
 
@@ -15,7 +16,9 @@ import numpy as np
 GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
 _N_ITER = int(os.environ.get("N_ITER", "200"))
 _SERIALIZE_DUMMY = int(os.environ.get("EXTREME_SERIALIZE_DUMMY", "0"))
-_DUMMY_COMM_SCALE = int(os.environ.get("DUMMY_COMM_SCALE", "10"))
+_DUMMY_COMM_BYTES = int(os.environ.get("DUMMY_COMM_BYTES", str(512 * 1024)))
+_DUMMY_BYTES_PER_REPEAT = max(1, GATHER_COUNT * np.dtype(np.float32).itemsize)
+_DUMMY_COMM_SCALE = max(1, int(math.ceil(_DUMMY_COMM_BYTES / _DUMMY_BYTES_PER_REPEAT)))
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 
 __outputs__ = ["out", "debug_poll_counts"]
@@ -101,6 +104,8 @@ def post_run_collect(outputs: dict, params: dict) -> None:
                 "gather_count": GATHER_COUNT,
                 "n_ranks": n_ranks,
                 "n_iter": _N_ITER,
+                "dummy_comm_bytes_target": _DUMMY_COMM_BYTES,
+                "dummy_comm_bytes_per_repeat": _DUMMY_BYTES_PER_REPEAT,
                 "dummy_comm_scale": _DUMMY_COMM_SCALE,
                 "poll_counts": poll_np.tolist(),
             },
