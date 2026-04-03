@@ -31,8 +31,8 @@ RUNTIME_CONFIG = {
     "runtime": "tensormap_and_ringbuffer",
     # Dedicated orchestrator + scheduler thread pair.
     "aicpu_thread_num": 2,
-    # One AICore group only (1 AIC + 2 AIV lanes).
-    "block_dim": 1,
+    # Temporarily use baseline parallelism for A/B validation.
+    "block_dim": 24,
     "n_devices": int(os.environ.get("N_DEVICES", "4")),
     "first_device_id": int(os.environ.get("FIRST_DEVICE", "0")),
     "requires_comm": True,
