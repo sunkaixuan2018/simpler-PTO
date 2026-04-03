@@ -14,6 +14,7 @@ from pathlib import Path
 
 _KERNELS_ROOT = Path(__file__).parent
 _BASE_CASE_ROOT = _KERNELS_ROOT.parents[1] / "fake_kernel_comm_sched" / "kernels"
+_EXTREME_AIV_ROOT = _KERNELS_ROOT.parents[1] / "fake_kernel_comm_sched_extreme" / "kernels" / "aiv"
 
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "fake_kernel_comm_sched_one_aicore_orch.cpp"),
@@ -26,6 +27,9 @@ KERNELS = [
     {"func_id": 2, "name": "GatherAsync",      "source": str(_BASE_CASE_ROOT / "aiv" / "gather_async_kernel.cpp"), "core_type": "aiv"},
     {"func_id": 3, "name": "WindowMemCopyOut", "source": str(_BASE_CASE_ROOT / "aiv" / "window_memcopy_out.cpp"),  "core_type": "aiv"},
     {"func_id": 4, "name": "CommBarrier",      "source": str(_BASE_CASE_ROOT / "aiv" / "comm_barrier_kernel.cpp"), "core_type": "aiv"},
+    # 2nd communication task for contention experiments.
+    {"func_id": 5, "name": "DummyCommSync",    "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
+    {"func_id": 6, "name": "DummyCommAsync",   "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
 ]
 
 RUNTIME_CONFIG = {

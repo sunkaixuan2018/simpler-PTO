@@ -14,6 +14,7 @@ import numpy as np
 
 GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
 _N_ITER = int(os.environ.get("N_ITER", "200"))
+_SERIALIZE_DUMMY = int(os.environ.get("EXTREME_SERIALIZE_DUMMY", "0"))
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 
 __outputs__ = ["out", "debug_poll_counts"]
@@ -56,6 +57,7 @@ def generate_inputs(params: dict) -> list:
                 ("strategy", ctypes.c_int32(strategy_int)),
                 ("debug_poll_counts", debug_poll_counts),
                 ("n_iter", ctypes.c_int32(_N_ITER)),
+                ("serialize_dummy", ctypes.c_int32(_SERIALIZE_DUMMY)),
             ]
         )
 

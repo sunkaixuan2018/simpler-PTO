@@ -2,7 +2,7 @@
  * one_aicore orchestration:
  * - built from fake_kernel_comm_sched
  * - keeps per-rank task graph symmetric to reduce rank skew/stalls
- * - constrained by kernel_config.py to block_dim=1 + dual-AIV-on-one-AICore
+ * - constrained by runtime mask to one AICore group (1 AIC + 2 AIV)
  */
 
 #include <stddef.h>
@@ -18,6 +18,8 @@ constexpr int DEFAULT_N_ITER = 200;
 #define FUNC_GATHER_ASYNC    2
 #define FUNC_WIN_MEMCOPY_OUT 3
 #define FUNC_COMM_BARRIER    4
+#define FUNC_DUMMY_COMM_SYNC 5
+#define FUNC_DUMMY_COMM_ASYNC 6
 
 extern "C" {
 
@@ -26,7 +28,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 14,
+        .expected_arg_count = 15,
     };
 }
 
@@ -47,12 +49,13 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
+    int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
 
-    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d",
-             strategy, gather_count, n_ranks, rank_id, n_iter);
+    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d",
+             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -119,6 +122,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             Tensor gather_out = (rank_id == root && iter == n_iter - 1)
                 ? win_dst_t
                 : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+            Tensor dummy_out = make_tensor(dst_shapes, 1, DataType::FLOAT32);
 
             void* iter_debug_ptr = (rank_id == root && dev_debug != nullptr)
                 ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
@@ -145,6 +149,30 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             } else {
                 int32_t gather_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
                 pto2_rt_submit_variant_task(rt, gather_variants, 2, PTO2_WORKER_VECTOR, params_gather, 8);
+            }
+
+            // 2nd communication task: shares the same source window and strategy family.
+            // By default this is concurrent with main gather; serialize_dummy=1 forces
+            // dependency on gather_out for a debug fallback path.
+            Tensor dummy_dep = (serialize_dummy != 0) ? gather_out : sync_after_barrier;
+            Tensor dummy_debug_out = make_tensor(debug_row_shapes, 1, DataType::INT32);
+            PTOParam params_dummy[] = {
+                make_output_param(dummy_out),
+                make_input_param(win_src_t),
+                make_input_param(dummy_dep),
+                make_scalar_param(device_ctx_ptr),
+                make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                make_scalar_param(static_cast<uint64_t>(root)),
+                make_scalar_param(sdma_workspace_ptr),
+                make_output_param(dummy_debug_out),
+            };
+            if (strategy == 1) {
+                pto2_rt_submit_task(rt, FUNC_DUMMY_COMM_SYNC, PTO2_WORKER_VECTOR, params_dummy, 8);
+            } else if (strategy == 2) {
+                pto2_rt_submit_task(rt, FUNC_DUMMY_COMM_ASYNC, PTO2_WORKER_VECTOR, params_dummy, 8);
+            } else {
+                int32_t dummy_variants[] = {FUNC_DUMMY_COMM_SYNC, FUNC_DUMMY_COMM_ASYNC};
+                pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_dummy, 8);
             }
 
             Tensor wmout_dst = (rank_id == root && iter == n_iter - 1)
