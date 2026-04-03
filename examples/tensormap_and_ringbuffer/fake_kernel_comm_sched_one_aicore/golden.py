@@ -55,6 +55,7 @@ def generate_inputs(params: dict) -> list:
                 ("sdma_workspace_ptr", ctypes.c_uint64(params.get("sdma_workspace_ptr", 0))),
                 ("strategy", ctypes.c_int32(strategy_int)),
                 ("debug_poll_counts", debug_poll_counts),
+                ("n_iter", ctypes.c_int32(_N_ITER)),
             ]
         )
 
@@ -100,4 +101,3 @@ def post_run_collect(outputs: dict, params: dict) -> None:
             },
             f,
         )
-
