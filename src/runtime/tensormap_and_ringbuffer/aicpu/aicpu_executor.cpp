@@ -441,8 +441,11 @@ int AicpuExecutor::init(Runtime* runtime) {
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
-    extreme_single_aicore_dual_aiv_ = env_flag_enabled("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
-    DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV=%d", extreme_single_aicore_dual_aiv_ ? 1 : 0);
+    const bool env_extreme = env_flag_enabled("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
+    const bool runtime_extreme = runtime->extreme_single_aicore_dual_aiv != 0;
+    extreme_single_aicore_dual_aiv_ = runtime_extreme || env_extreme;
+    DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV runtime=%d env=%d effective=%d",
+             runtime_extreme ? 1 : 0, env_extreme ? 1 : 0, extreme_single_aicore_dual_aiv_ ? 1 : 0);
 
     // Use handshake mechanism to discover cores (aligned with host_build_graph)
     int rc = handshake_all_cores(runtime);

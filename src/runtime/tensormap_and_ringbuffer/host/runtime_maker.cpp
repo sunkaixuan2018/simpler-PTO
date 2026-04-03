@@ -61,6 +61,19 @@ static uint64_t parse_env_uint64(const char* name, uint64_t min_val, bool requir
     return static_cast<uint64_t>(val);
 }
 
+static int parse_env_flag01(const char* name) {
+    const char* env = std::getenv(name);
+    if (env == nullptr || env[0] == '\0') return 0;
+    if (std::strcmp(env, "0") == 0 ||
+        std::strcmp(env, "false") == 0 ||
+        std::strcmp(env, "FALSE") == 0 ||
+        std::strcmp(env, "off") == 0 ||
+        std::strcmp(env, "OFF") == 0) {
+        return 0;
+    }
+    return 1;
+}
+
 /**
  * Initialize a pre-allocated runtime for device orchestration.
  *
@@ -260,6 +273,12 @@ extern "C" int init_runtime_impl(Runtime *runtime,
         }
         LOG_INFO("Ready queue shards: %d", runtime->ready_queue_shards);
     }
+
+    // Persist extreme scheduling switch into Runtime so AICPU side does not
+    // depend on getenv availability in device execution environment.
+    runtime->extreme_single_aicore_dual_aiv = parse_env_flag01("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
+    LOG_INFO("Extreme single-aicore dual-aiv (runtime field): %d",
+             runtime->extreme_single_aicore_dual_aiv);
 
     // Read ring buffer size overrides from environment
     {
