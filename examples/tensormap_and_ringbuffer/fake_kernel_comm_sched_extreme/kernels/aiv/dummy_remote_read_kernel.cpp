@@ -11,7 +11,7 @@
  *   args[2] = sync_done (TensorData*, dependency only)
  *   args[3] = device_ctx_ptr (scalar)
  *   args[4] = nranks (scalar)
- *   args[5] = root (scalar)
+ *   args[5] = root (scalar, unused)
  *   args[6] = dummy_comm_scale (scalar, repeat factor; backward-compatible)
  *   args[7] = debug_poll_counts (TensorData*, unused)
  */
@@ -44,7 +44,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     (void)args[2];
     __gm__ HcclDeviceContext* hcclCtx = reinterpret_cast<__gm__ HcclDeviceContext*>(args[3]);
     int nranks = static_cast<int>(args[4]);
-    int root = static_cast<int>(args[5]);
+    (void)args[5];
     uint64_t scale_raw = static_cast<uint64_t>(args[6]);
     (void)args[7];
 
@@ -54,12 +54,6 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     // - invalid/zero values also fall back to default.
     if (dummy_repeat <= 0 || dummy_repeat > DUMMY_REPEAT_MAX) {
         dummy_repeat = DUMMY_REPEAT_DEFAULT;
-    }
-
-    int my_rank = static_cast<int>(hcclCtx->rankId);
-    if (my_rank != root) {
-        pipe_barrier(PIPE_ALL);
-        return;
     }
 
     __gm__ float* dst = reinterpret_cast<__gm__ float*>(dst_td->buffer.addr);
