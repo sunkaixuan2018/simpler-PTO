@@ -15,7 +15,7 @@ _KERNELS_ROOT = Path(__file__).parent
 _BASE_CASE_ROOT = _KERNELS_ROOT.parents[1] / "fake_kernel_comm_sched" / "kernels"
 
 ORCHESTRATION = {
-    "source": str(_BASE_CASE_ROOT / "orchestration" / "fake_kernel_comm_sched_orch.cpp"),
+    "source": str(_KERNELS_ROOT / "orchestration" / "fake_kernel_comm_sched_one_aicore_orch.cpp"),
     "function_name": "aicpu_orchestration_entry",
 }
 
@@ -43,4 +43,3 @@ RUNTIME_CONFIG = {
 RUNTIME_ENV = {
     "PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV": "1",
 }
-
