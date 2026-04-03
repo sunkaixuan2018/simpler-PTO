@@ -35,6 +35,9 @@ using namespace pto;
 #endif
 
 static constexpr size_t DUMMY_CHUNK = 256;
+// Increase dummy communication pressure by repeating remote-read sweep.
+// This keeps semantics simple while amplifying contention.
+static constexpr int DUMMY_REPEAT = 4;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ TensorData* dst_td = reinterpret_cast<__gm__ TensorData*>(args[0]);
@@ -66,26 +69,28 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     TileData ubTile(1, DUMMY_CHUNK);
     TASSIGN(ubTile, 0x0);
 
-    for (int r = 0; r < actual_nranks; ++r) {
-        __gm__ float* remote_src = HcclRemotePtr(hcclCtx, src, r);
-        __gm__ float* local_dst = dst + static_cast<ptrdiff_t>(r) * gather_count;
+    for (int rep = 0; rep < DUMMY_REPEAT; ++rep) {
+        for (int r = 0; r < actual_nranks; ++r) {
+            __gm__ float* remote_src = HcclRemotePtr(hcclCtx, src, r);
+            __gm__ float* local_dst = dst + static_cast<ptrdiff_t>(r) * gather_count;
 
-        for (size_t off = 0; off < gather_count; off += DUMMY_CHUNK) {
-            size_t chunk = gather_count - off;
-            if (chunk > DUMMY_CHUNK) chunk = DUMMY_CHUNK;
+            for (size_t off = 0; off < gather_count; off += DUMMY_CHUNK) {
+                size_t chunk = gather_count - off;
+                if (chunk > DUMMY_CHUNK) chunk = DUMMY_CHUNK;
 
-            ShapeDyn shape(1, 1, 1, 1, chunk);
-            StrideDyn stride(chunk, chunk, chunk, chunk, 1);
+                ShapeDyn shape(1, 1, 1, 1, chunk);
+                StrideDyn stride(chunk, chunk, chunk, chunk, 1);
 
-            Global srcG(remote_src + off, shape, stride);
-            Global dstG(local_dst + off, shape, stride);
+                Global srcG(remote_src + off, shape, stride);
+                Global dstG(local_dst + off, shape, stride);
 
-            TLOAD(ubTile, srcG);
-            set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-            wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
-            TSTORE(dstG, ubTile);
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+                TLOAD(ubTile, srcG);
+                set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+                wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+                TSTORE(dstG, ubTile);
+                set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+                wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+            }
         }
     }
 
