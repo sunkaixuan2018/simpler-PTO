@@ -806,8 +806,8 @@ class CodeRunner:
                 runtime.enable_profiling(True)
                 logger.info("Profiling enabled")
 
-            _t_init_start = time.perf_counter()
             with _temporary_env(run_env):
+                _t_init_start = time.perf_counter()
                 runtime.initialize(
                     orch_so_binary,
                     orch_func_name,
@@ -816,21 +816,20 @@ class CodeRunner:
                     arg_sizes=arg_sizes,
                     kernel_binaries=kernel_binaries,
                 )
-            _t_init_end = time.perf_counter()
-            logger.info(f">>> runtime.initialize() took {_t_init_end - _t_init_start:.3f}s")
+                _t_init_end = time.perf_counter()
+                logger.info(f">>> runtime.initialize() took {_t_init_end - _t_init_start:.3f}s")
 
-            # HcclBarrier before launch (when using comm)
-            if comm_context and "comm" in comm_context and "stream" in comm_context:
-                from hccl_bindings import hccl_barrier
-                hccl_barrier(comm_context["comm"], comm_context["stream"])
-                logger.info("HcclBarrier (pre-launch) done")
+                # HcclBarrier before launch (when using comm)
+                if comm_context and "comm" in comm_context and "stream" in comm_context:
+                    from hccl_bindings import hccl_barrier
+                    hccl_barrier(comm_context["comm"], comm_context["stream"])
+                    logger.info("HcclBarrier (pre-launch) done")
 
-            # Launch runtime
-            logger.info("=== Launching Runtime ===")
-            import sys
-            sys.stdout.flush()
+                # Launch runtime
+                logger.info("=== Launching Runtime ===")
+                import sys
+                sys.stdout.flush()
 
-            with _temporary_env(run_env):
                 launch_runtime(
                     runtime,
                     aicpu_thread_num=self.aicpu_thread_num,
@@ -840,17 +839,17 @@ class CodeRunner:
                     aicore_binary=aicore_binary,
                 )
 
-            logger.info("Launch completed successfully")
+                logger.info("Launch completed successfully")
 
-            # HcclBarrier after launch (when using comm)
-            if comm_context and "comm" in comm_context and "stream" in comm_context:
-                from hccl_bindings import hccl_barrier
-                hccl_barrier(comm_context["comm"], comm_context["stream"])
-                logger.info("HcclBarrier (post-launch) done")
+                # HcclBarrier after launch (when using comm)
+                if comm_context and "comm" in comm_context and "stream" in comm_context:
+                    from hccl_bindings import hccl_barrier
+                    hccl_barrier(comm_context["comm"], comm_context["stream"])
+                    logger.info("HcclBarrier (post-launch) done")
 
-            # Finalize
-            logger.info("=== Finalizing Runtime ===")
-            runtime.finalize()
+                # Finalize
+                logger.info("=== Finalizing Runtime ===")
+                runtime.finalize()
 
             # Optional post-run collection hook in golden.py.
             # Runs after finalize so outputs contain real device values.

@@ -745,8 +745,8 @@ class CodeRunner:
                 runtime.enable_profiling(True)
                 logger.info("Profiling enabled")
 
-            _t_init_start = time.perf_counter()
             with _temporary_env(run_env):
+                _t_init_start = time.perf_counter()
                 runtime.initialize(
                     orch_so_binary,
                     orch_func_name,
@@ -755,29 +755,28 @@ class CodeRunner:
                     arg_sizes=arg_sizes,
                     kernel_binaries=kernel_binaries,
                 )
-            _t_init_end = time.perf_counter()
-            logger.info(f">>> runtime.initialize() took {_t_init_end - _t_init_start:.3f}s")
+                _t_init_end = time.perf_counter()
+                logger.info(f">>> runtime.initialize() took {_t_init_end - _t_init_start:.3f}s")
 
-            # Save expected values BEFORE hardware execution (outputs will be overwritten)
-            golden = {k: v.clone() for k, v in outputs.items()}
-            # Convert to dict for compute_golden (may expect numpy-like interface)
-            golden_with_inputs = {**inputs, **golden}
-            _t_golden_start = time.perf_counter()
-            self._golden_module.compute_golden(golden_with_inputs, params)
-            _t_golden_end = time.perf_counter()
-            logger.info(f">>> compute_golden() took {_t_golden_end - _t_golden_start:.3f}s")
-            logger.info(f">>> Total init-to-launch: {_t_golden_end - _t_init_start:.3f}s "
-                        f"(initialize={_t_init_end - _t_init_start:.3f}s, "
-                        f"golden={_t_golden_end - _t_golden_start:.3f}s)")
+                # Save expected values BEFORE hardware execution (outputs will be overwritten)
+                golden = {k: v.clone() for k, v in outputs.items()}
+                # Convert to dict for compute_golden (may expect numpy-like interface)
+                golden_with_inputs = {**inputs, **golden}
+                _t_golden_start = time.perf_counter()
+                self._golden_module.compute_golden(golden_with_inputs, params)
+                _t_golden_end = time.perf_counter()
+                logger.info(f">>> compute_golden() took {_t_golden_end - _t_golden_start:.3f}s")
+                logger.info(f">>> Total init-to-launch: {_t_golden_end - _t_init_start:.3f}s "
+                            f"(initialize={_t_init_end - _t_init_start:.3f}s, "
+                            f"golden={_t_golden_end - _t_golden_start:.3f}s)")
 
-            # Launch runtime
-            logger.info("=== Launching Runtime ===")
-            logger.debug(f"Device ID: {self.device_id}")
-            logger.debug(f"AICPU threads: {self.aicpu_thread_num}, Block dim: {self.block_dim}")
-            import sys
-            sys.stdout.flush()  # Ensure output is visible before potential hang
+                # Launch runtime
+                logger.info("=== Launching Runtime ===")
+                logger.debug(f"Device ID: {self.device_id}")
+                logger.debug(f"AICPU threads: {self.aicpu_thread_num}, Block dim: {self.block_dim}")
+                import sys
+                sys.stdout.flush()  # Ensure output is visible before potential hang
 
-            with _temporary_env(run_env):
                 launch_runtime(
                     runtime,
                     aicpu_thread_num=self.aicpu_thread_num,
@@ -787,11 +786,11 @@ class CodeRunner:
                     aicore_binary=aicore_binary,
                 )
 
-            logger.info("Launch completed successfully")  # Will only print if not hung
+                logger.info("Launch completed successfully")  # Will only print if not hung
 
-            # Finalize
-            logger.info("=== Finalizing Runtime ===")
-            runtime.finalize()
+                # Finalize
+                logger.info("=== Finalizing Runtime ===")
+                runtime.finalize()
 
             # Optional post-run collection hook in golden.py.
             # Runs after finalize so outputs contain real device values.
