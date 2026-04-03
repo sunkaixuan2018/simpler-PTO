@@ -151,9 +151,15 @@ int DeviceRunner::run(Runtime& runtime,
         return -1;
     }
 
-    // Validate even distribution: block_dim must be divisible by scheduler thread count
-    // When launch_aicpu_num == 4: 3 schedulers + 1 orchestrator (thread 3 has 0 cores)
-    int scheduler_thread_num = (launch_aicpu_num == 4) ? 3 : launch_aicpu_num;
+    // Validate even distribution: block_dim must be divisible by scheduler thread count.
+    // In device-orchestration mode, one AICPU thread is reserved as orchestrator.
+    int scheduler_thread_num = launch_aicpu_num;
+    if (!runtime.get_orch_built_on_host() && launch_aicpu_num > 1) {
+        scheduler_thread_num = launch_aicpu_num - 1;
+    }
+    if (scheduler_thread_num < 1) {
+        scheduler_thread_num = 1;
+    }
     if (block_dim % scheduler_thread_num != 0) {
         LOG_ERROR("block_dim (%d) must be evenly divisible by scheduler_thread_num (%d)",
                        block_dim, scheduler_thread_num);
