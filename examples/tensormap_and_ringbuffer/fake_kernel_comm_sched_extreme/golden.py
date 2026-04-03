@@ -3,7 +3,7 @@ Golden reference for fake_kernel_comm_sched_extreme.
 
 Args layout: [src, out, size_src, size_out, device_ctx_ptr, win_in_base,
               win_out_base, n_ranks, root, rank_id, sdma_workspace_ptr,
-              strategy, debug_poll_counts]
+              strategy, debug_poll_counts, n_iter]
 """
 
 import ctypes
@@ -55,6 +55,7 @@ def generate_inputs(params: dict) -> list:
             ("sdma_workspace_ptr", ctypes.c_uint64(params.get("sdma_workspace_ptr", 0))),
             ("strategy", ctypes.c_int32(strategy_int)),
             ("debug_poll_counts", debug_poll_counts),
+            ("n_iter", ctypes.c_int32(_N_ITER)),
         ])
 
     return result

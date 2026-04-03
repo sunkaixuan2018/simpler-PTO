@@ -7,8 +7,6 @@
 
 #include <stddef.h>
 #include <stdint.h>
-#include <stdlib.h>
-
 #include "pto_orchestration_api.h"
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
@@ -28,9 +26,7 @@ __attribute__((visibility("default")))
 PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
     (void)args;
     (void)arg_count;
-    return PTO2OrchestrationConfig{
-        .expected_arg_count = 13,
-    };
+    return PTO2OrchestrationConfig{.expected_arg_count = 14};
 }
 
 __attribute__((visibility("default")))
@@ -49,14 +45,8 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t sdma_workspace_ptr = args[10];
     int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
-    int n_iter = DEFAULT_N_ITER;
-    const char* n_iter_env = getenv("N_ITER");
-    if (n_iter_env != nullptr && n_iter_env[0] != '\0') {
-        long parsed = strtol(n_iter_env, nullptr, 10);
-        if (parsed > 0 && parsed < 100000) {
-            n_iter = static_cast<int>(parsed);
-        }
-    }
+    int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
+    if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
     LOG_INFO(
@@ -126,6 +116,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             };
             pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
 
+            Tensor iter_done_dep = sync_after_barrier;
             if (rank_id == root) {
                 Tensor gather_out_main = (iter == n_iter - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
                 Tensor gather_out_dummy = make_tensor(dst_shapes, 1, DataType::FLOAT32);
@@ -152,7 +143,8 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 PTOParam params_gather_dummy[] = {
                     make_output_param(gather_out_dummy),
                     make_input_param(win_src_t),
-                    make_input_param(sync_after_barrier),
+                    // Serialize dummy gather after main gather to avoid re-entrancy conflicts in comm context.
+                    make_input_param(gather_out_main),
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
@@ -183,9 +175,10 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     };
                     pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
                 }
+                iter_done_dep = gather_out_dummy;
             }
 
-            prev_barrier_sync = sync_after_barrier;
+            prev_barrier_sync = iter_done_dep;
         }
     }
 
