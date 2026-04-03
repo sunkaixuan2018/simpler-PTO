@@ -56,8 +56,11 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
         strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
-    uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
-    uint64_t win_src = barrier_base + barrier_size;
+    uint64_t barrier_base_start = win_in_base + HCCL_WIN_SYNC_PREFIX;
+    uint64_t barrier_base_pre_main = barrier_base_start + barrier_size;
+    uint64_t barrier_base_post_main = barrier_base_pre_main + barrier_size;
+    uint64_t barrier_base_post_dummy = barrier_base_post_main + barrier_size;
+    uint64_t win_src = barrier_base_post_dummy + barrier_size;
     uint64_t win_dst = win_src + static_cast<uint64_t>(gather_count) * sizeof(float);
 
     uint64_t src_shapes[1] = {static_cast<uint64_t>(gather_count)};
@@ -81,15 +84,18 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     (void)dev_debug_t;
 
     PTO2_SCOPE(rt) {
-        Tensor barrier_t = make_tensor_external(reinterpret_cast<void*>(barrier_base), barrier_shapes, 1, DataType::INT32);
+        Tensor barrier_start_t = make_tensor_external(reinterpret_cast<void*>(barrier_base_start), barrier_shapes, 1, DataType::INT32);
+        Tensor barrier_pre_main_t = make_tensor_external(reinterpret_cast<void*>(barrier_base_pre_main), barrier_shapes, 1, DataType::INT32);
+        Tensor barrier_post_main_t = make_tensor_external(reinterpret_cast<void*>(barrier_base_post_main), barrier_shapes, 1, DataType::INT32);
+        Tensor barrier_post_dummy_t = make_tensor_external(reinterpret_cast<void*>(barrier_base_post_dummy), barrier_shapes, 1, DataType::INT32);
         Tensor sync_t0 = make_tensor(sync_shapes, 1, DataType::INT32);
 
         PTOParam params_barrier0[] = {
-            make_input_param(barrier_t),
+            make_input_param(barrier_start_t),
             make_scalar_param(device_ctx_ptr),
             make_scalar_param(static_cast<uint64_t>(n_ranks)),
             make_scalar_param(static_cast<uint64_t>(root)),
-            make_input_param(barrier_t),
+            make_input_param(barrier_start_t),
             make_output_param(sync_t0),
         };
         pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier0, 6);
@@ -110,7 +116,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 4);
 
             PTOParam params_barrier[] = {
-                make_input_param(barrier_t),
+                make_input_param(barrier_pre_main_t),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
@@ -168,7 +174,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 if (serialize_dummy != 0) {
                     // All-rank stage barrier after main gather to close comm phase before dummy gather.
                     PTOParam params_barrier_after_main[] = {
-                        make_input_param(barrier_t),
+                        make_input_param(barrier_post_main_t),
                         make_scalar_param(device_ctx_ptr),
                         make_scalar_param(static_cast<uint64_t>(n_ranks)),
                         make_scalar_param(static_cast<uint64_t>(root)),
@@ -201,7 +207,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             } else if (serialize_dummy != 0) {
                 // Non-root still participates in the stage barrier when serialization is enabled.
                 PTOParam params_barrier_after_main[] = {
-                    make_input_param(barrier_t),
+                    make_input_param(barrier_post_main_t),
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
@@ -214,7 +220,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
             if (serialize_dummy != 0) {
                 PTOParam params_barrier_after_dummy[] = {
-                    make_input_param(barrier_t),
+                    make_input_param(barrier_post_dummy_t),
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
