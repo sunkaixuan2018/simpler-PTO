@@ -830,14 +830,15 @@ class CodeRunner:
             import sys
             sys.stdout.flush()
 
-            launch_runtime(
-                runtime,
-                aicpu_thread_num=self.aicpu_thread_num,
-                block_dim=self.block_dim,
-                device_id=self.device_id,
-                aicpu_binary=aicpu_binary,
-                aicore_binary=aicore_binary,
-            )
+            with _temporary_env(run_env):
+                launch_runtime(
+                    runtime,
+                    aicpu_thread_num=self.aicpu_thread_num,
+                    block_dim=self.block_dim,
+                    device_id=self.device_id,
+                    aicpu_binary=aicpu_binary,
+                    aicore_binary=aicore_binary,
+                )
 
             logger.info("Launch completed successfully")
 
