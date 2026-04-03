@@ -35,7 +35,7 @@ using namespace pto;
 #endif
 
 static constexpr size_t DUMMY_CHUNK = 256;
-static constexpr int DUMMY_REPEAT_DEFAULT = 4;
+static constexpr int DUMMY_REPEAT_DEFAULT = 1;
 static constexpr int DUMMY_REPEAT_MAX = 4096;
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {

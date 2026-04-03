@@ -32,6 +32,7 @@ def generate_inputs(params: dict) -> list:
 
     np.random.seed(42 + rank_id)
     src = np.random.randn(GATHER_COUNT).astype(np.float32) * 0.1
+    dummy_src = np.random.randn(max(1, GATHER_COUNT * _DUMMY_COMM_SCALE)).astype(np.float32) * 0.1
     out = np.zeros((n_ranks * GATHER_COUNT,), dtype=np.float32)
 
     strategy_str = os.environ.get("GATHER_STRATEGY", "hybrid")
@@ -60,6 +61,7 @@ def generate_inputs(params: dict) -> list:
                 ("n_iter", ctypes.c_int32(_N_ITER)),
                 ("serialize_dummy", ctypes.c_int32(_SERIALIZE_DUMMY)),
                 ("dummy_comm_scale", ctypes.c_int32(_DUMMY_COMM_SCALE)),
+                ("dummy_src", dummy_src),
             ]
         )
 
