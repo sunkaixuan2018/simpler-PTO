@@ -26,7 +26,7 @@ __attribute__((visibility("default")))
 PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
     (void)args;
     (void)arg_count;
-    return PTO2OrchestrationConfig{.expected_arg_count = 14};
+    return PTO2OrchestrationConfig{.expected_arg_count = 15};
 }
 
 __attribute__((visibility("default")))
@@ -46,13 +46,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
+    int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 1;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
     LOG_INFO(
         rt,
-        "fake_kernel_comm_sched_extreme: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d",
-        strategy, gather_count, n_ranks, rank_id, n_iter);
+        "fake_kernel_comm_sched_extreme: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d",
+        strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -97,6 +98,8 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
         for (int iter = 0; iter < n_iter; ++iter) {
             Tensor sync_after_barrier = make_tensor(sync_shapes, 1, DataType::INT32);
+            Tensor sync_after_main = make_tensor(sync_shapes, 1, DataType::INT32);
+            Tensor sync_after_dummy = make_tensor(sync_shapes, 1, DataType::INT32);
 
             PTOParam params_wmin[] = {
                 make_output_param(win_src_t),
@@ -116,7 +119,8 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             };
             pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
 
-            Tensor iter_done_dep = sync_after_barrier;
+            Tensor dep_after_main = sync_after_barrier;
+            Tensor dep_after_dummy = sync_after_barrier;
             if (rank_id == root) {
                 Tensor gather_out_main = (iter == n_iter - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
                 Tensor gather_out_dummy = make_tensor(dst_shapes, 1, DataType::FLOAT32);
@@ -143,8 +147,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 PTOParam params_gather_dummy[] = {
                     make_output_param(gather_out_dummy),
                     make_input_param(win_src_t),
-                    // Serialize dummy gather after main gather to avoid re-entrancy conflicts in comm context.
-                    make_input_param(gather_out_main),
+                    make_input_param((serialize_dummy != 0) ? sync_after_main : sync_after_barrier),
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
@@ -154,14 +157,33 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
                 if (strategy == 1) {
                     pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
-                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
                 } else if (strategy == 2) {
                     pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
-                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
                 } else {
                     int32_t main_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
-                    int32_t dummy_variants[] = {FUNC_DUMMY_GATHER_SYNC, FUNC_DUMMY_GATHER_ASYNC};
                     pto2_rt_submit_variant_task(rt, main_variants, 2, PTO2_WORKER_VECTOR, params_gather_main, 8);
+                }
+                dep_after_main = gather_out_main;
+
+                if (serialize_dummy != 0) {
+                    // All-rank stage barrier after main gather to close comm phase before dummy gather.
+                    PTOParam params_barrier_after_main[] = {
+                        make_input_param(barrier_t),
+                        make_scalar_param(device_ctx_ptr),
+                        make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                        make_scalar_param(static_cast<uint64_t>(root)),
+                        make_input_param(dep_after_main),
+                        make_output_param(sync_after_main),
+                    };
+                    pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_main, 6);
+                }
+
+                if (strategy == 1) {
+                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
+                } else if (strategy == 2) {
+                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
+                } else {
+                    int32_t dummy_variants[] = {FUNC_DUMMY_GATHER_SYNC, FUNC_DUMMY_GATHER_ASYNC};
                     pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
                 }
 
@@ -175,10 +197,35 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     };
                     pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
                 }
-                iter_done_dep = gather_out_dummy;
+                dep_after_dummy = gather_out_dummy;
+            } else if (serialize_dummy != 0) {
+                // Non-root still participates in the stage barrier when serialization is enabled.
+                PTOParam params_barrier_after_main[] = {
+                    make_input_param(barrier_t),
+                    make_scalar_param(device_ctx_ptr),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                    make_scalar_param(static_cast<uint64_t>(root)),
+                    make_input_param(dep_after_main),
+                    make_output_param(sync_after_main),
+                };
+                pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_main, 6);
+                dep_after_dummy = sync_after_main;
             }
 
-            prev_barrier_sync = iter_done_dep;
+            if (serialize_dummy != 0) {
+                PTOParam params_barrier_after_dummy[] = {
+                    make_input_param(barrier_t),
+                    make_scalar_param(device_ctx_ptr),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                    make_scalar_param(static_cast<uint64_t>(root)),
+                    make_input_param(dep_after_dummy),
+                    make_output_param(sync_after_dummy),
+                };
+                pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_dummy, 6);
+                prev_barrier_sync = sync_after_dummy;
+            } else {
+                prev_barrier_sync = dep_after_dummy;
+            }
         }
     }
 
