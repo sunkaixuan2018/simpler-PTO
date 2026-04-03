@@ -31,7 +31,10 @@ KERNELS = [
 
 RUNTIME_CONFIG = {
     "runtime": "tensormap_and_ringbuffer",
-    "aicpu_thread_num": 1,
+    # Use 2 AICPU threads in extreme mode:
+    # 1 dedicated orchestrator + 1 scheduler.
+    # This avoids the unstable single-thread composite path during bring-up.
+    "aicpu_thread_num": 2,
     "block_dim": 1,
     "n_devices": int(os.environ.get("N_DEVICES", "4")),
     "first_device_id": int(os.environ.get("FIRST_DEVICE", "0")),
