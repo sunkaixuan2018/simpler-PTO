@@ -75,6 +75,8 @@ _NORMAL_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched" / "kernels"
 _NORMAL_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched" / "golden.py"
 _EXTREME_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_extreme" / "kernels"
 _EXTREME_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_extreme" / "golden.py"
+_ONE_AICORE_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore" / "kernels"
+_ONE_AICORE_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
 
 
@@ -321,7 +323,10 @@ def run_case(
     trim_ratio: float,
     kernels_dir: Path,
     golden_path: Path,
-    extreme_mode: bool,
+    case_mode: str,
+    dummy_comm_bytes: int,
+    serialize_dummy: int,
+    profile_root_only: int,
     diagnostic: bool = False,
 ) -> tuple[dict, list[dict]]:
     """Run one (strategy, size) case and return result dict."""
@@ -337,8 +342,12 @@ def run_case(
     env["N_DEVICES"]       = str(n_ranks)
     env["FIRST_DEVICE"]    = str(first_device)
     env["N_ITER"]          = str(N_ITER)
-    if extreme_mode:
+    if case_mode == "extreme":
         env["GATHER_CASE"] = "extreme"
+    elif case_mode == "one_aicore":
+        env["DUMMY_COMM_BYTES"] = str(dummy_comm_bytes)
+        env["EXTREME_SERIALIZE_DUMMY"] = str(serialize_dummy)
+        env["PROFILE_ROOT_ONLY"] = str(profile_root_only)
 
     cmd = [
         sys.executable, str(_RUNNER),
@@ -364,7 +373,10 @@ def run_case(
         "warmup_samples":  N_WARMUP,
         "measured_samples": N_ITER - N_WARMUP,
         "trim_ratio":      trim_ratio,
-        "extreme_mode":    extreme_mode,
+        "case_mode":       case_mode,
+        "dummy_comm_bytes": dummy_comm_bytes if case_mode == "one_aicore" else None,
+        "serialize_dummy": serialize_dummy if case_mode == "one_aicore" else None,
+        "profile_root_only": profile_root_only if case_mode == "one_aicore" else None,
         "run_ok":          proc.returncode == 0,
         "func_id":         None,
         "func_name":       None,
@@ -509,7 +521,13 @@ def print_wait_status_stats(results: list[dict]) -> None:
     print(sep)
 
     for r in sdma_results:
-        prefix = "poll_counts_extreme" if r.get("extreme_mode") else "poll_counts"
+        case_mode = r.get("case_mode", "normal")
+        if case_mode == "extreme":
+            prefix = "poll_counts_extreme"
+        elif case_mode == "one_aicore":
+            prefix = "poll_counts_one_aicore"
+        else:
+            prefix = "poll_counts"
         fname = _OUTPUTS_DIR / f"{prefix}_sdma_gc{r['gather_count']}_r{r['n_ranks']}.json"
         if not fname.exists():
             print(f"  {r['size']:5s}  (no poll data)")
@@ -542,7 +560,8 @@ def print_wait_status_stats(results: list[dict]) -> None:
 def save_csv(results: list[dict], out_path: Path) -> None:
     fields = [
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
-        "n_iter", "warmup_samples", "measured_samples", "trim_ratio", "extreme_mode",
+        "n_iter", "warmup_samples", "measured_samples", "trim_ratio", "case_mode",
+        "dummy_comm_bytes", "serialize_dummy", "profile_root_only",
         "run_ok", "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
     ]
     with open(out_path, "w", newline="") as f:
@@ -581,9 +600,30 @@ Examples:
                         choices=list(SIZE_BYTES.keys()),
                         help="Total comm sizes to test (default: all)")
     parser.add_argument(
-        "--extreme-case",
-        action="store_true",
-        help="Run fake_kernel_comm_sched_extreme (single AICPU + same-AICore dual AIV stress case)",
+        "--case",
+        default="normal",
+        choices=["normal", "extreme", "one_aicore"],
+        help="Benchmark case variant (default: normal)",
+    )
+    parser.add_argument(
+        "--dummy-comm-bytes",
+        type=int,
+        default=512 * 1024,
+        help="Dummy comm target bytes for one_aicore case (default: 524288 = 512KB)",
+    )
+    parser.add_argument(
+        "--serialize-dummy",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore case (default: 0)",
+    )
+    parser.add_argument(
+        "--profile-root-only",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Set PROFILE_ROOT_ONLY for one_aicore case (default: 1)",
     )
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show subprocess output")
@@ -608,9 +648,18 @@ Examples:
     if args.trim_ratio < 0 or args.trim_ratio >= 0.5:
         parser.error("--trim-ratio must be in [0.0, 0.5)")
 
-    case_name = "fake_kernel_comm_sched_extreme" if args.extreme_case else "fake_kernel_comm_sched"
-    kernels_dir = _EXTREME_KERNELS_DIR if args.extreme_case else _NORMAL_KERNELS_DIR
-    golden_path = _EXTREME_GOLDEN_PATH if args.extreme_case else _NORMAL_GOLDEN_PATH
+    if args.case == "extreme":
+        case_name = "fake_kernel_comm_sched_extreme"
+        kernels_dir = _EXTREME_KERNELS_DIR
+        golden_path = _EXTREME_GOLDEN_PATH
+    elif args.case == "one_aicore":
+        case_name = "fake_kernel_comm_sched_one_aicore"
+        kernels_dir = _ONE_AICORE_KERNELS_DIR
+        golden_path = _ONE_AICORE_GOLDEN_PATH
+    else:
+        case_name = "fake_kernel_comm_sched"
+        kernels_dir = _NORMAL_KERNELS_DIR
+        golden_path = _NORMAL_GOLDEN_PATH
     print(f"Benchmark: {case_name} gather")
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
@@ -619,6 +668,11 @@ Examples:
         f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, "
         f"{N_ITER - N_WARMUP} measured, trim={args.trim_ratio * 100:.1f}% per tail"
     )
+    if args.case == "one_aicore":
+        print(
+            f"  one_aicore extras: dummy_comm_bytes={args.dummy_comm_bytes}, "
+            f"serialize_dummy={args.serialize_dummy}, profile_root_only={args.profile_root_only}"
+        )
     print()
 
     results = []
@@ -636,7 +690,10 @@ Examples:
                 trim_ratio=args.trim_ratio,
                 kernels_dir=kernels_dir,
                 golden_path=golden_path,
-                extreme_mode=args.extreme_case,
+                case_mode=args.case,
+                dummy_comm_bytes=args.dummy_comm_bytes,
+                serialize_dummy=args.serialize_dummy,
+                profile_root_only=args.profile_root_only,
                 diagnostic=args.diagnostic,
             )
             results.append(r)
