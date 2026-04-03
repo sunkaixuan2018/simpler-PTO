@@ -11,6 +11,7 @@ from pathlib import Path
 
 _KERNELS_ROOT = Path(__file__).parent
 _COMMON_AIV_ROOT = _KERNELS_ROOT.parents[1] / "fake_kernel_comm_sched" / "kernels" / "aiv"
+_EXTREME_AIV_ROOT = _KERNELS_ROOT / "aiv"
 
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "fake_kernel_comm_sched_extreme_orch.cpp"),
@@ -23,8 +24,9 @@ KERNELS = [
     {"func_id": 2, "name": "GatherAsync",        "source": str(_COMMON_AIV_ROOT / "gather_async_kernel.cpp"),  "core_type": "aiv"},
     {"func_id": 3, "name": "WindowMemCopyOut",   "source": str(_COMMON_AIV_ROOT / "window_memcopy_out.cpp"),   "core_type": "aiv"},
     {"func_id": 4, "name": "CommBarrier",        "source": str(_COMMON_AIV_ROOT / "comm_barrier_kernel.cpp"),  "core_type": "aiv"},
-    {"func_id": 5, "name": "DummyGatherSync",    "source": str(_COMMON_AIV_ROOT / "gather_sync_kernel.cpp"),   "core_type": "aiv"},
-    {"func_id": 6, "name": "DummyGatherAsync",   "source": str(_COMMON_AIV_ROOT / "gather_async_kernel.cpp"),  "core_type": "aiv"},
+    # Dummy communication load: non-collective remote reads to avoid gather re-entrancy issues.
+    {"func_id": 5, "name": "DummyCommSync",      "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
+    {"func_id": 6, "name": "DummyCommAsync",     "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
 ]
 
 RUNTIME_CONFIG = {
