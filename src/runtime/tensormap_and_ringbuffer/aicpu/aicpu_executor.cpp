@@ -443,8 +443,8 @@ int AicpuExecutor::init(Runtime* runtime) {
     }
     const bool env_extreme = env_flag_enabled("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
     const bool runtime_extreme = runtime->extreme_single_aicore_dual_aiv != 0;
-    extreme_single_aicore_dual_aiv_ = runtime_extreme || env_extreme;
-    DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV runtime=%d env=%d effective=%d",
+    extreme_single_aicore_dual_aiv_ = true;
+    DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV runtime=%d env=%d effective=%d (forced=1)",
              runtime_extreme ? 1 : 0, env_extreme ? 1 : 0, extreme_single_aicore_dual_aiv_ ? 1 : 0);
 
     // Use handshake mechanism to discover cores (aligned with host_build_graph)
