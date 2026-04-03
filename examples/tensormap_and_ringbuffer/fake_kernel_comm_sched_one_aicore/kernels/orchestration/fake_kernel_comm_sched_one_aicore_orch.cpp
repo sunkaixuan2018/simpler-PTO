@@ -28,7 +28,7 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
     (void)args;
     (void)arg_count;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 17,
+        .expected_arg_count = 16,
     };
 }
 
@@ -51,7 +51,6 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
     int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
     int dummy_comm_scale = (arg_count > 15) ? static_cast<int>(args[15]) : 10;
-    void* dev_dummy_src = (arg_count > 16) ? reinterpret_cast<void*>(args[16]) : dev_src;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
     if (dummy_comm_scale <= 0) dummy_comm_scale = 1;
 
@@ -66,16 +65,13 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t win_dst = win_src + static_cast<uint64_t>(gather_count) * sizeof(float);
 
     uint64_t src_shapes[1] = {static_cast<uint64_t>(gather_count)};
-    uint64_t dummy_src_shapes[1] = {static_cast<uint64_t>(gather_count) * static_cast<uint64_t>(dummy_comm_scale)};
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
-    uint64_t dummy_dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count) * static_cast<uint64_t>(dummy_comm_scale)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
     uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(n_iter) * static_cast<uint64_t>(n_ranks)};
     uint64_t debug_row_shapes[1] = {static_cast<uint64_t>(n_ranks)};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
-    Tensor dev_dummy_src_t = make_tensor_external(dev_dummy_src, dummy_src_shapes, 1, DataType::FLOAT32);
     Tensor dev_out_t = make_tensor_external(dev_out, dst_shapes, 1, DataType::FLOAT32);
     Tensor win_src_t = make_tensor_external(reinterpret_cast<void*>(win_src), src_shapes, 1, DataType::FLOAT32);
     Tensor win_dst_t = make_tensor_external(reinterpret_cast<void*>(win_dst), dst_shapes, 1, DataType::FLOAT32);
@@ -128,7 +124,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             Tensor gather_out = (rank_id == root && iter == n_iter - 1)
                 ? win_dst_t
                 : make_tensor(dst_shapes, 1, DataType::FLOAT32);
-            Tensor dummy_out = make_tensor(dummy_dst_shapes, 1, DataType::FLOAT32);
+            Tensor dummy_out = make_tensor(dst_shapes, 1, DataType::FLOAT32);
 
             void* iter_debug_ptr = (rank_id == root && dev_debug != nullptr)
                 ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
@@ -164,12 +160,12 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             Tensor dummy_debug_out = make_tensor(debug_row_shapes, 1, DataType::INT32);
             PTOParam params_dummy[] = {
                 make_output_param(dummy_out),
-                make_input_param(dev_dummy_src_t),
+                make_input_param(win_src_t),
                 make_input_param(dummy_dep),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
-                make_scalar_param(static_cast<uint64_t>(1)),
+                make_scalar_param(static_cast<uint64_t>(dummy_comm_scale)),
                 make_output_param(dummy_debug_out),
             };
             if (strategy == 1) {
