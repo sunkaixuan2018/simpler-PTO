@@ -7,11 +7,12 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
 
 #include "pto_orchestration_api.h"
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
-constexpr int N_ITER = 200;
+constexpr int DEFAULT_N_ITER = 200;
 
 #define FUNC_WIN_MEMCOPY_IN    0
 #define FUNC_GATHER_SYNC       1
@@ -48,12 +49,20 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t sdma_workspace_ptr = args[10];
     int strategy = (arg_count > 11) ? static_cast<int>(args[11]) : 0;
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
+    int n_iter = DEFAULT_N_ITER;
+    const char* n_iter_env = getenv("N_ITER");
+    if (n_iter_env != nullptr && n_iter_env[0] != '\0') {
+        long parsed = strtol(n_iter_env, nullptr, 10);
+        if (parsed > 0 && parsed < 100000) {
+            n_iter = static_cast<int>(parsed);
+        }
+    }
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
     LOG_INFO(
         rt,
-        "fake_kernel_comm_sched_extreme: strategy=%d gather_count=%d n_ranks=%d rank=%d",
-        strategy, gather_count, n_ranks, rank_id);
+        "fake_kernel_comm_sched_extreme: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d",
+        strategy, gather_count, n_ranks, rank_id, n_iter);
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -64,7 +73,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
     uint64_t barrier_shapes[1] = {static_cast<uint64_t>(n_ranks)};
     uint64_t sync_shapes[1] = {1};
-    uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(N_ITER) * static_cast<uint64_t>(n_ranks)};
+    uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(n_iter) * static_cast<uint64_t>(n_ranks)};
     uint64_t debug_row_shapes[1] = {static_cast<uint64_t>(n_ranks)};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
@@ -96,7 +105,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
         Tensor prev_barrier_sync = sync_t0;
 
-        for (int iter = 0; iter < N_ITER; ++iter) {
+        for (int iter = 0; iter < n_iter; ++iter) {
             Tensor sync_after_barrier = make_tensor(sync_shapes, 1, DataType::INT32);
 
             PTOParam params_wmin[] = {
@@ -118,7 +127,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
 
             if (rank_id == root) {
-                Tensor gather_out_main = (iter == N_ITER - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+                Tensor gather_out_main = (iter == n_iter - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
                 Tensor gather_out_dummy = make_tensor(dst_shapes, 1, DataType::FLOAT32);
 
                 void* iter_debug_ptr = (dev_debug != nullptr)
@@ -164,12 +173,16 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
                 }
 
-                PTOParam params_wmout[] = {
-                    make_output_param(dev_out_t),
-                    make_input_param(gather_out_main),
-                    make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
-                };
-                pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
+                // Only copy back the final iteration. Intermediate iterations keep
+                // workload focused on communication contention and reduce root-side task pressure.
+                if (iter == n_iter - 1) {
+                    PTOParam params_wmout[] = {
+                        make_output_param(dev_out_t),
+                        make_input_param(gather_out_main),
+                        make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
+                    };
+                    pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
+                }
             }
 
             prev_barrier_sync = sync_after_barrier;
