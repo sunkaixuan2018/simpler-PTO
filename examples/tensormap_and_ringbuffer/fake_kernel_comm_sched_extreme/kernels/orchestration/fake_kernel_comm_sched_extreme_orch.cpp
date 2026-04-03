@@ -125,97 +125,80 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             };
             pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
 
-            Tensor dep_after_main = sync_after_barrier;
-            Tensor dep_after_dummy = sync_after_barrier;
-            if (rank_id == root) {
-                Tensor gather_out_main = (iter == n_iter - 1) ? win_dst_t : make_tensor(dst_shapes, 1, DataType::FLOAT32);
-                Tensor gather_out_dummy = make_tensor(dst_shapes, 1, DataType::FLOAT32);
+            // Keep task graph symmetric across ranks: all ranks submit main/dummy tasks.
+            // Non-root kernels early-return internally, but this keeps dependency topology aligned.
+            Tensor gather_out_main = (rank_id == root && iter == n_iter - 1)
+                ? win_dst_t
+                : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+            Tensor gather_out_dummy = make_tensor(dst_shapes, 1, DataType::FLOAT32);
 
-                void* iter_debug_ptr = (dev_debug != nullptr)
-                    ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
-                          + static_cast<size_t>(iter) * static_cast<size_t>(n_ranks) * sizeof(int32_t))
-                    : nullptr;
-                Tensor debug_main = (iter_debug_ptr != nullptr)
-                    ? make_tensor_external(iter_debug_ptr, debug_row_shapes, 1, DataType::INT32)
-                    : make_tensor(debug_row_shapes, 1, DataType::INT32);
-                Tensor debug_dummy = make_tensor(debug_row_shapes, 1, DataType::INT32);
+            void* iter_debug_ptr = (rank_id == root && dev_debug != nullptr)
+                ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
+                      + static_cast<size_t>(iter) * static_cast<size_t>(n_ranks) * sizeof(int32_t))
+                : nullptr;
+            Tensor debug_main = (iter_debug_ptr != nullptr)
+                ? make_tensor_external(iter_debug_ptr, debug_row_shapes, 1, DataType::INT32)
+                : make_tensor(debug_row_shapes, 1, DataType::INT32);
+            Tensor debug_dummy = make_tensor(debug_row_shapes, 1, DataType::INT32);
 
-                PTOParam params_gather_main[] = {
-                    make_output_param(gather_out_main),
-                    make_input_param(win_src_t),
-                    make_input_param(sync_after_barrier),
-                    make_scalar_param(device_ctx_ptr),
-                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
-                    make_scalar_param(static_cast<uint64_t>(root)),
-                    make_scalar_param(sdma_workspace_ptr),
-                    make_output_param(debug_main),
-                };
-                PTOParam params_gather_dummy[] = {
-                    make_output_param(gather_out_dummy),
-                    make_input_param(win_src_t),
-                    make_input_param((serialize_dummy != 0) ? sync_after_main : sync_after_barrier),
-                    make_scalar_param(device_ctx_ptr),
-                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
-                    make_scalar_param(static_cast<uint64_t>(root)),
-                    make_scalar_param(sdma_workspace_ptr),
-                    make_output_param(debug_dummy),
-                };
+            PTOParam params_gather_main[] = {
+                make_output_param(gather_out_main),
+                make_input_param(win_src_t),
+                make_input_param(sync_after_barrier),
+                make_scalar_param(device_ctx_ptr),
+                make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                make_scalar_param(static_cast<uint64_t>(root)),
+                make_scalar_param(sdma_workspace_ptr),
+                make_output_param(debug_main),
+            };
+            PTOParam params_gather_dummy[] = {
+                make_output_param(gather_out_dummy),
+                make_input_param(win_src_t),
+                make_input_param((serialize_dummy != 0) ? sync_after_main : sync_after_barrier),
+                make_scalar_param(device_ctx_ptr),
+                make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                make_scalar_param(static_cast<uint64_t>(root)),
+                make_scalar_param(sdma_workspace_ptr),
+                make_output_param(debug_dummy),
+            };
 
-                if (strategy == 1) {
-                    pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
-                } else if (strategy == 2) {
-                    pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
-                } else {
-                    int32_t main_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
-                    pto2_rt_submit_variant_task(rt, main_variants, 2, PTO2_WORKER_VECTOR, params_gather_main, 8);
-                }
-                dep_after_main = gather_out_main;
+            if (strategy == 1) {
+                pto2_rt_submit_task(rt, FUNC_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
+            } else if (strategy == 2) {
+                pto2_rt_submit_task(rt, FUNC_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_main, 8);
+            } else {
+                int32_t main_variants[] = {FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC};
+                pto2_rt_submit_variant_task(rt, main_variants, 2, PTO2_WORKER_VECTOR, params_gather_main, 8);
+            }
 
-                if (serialize_dummy != 0) {
-                    // All-rank stage barrier after main gather to close comm phase before dummy gather.
-                    PTOParam params_barrier_after_main[] = {
-                        make_input_param(barrier_post_main_t),
-                        make_scalar_param(device_ctx_ptr),
-                        make_scalar_param(static_cast<uint64_t>(n_ranks)),
-                        make_scalar_param(static_cast<uint64_t>(root)),
-                        make_input_param(dep_after_main),
-                        make_output_param(sync_after_main),
-                    };
-                    pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_main, 6);
-                }
-
-                if (strategy == 1) {
-                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
-                } else if (strategy == 2) {
-                    pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
-                } else {
-                    int32_t dummy_variants[] = {FUNC_DUMMY_GATHER_SYNC, FUNC_DUMMY_GATHER_ASYNC};
-                    pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
-                }
-
-                // Only copy back the final iteration. Intermediate iterations keep
-                // workload focused on communication contention and reduce root-side task pressure.
-                if (iter == n_iter - 1) {
-                    PTOParam params_wmout[] = {
-                        make_output_param(dev_out_t),
-                        make_input_param(gather_out_main),
-                        make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
-                    };
-                    pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
-                }
-                dep_after_dummy = gather_out_dummy;
-            } else if (serialize_dummy != 0) {
-                // Non-root still participates in the stage barrier when serialization is enabled.
+            if (serialize_dummy != 0) {
                 PTOParam params_barrier_after_main[] = {
                     make_input_param(barrier_post_main_t),
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
-                    make_input_param(dep_after_main),
+                    make_input_param(gather_out_main),
                     make_output_param(sync_after_main),
                 };
                 pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_main, 6);
-                dep_after_dummy = sync_after_main;
+            }
+
+            if (strategy == 1) {
+                pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_SYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
+            } else if (strategy == 2) {
+                pto2_rt_submit_task(rt, FUNC_DUMMY_GATHER_ASYNC, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
+            } else {
+                int32_t dummy_variants[] = {FUNC_DUMMY_GATHER_SYNC, FUNC_DUMMY_GATHER_ASYNC};
+                pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_gather_dummy, 8);
+            }
+
+            if (rank_id == root && iter == n_iter - 1) {
+                PTOParam params_wmout[] = {
+                    make_output_param(dev_out_t),
+                    make_input_param(gather_out_main),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
+                };
+                pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
             }
 
             if (serialize_dummy != 0) {
@@ -224,13 +207,13 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                     make_scalar_param(device_ctx_ptr),
                     make_scalar_param(static_cast<uint64_t>(n_ranks)),
                     make_scalar_param(static_cast<uint64_t>(root)),
-                    make_input_param(dep_after_dummy),
+                    make_input_param(gather_out_dummy),
                     make_output_param(sync_after_dummy),
                 };
                 pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier_after_dummy, 6);
                 prev_barrier_sync = sync_after_dummy;
             } else {
-                prev_barrier_sync = dep_after_dummy;
+                prev_barrier_sync = gather_out_dummy;
             }
         }
     }
