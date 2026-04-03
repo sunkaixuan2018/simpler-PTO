@@ -159,7 +159,7 @@ struct AicpuExecutor {
     // ===== Methods =====
     int init(Runtime* runtime);
     int handshake_all_cores(Runtime* runtime);
-    void maybe_apply_extreme_aiv_mask();
+    void maybe_apply_extreme_core_mask();
     void assign_cores_to_threads(Runtime* runtime);
     int resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num);
     int shutdown_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num);
@@ -303,55 +303,60 @@ int AicpuExecutor::handshake_all_cores(Runtime* runtime) {
     return 0;
 }
 
-void AicpuExecutor::maybe_apply_extreme_aiv_mask() {
+void AicpuExecutor::maybe_apply_extreme_core_mask() {
     if (!extreme_single_aicore_dual_aiv_) {
         return;
     }
-    if (aiv_count_ <= 2) {
+    if (aic_count_ <= 0 || aiv_count_ <= 0) {
         DEV_ALWAYS(
-            "Extreme dual-AIV mode enabled but only %d AIV discovered; no filtering applied.",
-            aiv_count_);
+            "Extreme single-group mode enabled but discovered cores are insufficient: AIC=%d AIV=%d",
+            aic_count_, aiv_count_);
         return;
     }
 
-    int chosen_i0 = -1;
-    int chosen_i1 = -1;
-    int chosen_group = -1;
+    int selected_group = static_cast<int>(aic_cores_[0].physical_core_id / PLATFORM_SUB_CORES_PER_AICORE);
+    int selected_aic = 0;
+    int selected_aiv0 = -1;
+    int selected_aiv1 = -1;
 
-    // Group AIVs by AICore id derived from physical_core_id.
-    for (int i = 0; i < aiv_count_ && chosen_i0 < 0; ++i) {
+    // Prefer first AICore group: 1 AIC + 2 AIV in the same physical group.
+    for (int i = 0; i < aiv_count_; ++i) {
         int group_i = static_cast<int>(aiv_cores_[i].physical_core_id / PLATFORM_SUB_CORES_PER_AICORE);
-        for (int j = i + 1; j < aiv_count_; ++j) {
-            int group_j = static_cast<int>(aiv_cores_[j].physical_core_id / PLATFORM_SUB_CORES_PER_AICORE);
-            if (group_i == group_j) {
-                chosen_i0 = i;
-                chosen_i1 = j;
-                chosen_group = group_i;
-                break;
-            }
+        if (group_i != selected_group) {
+            continue;
+        }
+        if (selected_aiv0 < 0) {
+            selected_aiv0 = i;
+        } else if (selected_aiv1 < 0) {
+            selected_aiv1 = i;
+            break;
         }
     }
 
-    if (chosen_i0 < 0) {
-        // Fallback: keep first two AIVs to preserve progress and make behavior explicit in logs.
-        chosen_i0 = 0;
-        chosen_i1 = 1;
+    if (selected_aiv0 < 0 || selected_aiv1 < 0) {
+        // Fallback to first two AIVs, keep first AIC.
+        selected_aiv0 = 0;
+        selected_aiv1 = (aiv_count_ > 1) ? 1 : 0;
         DEV_ALWAYS(
-            "Extreme dual-AIV mode: no same-AICore AIV pair found. Fallback to first two AIV worker_ids=%d,%d",
-            aiv_cores_[chosen_i0].worker_id, aiv_cores_[chosen_i1].worker_id);
+            "Extreme single-group mode: cannot find 2 AIV in first AICore group=%d. Fallback AIV worker_ids=%d,%d",
+            selected_group, aiv_cores_[selected_aiv0].worker_id, aiv_cores_[selected_aiv1].worker_id);
     } else {
         DEV_ALWAYS(
-            "Extreme dual-AIV mode: selected same-AICore group=%d with AIV worker_ids=%d,%d (physical_core_id=%u,%u)",
-            chosen_group,
-            aiv_cores_[chosen_i0].worker_id, aiv_cores_[chosen_i1].worker_id,
-            aiv_cores_[chosen_i0].physical_core_id, aiv_cores_[chosen_i1].physical_core_id);
+            "Extreme single-group mode: selected group=%d AIC worker_id=%d and AIV worker_ids=%d,%d",
+            selected_group,
+            aic_cores_[selected_aic].worker_id,
+            aiv_cores_[selected_aiv0].worker_id, aiv_cores_[selected_aiv1].worker_id);
     }
 
-    CoreInfo selected0 = aiv_cores_[chosen_i0];
-    CoreInfo selected1 = aiv_cores_[chosen_i1];
-    aiv_cores_[0] = selected0;
-    aiv_cores_[1] = selected1;
+    aic_cores_[0] = aic_cores_[selected_aic];
+    aiv_cores_[0] = aiv_cores_[selected_aiv0];
+    aiv_cores_[1] = aiv_cores_[selected_aiv1];
+    aic_count_ = 1;
     aiv_count_ = 2;
+
+    DEV_ALWAYS(
+        "Extreme single-group mode active: scheduler-visible cores -> AIC=%d AIV=%d",
+        aic_count_, aiv_count_);
 }
 
 /**
@@ -446,7 +451,7 @@ int AicpuExecutor::init(Runtime* runtime) {
         init_failed_.store(true, std::memory_order_release);
         return -1;
     }
-    maybe_apply_extreme_aiv_mask();
+    maybe_apply_extreme_core_mask();
 
     // Dynamically assign cores to threads
     assign_cores_to_threads(runtime);
@@ -511,7 +516,21 @@ int AicpuExecutor::init(Runtime* runtime) {
  */
 int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* cur_thread_cores, int core_num) {
     (void)runtime;
-    if (core_num == 0) return 0;
+    if (core_num == 0 && !extreme_single_aicore_dual_aiv_) return 0;
+
+    if (extreme_single_aicore_dual_aiv_) {
+        DEV_INFO("Thread %d: Extreme single-group mode, broadcasting shutdown to all %d cores",
+                 thread_idx, cores_total_num_);
+        for (int core_id = 0; core_id < cores_total_num_; ++core_id) {
+            uint64_t reg_addr = core_id_to_reg_addr_[core_id];
+            if (reg_addr != 0) {
+                write_reg(reg_addr, RegId::DATA_MAIN_BASE, AICORE_EXIT_SIGNAL);
+                write_reg(reg_addr, RegId::FAST_PATH_ENABLE, REG_SPR_FAST_PATH_CLOSE);
+            }
+        }
+        DEV_INFO("Thread %d: Global shutdown broadcast complete", thread_idx);
+        return 0;
+    }
 
     DEV_INFO("Thread %d: Shutting down %d cores", thread_idx, core_num);
 

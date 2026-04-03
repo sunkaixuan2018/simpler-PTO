@@ -4,7 +4,8 @@ Baseline gather case constrained to a single AICore domain.
 
 Design:
 1) Reuse the proven fake_kernel_comm_sched kernels and orchestration.
-2) Force block_dim=1 so runtime exposes one AICore group (1 AIC + 2 AIV).
+2) Keep block_dim=24 for stable init path; runtime mask constrains scheduling
+   to one AICore group (1 AIC + 2 AIV).
 3) Enable same-AICore dual-AIV filtering in AICPU executor.
 """
 
