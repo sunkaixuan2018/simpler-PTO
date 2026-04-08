@@ -34,7 +34,8 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-static constexpr size_t DUMMY_CHUNK = 256;
+// Coarser 128KB chunking to reduce per-chunk TLOAD/TSTORE sync overhead.
+static constexpr size_t DUMMY_CHUNK = 256 * 128;
 static constexpr int DUMMY_REPEAT_DEFAULT = 4;
 static constexpr int DUMMY_REPEAT_MAX = 4096;
 
