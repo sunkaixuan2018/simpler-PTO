@@ -63,6 +63,7 @@ N_WARMUP = 100  # warm-up iterations to discard
 TRIM_RATIO_DEFAULT = 0.10  # trim this ratio from both tails before averaging
 PERF_FILE_WAIT_TIMEOUT_S = 30.0
 PERF_FILE_POLL_INTERVAL_S = 0.5
+RUN_CASE_MAX_ATTEMPTS = 2  # initial run + one retry on failure
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -361,6 +362,49 @@ def _trimmed_mean(values: list[float], trim_ratio: float) -> tuple[float, int]:
     return sum(core) / len(core), len(core)
 
 
+def _extract_failure_summary(stdout: str | None, stderr: str | None, max_lines: int = 4) -> str:
+    """
+    Build a compact failure summary from subprocess output.
+
+    Prioritize lines containing runtime/profiling error markers; fall back to
+    the last non-empty lines.
+    """
+    all_lines: list[str] = []
+    for text in (stderr, stdout):
+        if not text:
+            continue
+        all_lines.extend([ln.strip() for ln in text.splitlines() if ln.strip()])
+
+    if not all_lines:
+        return ""
+
+    keywords = (
+        "[ERROR]",
+        "RuntimeError",
+        "Traceback",
+        "FAILED",
+        "timeout",
+        "Timeout",
+        "Exception",
+        "failed:",
+        "hccl_helper_barrier",
+        "rtStreamSynchronize",
+    )
+    selected: list[str] = []
+    for ln in all_lines:
+        if any(k in ln for k in keywords):
+            selected.append(ln)
+
+    if not selected:
+        selected = all_lines
+
+    tail = selected[-max_lines:]
+    compact = []
+    for ln in tail:
+        compact.append(ln if len(ln) <= 180 else (ln[:177] + "..."))
+    return " | ".join(compact)
+
+
 def _parse_gather_stats(perf_file: Path, trim_ratio: float) -> dict | None:
     """
     Parse gather task stats from the raw perf JSON.
@@ -470,9 +514,6 @@ def run_case(
         "--silent",
     ]
 
-    before_mtime = time.time()
-    proc = subprocess.run(cmd, env=env, capture_output=not verbose, text=True)
-
     result = {
         "strategy":        strategy,
         "size":            size_label,
@@ -487,7 +528,9 @@ def run_case(
         "dummy_comm_bytes": dummy_comm_bytes if case_mode == "one_aicore" else None,
         "serialize_dummy": serialize_dummy if case_mode == "one_aicore" else None,
         "profile_root_only": profile_root_only if case_mode == "one_aicore" else None,
-        "run_ok":          proc.returncode == 0,
+        "run_ok":          False,
+        "attempts":        0,
+        "last_error":      None,
         "func_id":         None,
         "func_name":       None,
         "total_count":     None,
@@ -499,24 +542,70 @@ def run_case(
         "covered_ok":      None,
     }
 
-    if not result["run_ok"]:
-        print(f"  FAILED (exit {proc.returncode})")
-        if verbose and proc.stderr:
-            print(proc.stderr[-800:])
-        return result, []
-
-    # Find profiling file
     perf_file = None
+    last_proc: subprocess.CompletedProcess[str] | None = None
     poll_times = int(PERF_FILE_WAIT_TIMEOUT_S / PERF_FILE_POLL_INTERVAL_S)
-    for _ in range(poll_times):  # wait up to PERF_FILE_WAIT_TIMEOUT_S for profiling write
-        perf_file = _find_newest_perf_file(root_device, before_mtime)
-        if perf_file:
-            break
-        time.sleep(PERF_FILE_POLL_INTERVAL_S)
 
-    if not perf_file:
+    for attempt in range(1, RUN_CASE_MAX_ATTEMPTS + 1):
+        result["attempts"] = attempt
+        before_mtime = time.time()
+        proc = subprocess.run(cmd, env=env, capture_output=not verbose, text=True)
+        last_proc = proc
+        failure_summary = _extract_failure_summary(proc.stdout, proc.stderr)
+
+        if proc.returncode != 0:
+            result["last_error"] = f"exit={proc.returncode}; {failure_summary}" if failure_summary else f"exit={proc.returncode}"
+            if attempt < RUN_CASE_MAX_ATTEMPTS:
+                print(f"  WARN: attempt {attempt}/{RUN_CASE_MAX_ATTEMPTS} failed (exit {proc.returncode}); retrying once")
+                if failure_summary:
+                    print(f"  WARN: summary: {failure_summary}")
+                continue
+
+            print(f"  FAILED (exit {proc.returncode})")
+            if failure_summary:
+                print(f"  ERROR summary: {failure_summary}")
+            if verbose and proc.stderr:
+                print(proc.stderr[-800:])
+            return result, []
+
+        # Find profiling file for this attempt
+        perf_file = None
+        for _ in range(poll_times):  # wait up to PERF_FILE_WAIT_TIMEOUT_S for profiling write
+            perf_file = _find_newest_perf_file(root_device, before_mtime)
+            if perf_file:
+                break
+            time.sleep(PERF_FILE_POLL_INTERVAL_S)
+
+        if perf_file:
+            result["run_ok"] = True
+            break
+
+        result["last_error"] = (
+            f"no perf file after {PERF_FILE_WAIT_TIMEOUT_S:.0f}s; {failure_summary}"
+            if failure_summary
+            else f"no perf file after {PERF_FILE_WAIT_TIMEOUT_S:.0f}s"
+        )
+        if attempt < RUN_CASE_MAX_ATTEMPTS:
+            print(
+                f"  WARN: attempt {attempt}/{RUN_CASE_MAX_ATTEMPTS} produced no perf file "
+                f"within {PERF_FILE_WAIT_TIMEOUT_S:.0f}s; retrying once"
+            )
+            if failure_summary:
+                print(f"  WARN: summary: {failure_summary}")
+            continue
+
         print("  WARN: no perf file found")
+        if failure_summary:
+            print(f"  ERROR summary: {failure_summary}")
         return result, []
+
+    if not result["run_ok"] or not perf_file:
+        # Defensive guard for unexpected control flow.
+        if last_proc is not None and result["last_error"] is None:
+            summary = _extract_failure_summary(last_proc.stdout, last_proc.stderr)
+            result["last_error"] = summary if summary else "run failed for unknown reason"
+        return result, []
+
     result["perf_file"] = str(perf_file)
 
     covered_path, covered_ok = _convert_perf_to_covered_trace(
@@ -689,7 +778,8 @@ def save_csv(results: list[dict], out_path: Path) -> None:
         "strategy", "size", "total_bytes", "gather_count", "n_ranks",
         "n_iter", "warmup_samples", "measured_samples", "trim_ratio", "case_mode",
         "dummy_comm_bytes", "serialize_dummy", "profile_root_only",
-        "run_ok", "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
+        "run_ok", "attempts", "last_error",
+        "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
         "perf_file", "covered_ok", "covered_file",
     ]
     with open(out_path, "w", newline="") as f:
