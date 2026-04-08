@@ -61,6 +61,8 @@ FUNC_ID_COMM_BARRIER = 4  # CommBarrier
 N_ITER   = 200  # total gather iterations per invocation (must match C++ N_ITER)
 N_WARMUP = 100  # warm-up iterations to discard
 TRIM_RATIO_DEFAULT = 0.10  # trim this ratio from both tails before averaging
+PERF_FILE_WAIT_TIMEOUT_S = 30.0
+PERF_FILE_POLL_INTERVAL_S = 0.5
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -237,6 +239,29 @@ def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def _cleanup_output_files(verbose: bool) -> None:
+    """
+    Equivalent behavior to: rm -f output/*
+    - Only removes direct child files under ./output
+    - Ignores missing directory and non-file entries
+    """
+    output_dir = _PROJECT_ROOT / "output"
+    if not output_dir.exists() or not output_dir.is_dir():
+        return
+
+    removed = 0
+    for p in output_dir.iterdir():
+        if p.is_file() or p.is_symlink():
+            try:
+                p.unlink()
+                removed += 1
+            except OSError as e:
+                if verbose:
+                    print(f"  WARN: failed to remove {p}: {e}")
+    if verbose:
+        print(f"Pre-clean: removed {removed} file(s) from {output_dir}")
 
 
 def _extract_perf_timestamp_digits(perf_file: Path) -> str:
@@ -474,11 +499,12 @@ def run_case(
 
     # Find profiling file
     perf_file = None
-    for _ in range(10):          # wait up to ~5s for async profiling write
+    poll_times = int(PERF_FILE_WAIT_TIMEOUT_S / PERF_FILE_POLL_INTERVAL_S)
+    for _ in range(poll_times):  # wait up to PERF_FILE_WAIT_TIMEOUT_S for profiling write
         perf_file = _find_newest_perf_file(root_device, before_mtime)
         if perf_file:
             break
-        time.sleep(0.5)
+        time.sleep(PERF_FILE_POLL_INTERVAL_S)
 
     if not perf_file:
         print("  WARN: no perf file found")
@@ -738,6 +764,8 @@ Examples:
                         help="Output directory for CSV (default: outputs/)")
 
     args = parser.parse_args()
+
+    _cleanup_output_files(args.verbose)
 
     if args.trim_ratio < 0 or args.trim_ratio >= 0.5:
         parser.error("--trim-ratio must be in [0.0, 0.5)")
