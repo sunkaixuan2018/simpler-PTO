@@ -47,6 +47,16 @@ HalHostUnregisterFn get_halHostUnregister() {
     }
     return reinterpret_cast<HalHostUnregisterFn>(dlsym(g_hal_handle, "halHostUnregister"));
 }
+
+bool has_any_profile_records(const PerformanceCollector& collector) {
+    const auto& records = collector.get_records();
+    for (const auto& core_records : records) {
+        if (!core_records.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
 }  // namespace
 
 // =============================================================================
@@ -411,7 +421,7 @@ int DeviceRunner::run(Runtime& runtime,
         return rc;
     }
 
-    // Poll and collect performance data (must be before stream sync)
+    // Poll and collect performance data (primary pass before stream sync)
     if (runtime.enable_profiling) {
         poll_and_collect_performance_data(runtime.get_task_count());
     }
@@ -431,6 +441,13 @@ int DeviceRunner::run(Runtime& runtime,
         LOG_ERROR("rtStreamSynchronize (AICore) failed: %d", rc);
         kernel_args_.finalize_runtime_args();
         return rc;
+    }
+
+    // If pre-sync collection timed out before AICPU flush, retry once after sync.
+    // This captures records when workloads run longer than the polling timeout.
+    if (runtime.enable_profiling && !has_any_profile_records(perf_collector_)) {
+        LOG_WARN("No profiling records before stream sync; retrying collection after sync");
+        poll_and_collect_performance_data(0);  // auto-detect total_tasks
     }
 
     // Print collected performance data (after stream sync)

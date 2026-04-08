@@ -21,6 +21,16 @@ typedef int (*aicpu_execute_func_t)(Runtime* runtime);
 typedef void (*aicore_execute_func_t)(Runtime* runtime, int block_idx, CoreType core_type, uint32_t physical_core_id, uint64_t regs);
 typedef void (*set_platform_regs_func_t)(uint64_t regs);
 
+static bool has_any_profile_records(const PerformanceCollector& collector) {
+    const auto& records = collector.get_records();
+    for (const auto& core_records : records) {
+        if (!core_records.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // =============================================================================
 // DeviceRunner Implementation
 // =============================================================================
@@ -302,6 +312,12 @@ int DeviceRunner::run(Runtime& runtime,
     }
 
     LOG_INFO("All threads completed");
+
+    // Retry one post-completion collection pass when first pass got no records.
+    if (runtime.enable_profiling && !has_any_profile_records(perf_collector_)) {
+        LOG_WARN("No profiling records before thread completion; retrying collection after join");
+        poll_and_collect_performance_data(0);  // auto-detect total_tasks
+    }
 
     // Print performance data after execution completes
     if (runtime.enable_profiling) {
