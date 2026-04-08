@@ -69,6 +69,11 @@ constexpr int AICPU_READY_MASK = AICPU_MAX_READY_TASKS - 1;
 // One shard per scheduler thread: push to own shard (thread_idx % shards), pop own first + work stealing
 // Runtime-configurable via env var PTO2_READY_QUEUE_SHARDS (1..MAX_AICPU_THREADS). Default=3.
 
+constexpr int32_t FUNC_ID_GATHER_SYNC = 1;
+constexpr int32_t FUNC_ID_GATHER_ASYNC = 2;
+constexpr int32_t FUNC_ID_DUMMY_COMM_SYNC = 5;
+constexpr int32_t FUNC_ID_DUMMY_COMM_ASYNC = 6;
+
 // Lightweight spinlock (avoids futex syscall overhead of std::mutex)
 struct SpinLock {
     std::atomic<int> flag{0};
@@ -83,6 +88,40 @@ struct CoreInfo {
     uint64_t reg_addr;          // Cached register address for fast access
     CoreType core_type;
 };
+
+enum class OneAicoreVectorQueue : uint8_t {
+    Generic = 0,
+    Gather = 1,
+    Dummy = 2,
+};
+
+static bool task_has_kernel_id(const PTO2TaskDescriptor* task, int32_t kernel_id) {
+    if (task == nullptr) {
+        return false;
+    }
+    if (task->kernel_id == kernel_id) {
+        return true;
+    }
+    for (int i = 0; i < task->num_variants; ++i) {
+        if (task->variant_kernel_ids[i] == kernel_id) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static OneAicoreVectorQueue classify_one_aicore_vector_task(const PTO2TaskDescriptor* task) {
+    if (task == nullptr) {
+        return OneAicoreVectorQueue::Generic;
+    }
+    if (task_has_kernel_id(task, FUNC_ID_GATHER_SYNC) || task_has_kernel_id(task, FUNC_ID_GATHER_ASYNC)) {
+        return OneAicoreVectorQueue::Gather;
+    }
+    if (task_has_kernel_id(task, FUNC_ID_DUMMY_COMM_SYNC) || task_has_kernel_id(task, FUNC_ID_DUMMY_COMM_ASYNC)) {
+        return OneAicoreVectorQueue::Dummy;
+    }
+    return OneAicoreVectorQueue::Generic;
+}
 
 struct AicpuExecutor {
     // ===== Thread management state =====
@@ -100,6 +139,7 @@ struct AicpuExecutor {
     int orchestrator_thread_idx_{-1};  // -1 means no dedicated orchestrator thread
     bool composite_orchestrator_scheduler_{false};  // Single-thread mode: one thread does orch + scheduling
     bool extreme_single_aicore_dual_aiv_{false};  // Restrict AIV pool to two lanes on the same AICore
+    bool split_one_aicore_vector_queues_{false};  // Route gather/dummy to dedicated AIV lanes
 
     // Core discovery arrays (with register addresses)
     CoreInfo aic_cores_[MAX_CORES_PER_THREAD];
@@ -109,6 +149,8 @@ struct AicpuExecutor {
 
     // Fast lookup: core_id -> reg_addr (for register-based dispatch)
     uint64_t core_id_to_reg_addr_[MAX_CORES_PER_THREAD];
+    int gather_aiv_core_id_{-1};
+    int dummy_aiv_core_id_{-1};
 
     // Platform register base address array (set via get_platform_regs())
     uint64_t regs_{0};
@@ -128,6 +170,16 @@ struct AicpuExecutor {
     int ready_queue_aiv_[MAX_AICPU_THREADS][AICPU_MAX_READY_TASKS];
     int ready_queue_aiv_head_[MAX_AICPU_THREADS]{0};
     int ready_queue_aiv_tail_[MAX_AICPU_THREADS]{0};
+
+    SpinLock ready_queue_aiv_gather_lock_[MAX_AICPU_THREADS];
+    int ready_queue_aiv_gather_[MAX_AICPU_THREADS][AICPU_MAX_READY_TASKS];
+    int ready_queue_aiv_gather_head_[MAX_AICPU_THREADS]{0};
+    int ready_queue_aiv_gather_tail_[MAX_AICPU_THREADS]{0};
+
+    SpinLock ready_queue_aiv_dummy_lock_[MAX_AICPU_THREADS];
+    int ready_queue_aiv_dummy_[MAX_AICPU_THREADS][AICPU_MAX_READY_TASKS];
+    int ready_queue_aiv_dummy_head_[MAX_AICPU_THREADS]{0};
+    int ready_queue_aiv_dummy_tail_[MAX_AICPU_THREADS]{0};
 
     // Task execution tracking
     std::atomic<int> completed_tasks_{0};
@@ -173,6 +225,7 @@ private:
     inline void enqueue_ready_task_with_profiling(
         int32_t task_id,
         int32_t worker_type,
+        const PTO2TaskDescriptor* task_desc,
         int thread_idx
 #if PTO2_ORCH_PROFILING
         , uint64_t& wait_counter,
@@ -206,6 +259,7 @@ static bool env_flag_enabled(const char* env_name) {
 inline void AicpuExecutor::enqueue_ready_task_with_profiling(
     int32_t task_id,
     int32_t worker_type,
+    const PTO2TaskDescriptor* task_desc,
     int thread_idx
 #if PTO2_ORCH_PROFILING
     , uint64_t& wait_counter,
@@ -225,12 +279,36 @@ inline void AicpuExecutor::enqueue_ready_task_with_profiling(
         ready_queue_aic_[my_shard][ready_queue_aic_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
         ready_queue_aic_lock_[my_shard].unlock();
     } else {
-        ready_queue_aiv_lock_[my_shard].lock();
+        const bool split_vector_queues =
+            split_one_aicore_vector_queues_ &&
+            gather_aiv_core_id_ >= 0 &&
+            dummy_aiv_core_id_ >= 0;
+        OneAicoreVectorQueue target_queue = split_vector_queues
+            ? classify_one_aicore_vector_task(task_desc)
+            : OneAicoreVectorQueue::Generic;
+
+        if (target_queue == OneAicoreVectorQueue::Gather) {
+            ready_queue_aiv_gather_lock_[my_shard].lock();
 #if PTO2_ORCH_PROFILING
-        _l1 = get_sys_cnt_aicpu();
+            _l1 = get_sys_cnt_aicpu();
 #endif
-        ready_queue_aiv_[my_shard][ready_queue_aiv_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
-        ready_queue_aiv_lock_[my_shard].unlock();
+            ready_queue_aiv_gather_[my_shard][ready_queue_aiv_gather_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
+            ready_queue_aiv_gather_lock_[my_shard].unlock();
+        } else if (target_queue == OneAicoreVectorQueue::Dummy) {
+            ready_queue_aiv_dummy_lock_[my_shard].lock();
+#if PTO2_ORCH_PROFILING
+            _l1 = get_sys_cnt_aicpu();
+#endif
+            ready_queue_aiv_dummy_[my_shard][ready_queue_aiv_dummy_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
+            ready_queue_aiv_dummy_lock_[my_shard].unlock();
+        } else {
+            ready_queue_aiv_lock_[my_shard].lock();
+#if PTO2_ORCH_PROFILING
+            _l1 = get_sys_cnt_aicpu();
+#endif
+            ready_queue_aiv_[my_shard][ready_queue_aiv_tail_[my_shard]++ & AICPU_READY_MASK] = task_id;
+            ready_queue_aiv_lock_[my_shard].unlock();
+        }
     }
 
 #if PTO2_ORCH_PROFILING
@@ -353,10 +431,12 @@ void AicpuExecutor::maybe_apply_extreme_core_mask() {
     aiv_cores_[1] = aiv_cores_[selected_aiv1];
     aic_count_ = 1;
     aiv_count_ = 2;
+    gather_aiv_core_id_ = aiv_cores_[0].worker_id;
+    dummy_aiv_core_id_ = aiv_cores_[1].worker_id;
 
     DEV_ALWAYS(
-        "Extreme single-group mode active: scheduler-visible cores -> AIC=%d AIV=%d",
-        aic_count_, aiv_count_);
+        "Extreme single-group mode active: scheduler-visible cores -> AIC=%d AIV=%d (gather_core=%d dummy_core=%d)",
+        aic_count_, aiv_count_, gather_aiv_core_id_, dummy_aiv_core_id_);
 }
 
 /**
@@ -443,9 +523,12 @@ int AicpuExecutor::init(Runtime* runtime) {
     }
     const bool env_extreme = env_flag_enabled("PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV");
     const bool runtime_extreme = runtime->extreme_single_aicore_dual_aiv != 0;
+    split_one_aicore_vector_queues_ = env_flag_enabled("PTO2_ONE_AICORE_SPLIT_VECTOR_QUEUES");
     extreme_single_aicore_dual_aiv_ = true;
     DEV_INFO("Init: PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV runtime=%d env=%d effective=%d (forced=1)",
              runtime_extreme ? 1 : 0, env_extreme ? 1 : 0, extreme_single_aicore_dual_aiv_ ? 1 : 0);
+    DEV_INFO("Init: PTO2_ONE_AICORE_SPLIT_VECTOR_QUEUES effective=%d",
+             split_one_aicore_vector_queues_ ? 1 : 0);
 
     // Use handshake mechanism to discover cores (aligned with host_build_graph)
     int rc = handshake_all_cores(runtime);
@@ -497,6 +580,10 @@ int AicpuExecutor::init(Runtime* runtime) {
         ready_queue_aic_tail_[s] = 0;
         ready_queue_aiv_head_[s] = 0;
         ready_queue_aiv_tail_[s] = 0;
+        ready_queue_aiv_gather_head_[s] = 0;
+        ready_queue_aiv_gather_tail_[s] = 0;
+        ready_queue_aiv_dummy_head_[s] = 0;
+        ready_queue_aiv_dummy_tail_[s] = 0;
     }
 
     // Reset per-core dispatch timestamps and task counters
@@ -850,7 +937,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                     if (prev + 1 == fanin_count) {
                         __atomic_store_n(&s_pto2_task_completed[consumer_slot], 1, __ATOMIC_RELEASE);
                         enqueue_ready_task_with_profiling(
-                            consumer_id, consumer_desc->worker_type, thread_idx
+                            consumer_id, consumer_desc->worker_type, consumer_desc, thread_idx
 #if PTO2_ORCH_PROFILING
                             , sched_complete_ready_wait, sched_complete_ready_hold
 #endif
@@ -951,63 +1038,78 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                     bool is_stolen = false;
 #endif
                     int my_shard = thread_idx % active_shards_;
+                    auto try_dequeue_ready_queue =
+                        [&](SpinLock* locks,
+                            int queues[][AICPU_MAX_READY_TASKS],
+                            int* heads,
+                            int* tails) -> int32_t {
+                            int32_t candidate = AICPU_TASK_INVALID;
+                            for (int k = 0; k < active_shards_ && candidate < 0; k++) {
+                                int shard = (my_shard + k) % active_shards_;
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l0 = get_sys_cnt_aicpu();
+#endif
+                                locks[shard].lock();
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l1 = get_sys_cnt_aicpu();
+#endif
+                                if (heads[shard] < tails[shard]) {
+                                    candidate = queues[shard][heads[shard]++ & AICPU_READY_MASK];
+                                    locks[shard].unlock();
+#if PTO2_ORCH_PROFILING
+                                    uint64_t _l2 = get_sys_cnt_aicpu();
+                                    sched_dispatch_hit_wait += (_l1 - _l0);
+                                    sched_dispatch_hit_hold += (_l2 - _l1);
+                                    found_task = true;
+                                    is_stolen = (k != 0);
+#endif
+                                    break;
+                                }
+                                locks[shard].unlock();
+#if PTO2_ORCH_PROFILING
+                                uint64_t _l2 = get_sys_cnt_aicpu();
+                                sched_dispatch_miss_wait += (_l1 - _l0);
+                                sched_dispatch_miss_hold += (_l2 - _l1);
+#endif
+                            }
+                            return candidate;
+                        };
                     if (h->core_type == CoreType::AIC) {
-                        for (int k = 0; k < active_shards_ && task_id < 0; k++) {
-                            int shard = (my_shard + k) % active_shards_;
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l0 = get_sys_cnt_aicpu();
-#endif
-                            ready_queue_aic_lock_[shard].lock();
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l1 = get_sys_cnt_aicpu();
-#endif
-                            if (ready_queue_aic_head_[shard] < ready_queue_aic_tail_[shard]) {
-                                task_id = ready_queue_aic_[shard][ready_queue_aic_head_[shard]++ & AICPU_READY_MASK];
-                                ready_queue_aic_lock_[shard].unlock();
-#if PTO2_ORCH_PROFILING
-                                uint64_t _l2 = get_sys_cnt_aicpu();
-                                sched_dispatch_hit_wait += (_l1 - _l0);
-                                sched_dispatch_hit_hold += (_l2 - _l1);
-                                found_task = true;
-                                is_stolen = (k != 0);
-#endif
-                                break;
-                            }
-                            ready_queue_aic_lock_[shard].unlock();
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l2 = get_sys_cnt_aicpu();
-                            sched_dispatch_miss_wait += (_l1 - _l0);
-                            sched_dispatch_miss_hold += (_l2 - _l1);
-#endif
-                        }
+                        task_id = try_dequeue_ready_queue(
+                            ready_queue_aic_lock_,
+                            ready_queue_aic_,
+                            ready_queue_aic_head_,
+                            ready_queue_aic_tail_);
                     } else {
-                        for (int k = 0; k < active_shards_ && task_id < 0; k++) {
-                            int shard = (my_shard + k) % active_shards_;
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l0 = get_sys_cnt_aicpu();
-#endif
-                            ready_queue_aiv_lock_[shard].lock();
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l1 = get_sys_cnt_aicpu();
-#endif
-                            if (ready_queue_aiv_head_[shard] < ready_queue_aiv_tail_[shard]) {
-                                task_id = ready_queue_aiv_[shard][ready_queue_aiv_head_[shard]++ & AICPU_READY_MASK];
-                                ready_queue_aiv_lock_[shard].unlock();
-#if PTO2_ORCH_PROFILING
-                                uint64_t _l2 = get_sys_cnt_aicpu();
-                                sched_dispatch_hit_wait += (_l1 - _l0);
-                                sched_dispatch_hit_hold += (_l2 - _l1);
-                                found_task = true;
-                                is_stolen = (k != 0);
-#endif
-                                break;
+                        const bool split_vector_queues =
+                            split_one_aicore_vector_queues_ &&
+                            gather_aiv_core_id_ >= 0 &&
+                            dummy_aiv_core_id_ >= 0;
+                        if (split_vector_queues && core_id == dummy_aiv_core_id_) {
+                            task_id = try_dequeue_ready_queue(
+                                ready_queue_aiv_dummy_lock_,
+                                ready_queue_aiv_dummy_,
+                                ready_queue_aiv_dummy_head_,
+                                ready_queue_aiv_dummy_tail_);
+                        } else if (split_vector_queues && core_id == gather_aiv_core_id_) {
+                            task_id = try_dequeue_ready_queue(
+                                ready_queue_aiv_gather_lock_,
+                                ready_queue_aiv_gather_,
+                                ready_queue_aiv_gather_head_,
+                                ready_queue_aiv_gather_tail_);
+                            if (task_id < 0) {
+                                task_id = try_dequeue_ready_queue(
+                                    ready_queue_aiv_lock_,
+                                    ready_queue_aiv_,
+                                    ready_queue_aiv_head_,
+                                    ready_queue_aiv_tail_);
                             }
-                            ready_queue_aiv_lock_[shard].unlock();
-#if PTO2_ORCH_PROFILING
-                            uint64_t _l2 = get_sys_cnt_aicpu();
-                            sched_dispatch_miss_wait += (_l1 - _l0);
-                            sched_dispatch_miss_hold += (_l2 - _l1);
-#endif
+                        } else {
+                            task_id = try_dequeue_ready_queue(
+                                ready_queue_aiv_lock_,
+                                ready_queue_aiv_,
+                                ready_queue_aiv_head_,
+                                ready_queue_aiv_tail_);
                         }
                     }
 #if PTO2_ORCH_PROFILING
@@ -1069,7 +1171,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
                     // Mark as enqueued (state=1) to prevent double-enqueue
                     __atomic_store_n(&s_pto2_task_completed[slot], 1, __ATOMIC_RELEASE);
                     enqueue_ready_task_with_profiling(
-                        idx, t->worker_type, thread_idx
+                        idx, t->worker_type, t, thread_idx
 #if PTO2_ORCH_PROFILING
                         , sched_scan_ready_wait, sched_scan_ready_hold
 #endif
@@ -1102,7 +1204,7 @@ int AicpuExecutor::resolve_and_dispatch_pto2(Runtime* runtime, int thread_idx,
 
                 PTO2TaskDescriptor* t = &task_descriptors[slot];
                 enqueue_ready_task_with_profiling(
-                    task_id, t->worker_type, thread_idx
+                    task_id, t->worker_type, t, thread_idx
 #if PTO2_ORCH_PROFILING
                     , sched_early_ready_wait, sched_early_ready_hold
 #endif
@@ -1567,6 +1669,10 @@ void AicpuExecutor::deinit() {
         ready_queue_aic_tail_[s] = 0;
         ready_queue_aiv_head_[s] = 0;
         ready_queue_aiv_tail_[s] = 0;
+        ready_queue_aiv_gather_head_[s] = 0;
+        ready_queue_aiv_gather_tail_[s] = 0;
+        ready_queue_aiv_dummy_head_[s] = 0;
+        ready_queue_aiv_dummy_tail_[s] = 0;
     }
 
     // Reset per-core dispatch timestamps and task counters
@@ -1596,6 +1702,9 @@ void AicpuExecutor::deinit() {
     orchestrator_thread_idx_ = -1;
     composite_orchestrator_scheduler_ = false;
     extreme_single_aicore_dual_aiv_ = false;
+    split_one_aicore_vector_queues_ = false;
+    gather_aiv_core_id_ = -1;
+    dummy_aiv_core_id_ = -1;
 
     // Reset register-related state
     for (int i = 0; i < MAX_CORES_PER_THREAD; i++) {
@@ -1630,6 +1739,8 @@ void AicpuExecutor::diagnose_stuck_state(Runtime* runtime, int thread_idx,
     for (int s = 0; s < active_shards_; s++) {
         aic_ready += ready_queue_aic_tail_[s] - ready_queue_aic_head_[s];
         aiv_ready += ready_queue_aiv_tail_[s] - ready_queue_aiv_head_[s];
+        aiv_ready += ready_queue_aiv_gather_tail_[s] - ready_queue_aiv_gather_head_[s];
+        aiv_ready += ready_queue_aiv_dummy_tail_[s] - ready_queue_aiv_dummy_head_[s];
     }
     DEV_ALWAYS("Ready Queues (%d shards, per-thread push + work-steal pop): AIC=%d, AIV=%d", active_shards_, aic_ready, aiv_ready);
 

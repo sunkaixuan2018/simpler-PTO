@@ -98,25 +98,27 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
         };
         pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier0, 6);
 
-        Tensor prev_barrier_sync = sync_t0;
+        PTOParam params_wmin_once[] = {
+            make_output_param(win_src_t),
+            make_input_param(dev_src_t),
+            make_scalar_param(static_cast<uint64_t>(gather_count)),
+            make_input_param(sync_t0),
+        };
+        pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin_once, 4);
+
+        // The communication source window is stable across iterations.
+        // Reuse it for the whole benchmark instead of rewriting it every round.
+        Tensor prev_iter_sync = win_src_t;
 
         for (int iter = 0; iter < n_iter; ++iter) {
             Tensor sync_after_barrier = make_tensor(sync_shapes, 1, DataType::INT32);
-
-            PTOParam params_wmin[] = {
-                make_output_param(win_src_t),
-                make_input_param(dev_src_t),
-                make_scalar_param(static_cast<uint64_t>(gather_count)),
-                make_input_param(prev_barrier_sync),
-            };
-            pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin, 4);
 
             PTOParam params_barrier[] = {
                 make_input_param(barrier_t),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
-                make_input_param(win_src_t),
+                make_input_param(prev_iter_sync),
                 make_output_param(sync_after_barrier),
             };
             pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
@@ -177,17 +179,18 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_dummy, 8);
             }
 
-            Tensor wmout_dst = (rank_id == root && iter == n_iter - 1)
-                ? dev_out_t
-                : make_tensor(dst_shapes, 1, DataType::FLOAT32);
+            // Keep the next iteration behind dummy completion so the gather/dummy
+            // pair from this round is drained before the next barrier starts.
+            prev_iter_sync = dummy_out;
+        }
+
+        if (rank_id == root) {
             PTOParam params_wmout[] = {
-                make_output_param(wmout_dst),
-                make_input_param(gather_out),
+                make_output_param(dev_out_t),
+                make_input_param(win_dst_t),
                 make_scalar_param(static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)),
             };
             pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_OUT, PTO2_WORKER_VECTOR, params_wmout, 3);
-
-            prev_barrier_sync = sync_after_barrier;
         }
     }
 

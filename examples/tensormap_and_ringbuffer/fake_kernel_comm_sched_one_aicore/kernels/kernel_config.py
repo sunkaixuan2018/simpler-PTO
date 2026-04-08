@@ -47,4 +47,5 @@ RUNTIME_CONFIG = {
 # Reuse existing executor-side same-AICore dual-AIV selection logic.
 RUNTIME_ENV = {
     "PTO2_EXTREME_SINGLE_AICORE_DUAL_AIV": "1",
+    "PTO2_ONE_AICORE_SPLIT_VECTOR_QUEUES": "1",
 }
