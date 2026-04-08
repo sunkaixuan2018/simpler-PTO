@@ -243,25 +243,33 @@ def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
 
 def _cleanup_output_files(verbose: bool) -> None:
     """
-    Equivalent behavior to: rm -f output/*
-    - Only removes direct child files under ./output
-    - Ignores missing directory and non-file entries
+    Equivalent behavior to:
+      rm -f output/*
+      rm -f outputs/*
+    - Only removes direct child files under each directory
+    - Ignores missing directories and non-file entries
     """
-    output_dir = _PROJECT_ROOT / "output"
-    if not output_dir.exists() or not output_dir.is_dir():
-        return
+    total_removed = 0
+    for dir_name in ("output", "outputs"):
+        output_dir = _PROJECT_ROOT / dir_name
+        if not output_dir.exists() or not output_dir.is_dir():
+            continue
 
-    removed = 0
-    for p in output_dir.iterdir():
-        if p.is_file() or p.is_symlink():
-            try:
-                p.unlink()
-                removed += 1
-            except OSError as e:
-                if verbose:
-                    print(f"  WARN: failed to remove {p}: {e}")
-    if verbose:
-        print(f"Pre-clean: removed {removed} file(s) from {output_dir}")
+        removed = 0
+        for p in output_dir.iterdir():
+            if p.is_file() or p.is_symlink():
+                try:
+                    p.unlink()
+                    removed += 1
+                except OSError as e:
+                    if verbose:
+                        print(f"  WARN: failed to remove {p}: {e}")
+        total_removed += removed
+        if verbose:
+            print(f"Pre-clean: removed {removed} file(s) from {output_dir}")
+
+    if verbose and total_removed == 0:
+        print("Pre-clean: no files removed (directories missing or already empty)")
 
 
 def _extract_perf_timestamp_digits(perf_file: Path) -> str:
