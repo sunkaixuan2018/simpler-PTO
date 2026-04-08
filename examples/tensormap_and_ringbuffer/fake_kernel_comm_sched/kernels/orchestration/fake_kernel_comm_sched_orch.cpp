@@ -6,7 +6,7 @@
  * GatherSync (func_id=1) and GatherAsync (func_id=2) at dispatch time.
  *
  * Scheduler strategy (in aicpu_executor.cpp select_variant_kernel):
- *   - Large data (>= 4KB) → Async (SDMA bulk transfer)
+ *   - Large data (>= 512KB) → Async (SDMA bulk transfer)
  *   - Small data + all other cores busy → Async (don't block AICore)
  *   - Small data + idle cores available → Sync (lower latency)
  *

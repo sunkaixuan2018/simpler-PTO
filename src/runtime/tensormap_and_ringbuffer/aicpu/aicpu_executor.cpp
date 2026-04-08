@@ -639,7 +639,7 @@ int AicpuExecutor::shutdown_aicore(Runtime* runtime, int thread_idx, const int* 
 }
 
 // Variant selection: data size threshold (bytes). Above this, prefer Async.
-static constexpr int64_t VARIANT_DATA_SIZE_THRESHOLD = 4096;
+static constexpr int64_t VARIANT_DATA_SIZE_THRESHOLD = 512 * 1024;
 
 /**
  * Select variant kernel based on communication data size and core busyness.
