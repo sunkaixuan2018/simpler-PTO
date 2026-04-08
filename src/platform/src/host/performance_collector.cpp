@@ -284,8 +284,9 @@ int PerformanceCollector::export_swimlane_json(const std::string& output_path) {
         }
     }
     if (!has_any_records) {
-        LOG_WARN("Warning: No performance data to export.");
-        return -1;
+        // Keep exporting an empty JSON so upper-layer tooling can still
+        // discover the profiling artifact and handle it deterministically.
+        LOG_WARN("No performance data collected; exporting empty swimlane JSON.");
     }
 
     // Step 2: Create output directory if it doesn't exist
