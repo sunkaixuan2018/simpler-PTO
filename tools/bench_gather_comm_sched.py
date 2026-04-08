@@ -265,6 +265,7 @@ def _convert_perf_to_covered_trace(
     perf_file: Path,
     size_label: str,
     root_device: int,
+    kernels_dir: Path,
     verbose: bool,
 ) -> tuple[Path | None, bool]:
     """
@@ -284,11 +285,34 @@ def _convert_perf_to_covered_trace(
         str(covered_path),
         "-d",
         str(root_device),
+        "-k",
+        str(kernels_dir),
     ]
     proc = subprocess.run(cmd, capture_output=not verbose, text=True)
     if proc.returncode != 0:
         return None, False
     return covered_path, True
+
+
+def _apply_output_permissions(verbose: bool) -> None:
+    """
+    Best-effort permission adjustment for benchmark outputs.
+
+    Requested behavior:
+      chmod 755 -R output
+      chmod 777 output/*
+    We apply the same behavior to both `output` and `outputs` if present.
+    """
+    for dir_name in ("output", "outputs"):
+        out_dir = _PROJECT_ROOT / dir_name
+        if not out_dir.exists():
+            continue
+        try:
+            subprocess.run(["chmod", "-R", "755", str(out_dir)], check=False, capture_output=not verbose, text=True)
+            subprocess.run(f'chmod 777 "{out_dir}"/*', check=False, shell=True, capture_output=not verbose, text=True)
+        except FileNotFoundError:
+            if verbose:
+                print(f"  WARN: chmod not found; skipped permission updates for {out_dir}")
 
 
 def _trimmed_mean(values: list[float], trim_ratio: float) -> tuple[float, int]:
@@ -465,6 +489,7 @@ def run_case(
         perf_file=perf_file,
         size_label=size_label,
         root_device=root_device,
+        kernels_dir=kernels_dir,
         verbose=verbose,
     )
     result["covered_ok"] = covered_ok
@@ -793,6 +818,8 @@ Examples:
             writer.writeheader()
             writer.writerows(all_detail_rows)
         print(f"Detail CSV saved: {detail_path}")
+
+    _apply_output_permissions(args.verbose)
 
     return 0
 
