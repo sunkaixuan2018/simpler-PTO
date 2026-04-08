@@ -3,13 +3,12 @@
 Preset batch benchmark for fake_kernel_comm_sched.
 
 This script reuses the single-case execution/statistics logic in
-tools/bench_gather_comm_sched.py, but fixes the benchmark target to the
-normal fake_kernel_comm_sched case and provides defaults that match the
-common scheduler comparison workflow:
+tools/bench_gather_comm_sched.py and provides defaults that match the common
+scheduler comparison workflow:
 
 - strategies/modes: mte, sdma, hybrid
 - sizes: 1K .. 4M
-- case: fake_kernel_comm_sched
+- default case: fake_kernel_comm_sched
 - hybrid threshold: fixed at 512KB in scheduler
 
 It can optionally repeat the whole sweep for multiple rounds so the user can
@@ -37,6 +36,7 @@ DEFAULT_SIZES = [
     "1K", "2K", "4K", "8K", "16K", "32K", "64K",
     "128K", "256K", "512K", "1M", "2M", "4M",
 ]
+CASE_CHOICES = ["normal", "one_aicore", "one_aicore_nodummy"]
 
 
 def _validate_rounds(value: str) -> int:
@@ -126,12 +126,13 @@ def _save_detail_csv(detail_rows: list[dict], out_path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Preset benchmark sweep for fake_kernel_comm_sched",
+        description="Preset benchmark sweep for fake_kernel_comm_sched family",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
   python tools/bench_fake_kernel_comm_sched.py --platform a2a3 --first-device 4
   python tools/bench_fake_kernel_comm_sched.py --platform a2a3sim --rounds 3
+  python tools/bench_fake_kernel_comm_sched.py --case one_aicore_nodummy --modes hybrid
   python tools/bench_fake_kernel_comm_sched.py --sizes 64K 256K 1M --modes hybrid
         """,
     )
@@ -152,6 +153,12 @@ Examples:
         type=int,
         default=4,
         help="Number of devices/ranks (default: 4)",
+    )
+    parser.add_argument(
+        "--case",
+        default="normal",
+        choices=CASE_CHOICES,
+        help="Case variant to run (default: normal)",
     )
     parser.add_argument(
         "--strategies", "--modes",
@@ -178,6 +185,26 @@ Examples:
         type=float,
         default=0.0,
         help="Sleep this many seconds between rounds (default: 0)",
+    )
+    parser.add_argument(
+        "--dummy-comm-bytes",
+        type=int,
+        default=512 * 1024,
+        help="Dummy comm target bytes for one_aicore family cases (default: 524288 = 512KB)",
+    )
+    parser.add_argument(
+        "--serialize-dummy",
+        type=int,
+        default=0,
+        choices=[0, 1],
+        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore family cases (default: 0)",
+    )
+    parser.add_argument(
+        "--profile-root-only",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="Set PROFILE_ROOT_ONLY for one_aicore family cases (default: 1)",
     )
     parser.add_argument(
         "-v", "--verbose",
@@ -216,12 +243,30 @@ Examples:
 
     base._cleanup_output_files(args.verbose)
 
-    print("Benchmark: fake_kernel_comm_sched")
+    if args.case == "one_aicore":
+        case_name = "fake_kernel_comm_sched_one_aicore"
+        kernels_dir = base._ONE_AICORE_KERNELS_DIR
+        golden_path = base._ONE_AICORE_GOLDEN_PATH
+    elif args.case == "one_aicore_nodummy":
+        case_name = "fake_kernel_comm_sched_one_aicore_nodummy"
+        kernels_dir = base._ONE_AICORE_NODUMMY_KERNELS_DIR
+        golden_path = base._ONE_AICORE_NODUMMY_GOLDEN_PATH
+    else:
+        case_name = "fake_kernel_comm_sched"
+        kernels_dir = base._NORMAL_KERNELS_DIR
+        golden_path = base._NORMAL_GOLDEN_PATH
+
+    print(f"Benchmark: {case_name}")
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
     print(f"  sizes={args.sizes}")
     print("  hybrid threshold=512KB (fixed in scheduler)")
     print(f"  rounds={args.rounds}  round_interval_s={args.round_interval_s}")
+    if args.case in ("one_aicore", "one_aicore_nodummy"):
+        print(
+            f"  one_aicore-family extras: dummy_comm_bytes={args.dummy_comm_bytes}, "
+            f"serialize_dummy={args.serialize_dummy}, profile_root_only={args.profile_root_only}"
+        )
     print(
         f"  iterations per case: {base.N_ITER} total, {base.N_WARMUP} warm-up, "
         f"{base.N_ITER - base.N_WARMUP} measured, trim={args.trim_ratio * 100:.1f}% per tail"
@@ -245,12 +290,12 @@ Examples:
                     platform=args.platform,
                     verbose=args.verbose,
                     trim_ratio=args.trim_ratio,
-                    kernels_dir=base._NORMAL_KERNELS_DIR,
-                    golden_path=base._NORMAL_GOLDEN_PATH,
-                    case_mode="normal",
-                    dummy_comm_bytes=0,
-                    serialize_dummy=0,
-                    profile_root_only=1,
+                    kernels_dir=kernels_dir,
+                    golden_path=golden_path,
+                    case_mode=args.case,
+                    dummy_comm_bytes=args.dummy_comm_bytes,
+                    serialize_dummy=args.serialize_dummy,
+                    profile_root_only=args.profile_root_only,
                     diagnostic=args.diagnostic,
                 )
                 result["round"] = round_idx
