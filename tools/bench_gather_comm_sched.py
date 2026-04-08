@@ -78,6 +78,7 @@ _EXTREME_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_extreme" / "g
 _ONE_AICORE_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore" / "kernels"
 _ONE_AICORE_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
+_SWIMLANE_CONVERTER = _PROJECT_ROOT / "tools" / "swimlane_converter.py"
 
 
 def _gather_count_for(total_bytes: int, n_ranks: int) -> int:
@@ -238,6 +239,58 @@ def _find_newest_perf_file(root_device: int, after_mtime: float) -> Path | None:
     return max(candidates, key=lambda p: p.stat().st_mtime)
 
 
+def _extract_perf_timestamp_digits(perf_file: Path) -> str:
+    """
+    Extract timestamp digits from perf filename.
+
+    Expected perf filename format:
+      perf_swimlane_YYYYMMDD_HHMMSS_d<device>.json
+    Returns:
+      YYYYMMDDHHMMSS (digits only), or current timestamp fallback.
+    """
+    stem = perf_file.stem
+    prefix = "perf_swimlane_"
+    if stem.startswith(prefix):
+        tail = stem[len(prefix):]
+        # Remove optional device suffix, e.g. "_d4"
+        if "_d" in tail:
+            tail = tail.split("_d", 1)[0]
+        digits = "".join(ch for ch in tail if ch.isdigit())
+        if digits:
+            return digits
+    return datetime.now().strftime("%Y%m%d%H%M%S")
+
+
+def _convert_perf_to_covered_trace(
+    perf_file: Path,
+    size_label: str,
+    root_device: int,
+    verbose: bool,
+) -> tuple[Path | None, bool]:
+    """
+    Convert perf_swimlane JSON to Chrome trace JSON via swimlane_converter.py.
+
+    Output naming:
+      covered_<timestamp_digits>_<size_label>_device<device>.json
+    """
+    ts_digits = _extract_perf_timestamp_digits(perf_file)
+    covered_name = f"covered_{ts_digits}_{size_label}_device{root_device}.json"
+    covered_path = _OUTPUTS_DIR / covered_name
+    cmd = [
+        sys.executable,
+        str(_SWIMLANE_CONVERTER),
+        str(perf_file),
+        "-o",
+        str(covered_path),
+        "-d",
+        str(root_device),
+    ]
+    proc = subprocess.run(cmd, capture_output=not verbose, text=True)
+    if proc.returncode != 0:
+        return None, False
+    return covered_path, True
+
+
 def _trimmed_mean(values: list[float], trim_ratio: float) -> tuple[float, int]:
     """Return (trimmed_mean, effective_sample_count)."""
     if not values:
@@ -384,6 +437,9 @@ def run_case(
         "trimmed_count":   None,
         "avg_exec_us":     None,
         "avg_latency_us":  None,
+        "perf_file":       None,
+        "covered_file":    None,
+        "covered_ok":      None,
     }
 
     if not result["run_ok"]:
@@ -403,6 +459,18 @@ def run_case(
     if not perf_file:
         print("  WARN: no perf file found")
         return result, []
+    result["perf_file"] = str(perf_file)
+
+    covered_path, covered_ok = _convert_perf_to_covered_trace(
+        perf_file=perf_file,
+        size_label=size_label,
+        root_device=root_device,
+        verbose=verbose,
+    )
+    result["covered_ok"] = covered_ok
+    result["covered_file"] = str(covered_path) if covered_path is not None else None
+    if not covered_ok:
+        print("  WARN: swimlane conversion failed for this case")
 
     stats = _parse_gather_stats(perf_file, trim_ratio=trim_ratio)
 
@@ -563,6 +631,7 @@ def save_csv(results: list[dict], out_path: Path) -> None:
         "n_iter", "warmup_samples", "measured_samples", "trim_ratio", "case_mode",
         "dummy_comm_bytes", "serialize_dummy", "profile_root_only",
         "run_ok", "func_id", "func_name", "total_count", "trimmed_count", "avg_exec_us", "avg_latency_us",
+        "perf_file", "covered_ok", "covered_file",
     ]
     with open(out_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
