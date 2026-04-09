@@ -204,6 +204,7 @@ public:
     // Profiling support
     bool enable_profiling;    // Enable profiling flag
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
+    void *sdma_prefetch_workspace;  // Optional host-created SDMA workspace
 
     // Task storage
     Task tasks[RUNTIME_MAX_TASKS];  // Fixed-size task array

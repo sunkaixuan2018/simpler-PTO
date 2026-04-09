@@ -24,6 +24,7 @@
 #endif
 
 #include "aicpu/device_log.h"
+#include "aicpu/device_prefetch.h"
 #include "aicpu/device_time.h"
 #include "aicpu/cpu_sim_task_cookie.h"
 #include "pto2_dispatch_payload.h"
@@ -87,6 +88,19 @@ constexpr int32_t PROGRESS_VERBOSE_THRESHOLD = 10;  // log every completion for 
 constexpr int32_t PROGRESS_LOG_INTERVAL = 250;      // log every N completions after threshold
 
 static PTO2Runtime *rt{nullptr};
+
+static size_t get_prefetch_min_bytes_from_env() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_MIN_BYTES");
+    if (env == nullptr || *env == '\0') {
+        return 256 * 1024;
+    }
+    char *end = nullptr;
+    unsigned long long value = strtoull(env, &end, 10);
+    if (end == env || *end != '\0') {
+        return 256 * 1024;
+    }
+    return static_cast<size_t>(value);
+}
 
 // Per-core dispatch payload storage (one aligned cache line per physical core)
 static PTO2DispatchPayload s_pto2_payload_per_core[RUNTIME_MAX_WORKER];
@@ -346,6 +360,8 @@ struct AicpuExecutor {
     DeviceOrchestrationFunc orch_func_{nullptr};
     DeviceOrchestrationBindRuntimeFunc orch_bind_runtime_{nullptr};
     const ChipStorageTaskArgs *orch_args_cached_{nullptr};
+    uint32_t prefetch_mode_{Runtime::PREFETCH_MODE_TWOSLOT};
+    size_t prefetch_min_bytes_{256 * 1024};
 
     uint64_t *func_id_to_addr_;
     uint64_t get_function_bin_addr(int func_id) const {
@@ -556,9 +572,46 @@ struct AicpuExecutor {
             pop_miss++;
         }
 #else
-        int count = rt->scheduler.get_ready_tasks_batch(shape, local_buf, out, max_count);
+    int count = rt->scheduler.get_ready_tasks_batch(shape, local_buf, out, max_count);
 #endif
         return count;
+    }
+
+    size_t get_task_prefetch_bytes(const PTO2TaskSlotState &slot_state) const {
+        if (slot_state.payload == nullptr) {
+            return 0;
+        }
+        const PTO2TaskPayload &payload = *slot_state.payload;
+        size_t total_bytes = 0;
+        for (int32_t i = 0; i < payload.tensor_count; ++i) {
+            const Tensor &tensor = payload.tensors[i];
+            if (tensor.buffer.addr == 0 || tensor.buffer.size == 0) {
+                continue;
+            }
+            total_bytes += tensor.buffer.size;
+        }
+        return total_bytes;
+    }
+
+    bool should_issue_task_prefetch(const PTO2TaskSlotState &slot_state) const {
+        if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA || !aicpu_prefetch_available() || slot_state.payload == nullptr) {
+            return false;
+        }
+        return get_task_prefetch_bytes(slot_state) >= prefetch_min_bytes_;
+    }
+
+    void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
+        if (!should_issue_task_prefetch(slot_state)) {
+            return;
+        }
+        const PTO2TaskPayload &payload = *slot_state.payload;
+        for (int32_t i = 0; i < payload.tensor_count; ++i) {
+            const Tensor &tensor = payload.tensors[i];
+            if (tensor.buffer.addr == 0 || tensor.buffer.size == 0) {
+                continue;
+            }
+            aicpu_prefetch_tensor(reinterpret_cast<void *>(tensor.buffer.addr), static_cast<size_t>(tensor.buffer.size), channel_idx);
+        }
     }
 
     /**
@@ -1177,6 +1230,14 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
 
     // Clear per-core dispatch payloads
     memset(s_pto2_payload_per_core, 0, sizeof(s_pto2_payload_per_core));
+    prefetch_mode_ = runtime->prefetch_mode;
+    prefetch_min_bytes_ = get_prefetch_min_bytes_from_env();
+    aicpu_prefetch_init(runtime->sdma_prefetch_workspace);
+    const char *prefetch_mode_name =
+        prefetch_mode_ == Runtime::PREFETCH_MODE_BASELINE ? "baseline" :
+        prefetch_mode_ == Runtime::PREFETCH_MODE_TWOSLOT ? "twoslot" :
+        prefetch_mode_ == Runtime::PREFETCH_MODE_SDMA ? "sdma" : "sdma_fake";
+    DEV_ALWAYS("Prefetch mode: %s", prefetch_mode_name);
 
     // Initialize per-core GlobalContext (sub_block_id) based on cluster position.
     // This is done once at startup and never modified afterwards.
@@ -1527,18 +1588,33 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                         // Fast path: enough local resources, fall through to normal dispatch.
                     }
 
+                    bool first_block = slot_state->next_block_idx == 0;
                     // Dispatch as many blocks as possible for this task using available clusters.
                     // For block_num=1 the inner body executes exactly once (no overhead).
                     do {
                         auto current_valid_cluster_offset = valid_cluster_states.pop_first();
-                        dispatch_block_to_cluster(
-                            runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
+                        if (first_block) {
+                            dispatch_block_to_cluster(
+                                runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
 #if PTO2_PROFILING
-                            ,
-                            profiling_enabled, phase_dispatch_count
+                                ,
+                                profiling_enabled, phase_dispatch_count
 #endif
-                        );
-                        slot_state->next_block_idx++;
+                            );
+                            slot_state->next_block_idx++;
+                            int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
+                            issue_task_prefetch(*slot_state, current_core_id);
+                            first_block = false;
+                        } else {
+                            dispatch_block_to_cluster(
+                                runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
+#if PTO2_PROFILING
+                                ,
+                                profiling_enabled, phase_dispatch_count
+#endif
+                            );
+                            slot_state->next_block_idx++;
+                        }
                         // For AIV, refresh cluster states so the do-while can pick up the
                         // other AIV core in the same cluster on the next iteration.
                         if (shape == PTO2ResourceShape::AIV && slot_state->next_block_idx < slot_state->block_num) {
@@ -2363,6 +2439,8 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 }
 
 void AicpuExecutor::deinit(Runtime *runtime) {
+    aicpu_prefetch_deinit();
+
     // 1. Invalidate AICPU cache for Runtime address range.
     //    Next round's Host DMA (rtMemcpy) writes fresh Runtime to HBM but
     //    bypasses this cache. Invalidating now ensures next round reads from HBM.

@@ -47,6 +47,7 @@ Runtime::Runtime() {
     sche_cpu_num = 1;
     enable_profiling = false;
     perf_data_base = 0;
+    sdma_prefetch_workspace = nullptr;
     tensor_pair_count = 0;
 
     // Initialize kernel binary tracking

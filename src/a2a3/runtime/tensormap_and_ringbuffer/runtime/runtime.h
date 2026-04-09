@@ -152,6 +152,13 @@ struct Task {
  */
 class Runtime {
 public:  // NOLINT(whitespace/indent)
+    enum PrefetchMode : uint32_t {
+        PREFETCH_MODE_BASELINE = 0,
+        PREFETCH_MODE_TWOSLOT = 1,
+        PREFETCH_MODE_SDMA = 2,
+        PREFETCH_MODE_SDMA_FAKE = 3,
+    };
+
     // Handshake buffers for AICPU-AICore communication
     Handshake workers[RUNTIME_MAX_WORKER];  // Worker (AICore) handshake buffers
     int worker_count;                       // Number of active workers
@@ -159,6 +166,7 @@ public:  // NOLINT(whitespace/indent)
     // Execution parameters for AICPU scheduling
     int sche_cpu_num;        // Number of AICPU threads for scheduling
     int ready_queue_shards;  // Number of ready queue shards (1..MAX_AICPU_THREADS, default MAX-1)
+    uint32_t prefetch_mode;  // baseline / twoslot / sdma / sdma_fake
 
     // Ring buffer size overrides (0 = use compile-time defaults)
     uint64_t pto2_task_window_size;
@@ -178,6 +186,7 @@ public:  // NOLINT(whitespace/indent)
     // Controlled via PTO2_ORCH_TO_SCHED environment variable.
     bool orch_to_sched;
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
+    void *sdma_prefetch_workspace;  // Host-created STARS channel workspace
 
 private:  // NOLINT(whitespace/indent)
     // Tensor pairs for host-device memory tracking

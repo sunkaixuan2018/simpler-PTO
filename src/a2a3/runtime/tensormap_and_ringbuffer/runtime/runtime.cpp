@@ -34,6 +34,7 @@ Runtime::Runtime() {
     worker_count = 0;
     sche_cpu_num = 1;
     ready_queue_shards = RUNTIME_DEFAULT_READY_QUEUE_SHARDS;
+    prefetch_mode = Runtime::PREFETCH_MODE_TWOSLOT;
     pto2_task_window_size = 0;
     pto2_heap_size = 0;
     pto2_dep_pool_size = 0;
@@ -54,6 +55,7 @@ Runtime::Runtime() {
 
     // Initialize kernel binary tracking
     registered_kernel_count_ = 0;
+    sdma_prefetch_workspace = nullptr;
 
     // Initialize function address mapping
     for (int i = 0; i < RUNTIME_MAX_FUNC_ID; i++) {

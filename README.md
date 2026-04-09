@@ -62,6 +62,64 @@ source /usr/local/Ascend/ascend-toolkit/latest/bin/setenv.bash
 export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 ```
 
+## SDMA Prefetch (Optional, a2a3 Hardware)
+
+The a2a3 onboard runtime supports an experimental "SDMA prefetch" path (AICPU issues STARS SDMA CMO PREFETCH SQEs)
+to warm AICore L2 before compute. This requires an additional minimal provider bundle containing:
+
+- `x86_64-linux/lib64/libopapi.so` (exports `aclnnShmemSdmaStarsQuery*`)
+- `opp/` (OPP metadata used by the provider)
+
+### Install Provider Bundle
+
+If you received a `sdma_legacy_provider.tar.gz`, unpack it into the repo root:
+
+```bash
+mkdir -p _deps
+tar -C _deps -xzf /path/to/sdma_legacy_provider.tar.gz
+```
+
+After unpacking, the layout should be:
+
+```text
+_deps/sdma_legacy_provider/x86_64-linux/lib64/libopapi.so
+_deps/sdma_legacy_provider/opp/...
+```
+
+Alternatively, point to an existing provider directory:
+
+```bash
+export PTO_SDMA_PROVIDER_ROOT=/abs/path/to/sdma_legacy_provider
+export ASCEND_OPP_PATH=/abs/path/to/sdma_legacy_provider/opp
+```
+
+### Run Tests (Different Prefetch Modes)
+
+All modes are controlled by `PTO_SDMA_PREFETCH_MODE`:
+
+- `baseline`: disable SDMA prefetch (no SDMA channel setup)
+- `twoslot`: disable SDMA prefetch (two-slot scheduler mode)
+- `sdma`: enable SDMA prefetch (requires provider bundle above)
+- `sdma_fake`: disables real SDMA, keeps the control-path for A/B (no provider required)
+
+Example: run a small workload on real hardware (skip golden for benchmarking):
+
+```bash
+# Baseline
+PTO_SDMA_PREFETCH_MODE=baseline \
+python examples/scripts/run_example.py \
+  -k examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels \
+  -g examples/a2a3/tensormap_and_ringbuffer/vector_example/golden.py \
+  -p a2a3 -d 0 --skip-golden
+
+# SDMA prefetch
+PTO_SDMA_PREFETCH_MODE=sdma \
+python examples/scripts/run_example.py \
+  -k examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels \
+  -g examples/a2a3/tensormap_and_ringbuffer/vector_example/golden.py \
+  -p a2a3 -d 0 --skip-golden
+```
+
 ## Documentation
 
 | Document | Description |

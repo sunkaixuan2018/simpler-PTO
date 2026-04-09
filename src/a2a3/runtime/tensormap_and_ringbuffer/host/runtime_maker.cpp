@@ -34,6 +34,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <strings.h>
 
 #include "../runtime/pto_shared_memory.h"
 #include "../runtime/runtime.h"
@@ -67,6 +68,52 @@ static uint64_t parse_env_uint64(const char *name, uint64_t min_val, bool requir
         return 0;
     }
     return static_cast<uint64_t>(val);
+}
+
+static uint32_t parse_prefetch_mode() {
+    const char *env_mode = std::getenv("PTO_SDMA_PREFETCH_MODE");
+    if (env_mode != nullptr && *env_mode != '\0') {
+        if (strcasecmp(env_mode, "baseline") == 0 || strcmp(env_mode, "0") == 0) {
+            return Runtime::PREFETCH_MODE_BASELINE;
+        }
+        if (strcasecmp(env_mode, "twoslot") == 0 || strcmp(env_mode, "1") == 0) {
+            return Runtime::PREFETCH_MODE_TWOSLOT;
+        }
+        if (strcasecmp(env_mode, "sdma") == 0 || strcmp(env_mode, "2") == 0) {
+            return Runtime::PREFETCH_MODE_SDMA;
+        }
+        if (strcasecmp(env_mode, "sdma_fake") == 0 || strcasecmp(env_mode, "fake") == 0 || strcmp(env_mode, "3") == 0) {
+            return Runtime::PREFETCH_MODE_SDMA_FAKE;
+        }
+        LOG_WARN("PTO_SDMA_PREFETCH_MODE=%s invalid, fallback to legacy PTO_ENABLE_SDMA_PREFETCH", env_mode);
+    }
+
+    const char *env_enable = std::getenv("PTO_ENABLE_SDMA_PREFETCH");
+    if (env_enable == nullptr || *env_enable == '\0') {
+        return Runtime::PREFETCH_MODE_SDMA;
+    }
+    if (
+        strcmp(env_enable, "0") == 0 || strcasecmp(env_enable, "false") == 0 || strcasecmp(env_enable, "off") == 0 ||
+        strcasecmp(env_enable, "no") == 0
+    ) {
+        return Runtime::PREFETCH_MODE_TWOSLOT;
+    }
+    return Runtime::PREFETCH_MODE_SDMA;
+}
+
+static const char *prefetch_mode_name(uint32_t mode) {
+    switch (mode) {
+        case Runtime::PREFETCH_MODE_BASELINE:
+            return "baseline";
+        case Runtime::PREFETCH_MODE_TWOSLOT:
+            return "twoslot";
+        case Runtime::PREFETCH_MODE_SDMA:
+            return "sdma";
+        case Runtime::PREFETCH_MODE_SDMA_FAKE:
+            return "sdma_fake";
+        default:
+            return "unknown";
+    }
 }
 
 /**
@@ -201,6 +248,9 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
         }
         LOG_INFO("Ready queue shards: %d", runtime->ready_queue_shards);
     }
+
+    runtime->prefetch_mode = parse_prefetch_mode();
+    LOG_INFO("Prefetch mode: %s", prefetch_mode_name(runtime->prefetch_mode));
 
     // Read orchestrator-to-scheduler transition flag from environment
     {

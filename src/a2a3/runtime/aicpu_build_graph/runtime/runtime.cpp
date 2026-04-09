@@ -38,6 +38,7 @@ Runtime::Runtime() {
     pto2_heap_size = 0;
     pto2_dep_pool_size = 0;
     orch_to_sched = false;
+    sdma_prefetch_workspace = nullptr;
 
     // Initialize tensor pairs
     tensor_pair_count = 0;

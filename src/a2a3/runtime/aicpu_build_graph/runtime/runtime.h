@@ -175,6 +175,7 @@ public:  // NOLINT(whitespace/indent)
     // Controlled via PTO2_ORCH_TO_SCHED environment variable.
     bool orch_to_sched;
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
+    void *sdma_prefetch_workspace;  // Optional host-created SDMA workspace
 
 private:  // NOLINT(whitespace/indent)
     // Tensor pairs for host-device memory tracking

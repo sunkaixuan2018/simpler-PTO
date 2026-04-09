@@ -25,6 +25,7 @@
 
 #include "common/unified_log.h"
 #include "device_runner.h"  // NOLINT(build/include_subdir)
+#include "host/host_prefetch_setup.h"
 #include "runtime.h"        // NOLINT(build/include_subdir)
 
 extern "C" {
@@ -108,7 +109,12 @@ DeviceContextHandle create_device_context(void) {
     }
 }
 
-void destroy_device_context(DeviceContextHandle ctx) { delete static_cast<DeviceRunner *>(ctx); }
+void destroy_device_context(DeviceContextHandle ctx) {
+    // Best-effort cleanup: release cached SDMA/STARS resources when the context is destroyed.
+    // This keeps repeated run_runtime() fast while avoiding permanent resource leaks.
+    host_prefetch_teardown(nullptr);
+    delete static_cast<DeviceRunner *>(ctx);
+}
 
 size_t get_runtime_size(void) { return sizeof(Runtime); }
 
@@ -164,8 +170,14 @@ int run_runtime(
         // Phase 3: launch
         std::vector<uint8_t> aicpu_vec(aicpu_binary, aicpu_binary + aicpu_size);
         std::vector<uint8_t> aicore_vec(aicore_binary, aicore_binary + aicore_size);
+        if (runner->ensure_device_set(device_id) == 0) {
+            const int worker_count = block_dim * PLATFORM_CORES_PER_BLOCKDIM;
+            r->sdma_prefetch_workspace = host_prefetch_setup(worker_count);
+        }
         rc = runner->run(*r, block_dim, device_id, aicpu_vec, aicore_vec, aicpu_thread_num);
         if (rc != 0) {
+            host_prefetch_teardown(r->sdma_prefetch_workspace);
+            r->sdma_prefetch_workspace = nullptr;
             validate_runtime_impl(r);
             r->~Runtime();
             pthread_setspecific(g_runner_key, nullptr);
@@ -174,6 +186,7 @@ int run_runtime(
 
         // Phase 4: finalize (copy results back)
         rc = validate_runtime_impl(r);
+        // Keep SDMA/STARS workspace cached across runs; it will be released in finalize_device/destroy_device_context.
         r->~Runtime();
         pthread_setspecific(g_runner_key, nullptr);
         return rc;
@@ -186,6 +199,7 @@ int run_runtime(
 int finalize_device(DeviceContextHandle ctx) {
     if (ctx == NULL) return -1;
     try {
+        host_prefetch_teardown(nullptr);
         return static_cast<DeviceRunner *>(ctx)->finalize();
     } catch (...) {
         return -1;

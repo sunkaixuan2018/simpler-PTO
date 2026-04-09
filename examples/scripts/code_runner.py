@@ -64,6 +64,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import torch  # type: ignore[import-not-found]
+from sdma_provider_env import resolve_sdma_runtime_env
 
 # =============================================================================
 # Argument construction — uses nanobind bindings from task_interface
@@ -863,8 +864,16 @@ class CodeRunner:
 
             # Build environment for runtime initialization
             run_env = _kernel_config_runtime_env(self._kernel_config, self.kernels_dir)
-            if run_env:
-                logger.debug(f"Runtime init env overrides: {run_env}")
+            sdma_env = resolve_sdma_runtime_env(
+                project_root=self.project_root,
+                platform=self.platform,
+                n_devices=1,
+                requires_comm=False,
+            )
+            runtime_env = dict(run_env)
+            runtime_env.update(sdma_env)
+            if runtime_env:
+                logger.debug(f"Runtime env overrides: {runtime_env}")
 
             # Golden
             if not self.skip_golden:
@@ -891,7 +900,7 @@ class CodeRunner:
                     config.enable_profiling = True
                     logger.info("Profiling enabled")
 
-                with _temporary_env(run_env):
+                with _temporary_env(runtime_env):
                     worker.run(chip_callable, orch_args, config)
 
                 if not self.skip_golden:

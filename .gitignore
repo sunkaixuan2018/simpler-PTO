@@ -25,9 +25,16 @@ venv/
 # Git cloned dependencies (not tracked in repo)
 examples/scripts/_deps/
 
+# Large binary provider bundles (kept out of git history)
+_deps/
+
 # Profiling files
 outputs
 tmp
+
+# Local scratch files
+.tmp_*
+.tmp_env_capture
 
 # Mid-work documentation
 .docs
