@@ -85,6 +85,8 @@ _ONE_AICORE_NODUMMY_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_on
 _ONE_AICORE_NODUMMY_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore_nodummy" / "golden.py"
 _TRUELOAD_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload" / "kernels"
 _TRUELOAD_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload" / "golden.py"
+_TRUELOAD_NODUMMY_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload_nodummy" / "kernels"
+_TRUELOAD_NODUMMY_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload_nodummy" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
 _SWIMLANE_CONVERTER = _PROJECT_ROOT / "tools" / "swimlane_converter.py"
 
@@ -117,6 +119,8 @@ def _poll_counts_prefix(case_mode: str) -> str:
         return "poll_counts_one_aicore_nodummy"
     if case_mode == "trueload":
         return "poll_counts_trueload"
+    if case_mode == "trueload_nodummy":
+        return "poll_counts_trueload_nodummy"
     return "poll_counts"
 
 
@@ -529,7 +533,7 @@ def run_case(
     env["N_ITER"]          = str(N_ITER)
     if case_mode == "extreme":
         env["GATHER_CASE"] = "extreme"
-    elif case_mode in ("one_aicore", "one_aicore_nodummy", "trueload"):
+    elif case_mode in ("one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy"):
         env["DUMMY_COMM_BYTES"] = str(dummy_comm_bytes)
         env["EXTREME_SERIALIZE_DUMMY"] = str(serialize_dummy)
         env["PROFILE_ROOT_ONLY"] = str(profile_root_only)
@@ -556,9 +560,9 @@ def run_case(
         "measured_samples": N_ITER - N_WARMUP,
         "trim_ratio":      trim_ratio,
         "case_mode":       case_mode,
-        "dummy_comm_bytes": dummy_comm_bytes if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
-        "serialize_dummy": serialize_dummy if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
-        "profile_root_only": profile_root_only if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
+        "dummy_comm_bytes": dummy_comm_bytes if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy") else None,
+        "serialize_dummy": serialize_dummy if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy") else None,
+        "profile_root_only": profile_root_only if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy") else None,
         "run_ok":          False,
         "attempts":        0,
         "last_error":      None,
@@ -844,28 +848,28 @@ Examples:
     parser.add_argument(
         "--case",
         default="normal",
-        choices=["normal", "extreme", "one_aicore", "one_aicore_nodummy", "trueload"],
+        choices=["normal", "extreme", "one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy"],
         help="Benchmark case variant (default: normal)",
     )
     parser.add_argument(
         "--dummy-comm-bytes",
         type=int,
         default=16 * 1024 * 1024,
-        help="Dummy comm target bytes for one_aicore/trueload cases (default: 16777216 = 16MB)",
+        help="Dummy comm target bytes for one_aicore/trueload-family cases (default: 16777216 = 16MB)",
     )
     parser.add_argument(
         "--serialize-dummy",
         type=int,
         default=0,
         choices=[0, 1],
-        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore/trueload cases (default: 0)",
+        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore/trueload-family cases (default: 0)",
     )
     parser.add_argument(
         "--profile-root-only",
         type=int,
         default=1,
         choices=[0, 1],
-        help="Set PROFILE_ROOT_ONLY for one_aicore/trueload cases (default: 1)",
+        help="Set PROFILE_ROOT_ONLY for one_aicore/trueload-family cases (default: 1)",
     )
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show subprocess output")
@@ -908,6 +912,10 @@ Examples:
         case_name = "fake_kernel_comm_sched_trueload"
         kernels_dir = _TRUELOAD_KERNELS_DIR
         golden_path = _TRUELOAD_GOLDEN_PATH
+    elif args.case == "trueload_nodummy":
+        case_name = "fake_kernel_comm_sched_trueload_nodummy"
+        kernels_dir = _TRUELOAD_NODUMMY_KERNELS_DIR
+        golden_path = _TRUELOAD_NODUMMY_GOLDEN_PATH
     else:
         case_name = "fake_kernel_comm_sched"
         kernels_dir = _NORMAL_KERNELS_DIR
@@ -920,7 +928,7 @@ Examples:
         f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, "
         f"{N_ITER - N_WARMUP} measured, trim={args.trim_ratio * 100:.1f}% per tail"
     )
-    if args.case in ("one_aicore", "one_aicore_nodummy", "trueload"):
+    if args.case in ("one_aicore", "one_aicore_nodummy", "trueload", "trueload_nodummy"):
         print(
             f"  one_aicore-family extras: dummy_comm_bytes={args.dummy_comm_bytes}, "
             f"serialize_dummy={args.serialize_dummy}, profile_root_only={args.profile_root_only}"
