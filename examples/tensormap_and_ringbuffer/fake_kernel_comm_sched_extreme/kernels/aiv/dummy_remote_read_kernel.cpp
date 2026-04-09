@@ -18,7 +18,7 @@
  *   args[4] = nranks (scalar)
  *   args[5] = root (scalar)
  *   args[6] = dummy_comm_bytes (scalar, total target bytes; large legacy values
- *             still fall back to the default 2MB traffic)
+ *             still fall back to the default 16MB traffic)
  *   args[7] = debug_poll_counts (TensorData*, unused)
  */
 
@@ -41,11 +41,12 @@ using namespace pto;
 #endif
 
 // Use 64KB UB staging tiles for the MTE pipeline, but expose a larger
-// logical communication pattern: 1MB ping + 1MB pong = 2MB total traffic.
+// logical communication pattern: 1MB ping + 1MB pong regions with a default
+// 16MB total transfer budget per dummy task.
 static constexpr size_t DUMMY_STAGE_CHUNK = 128 * 128;
 static constexpr size_t DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024;
 static constexpr size_t DUMMY_PINGPONG_ELEMS = DUMMY_PINGPONG_BYTES / sizeof(float);
-static constexpr uint64_t DUMMY_TOTAL_BYTES_DEFAULT = 2 * 1024 * 1024;
+static constexpr uint64_t DUMMY_TOTAL_BYTES_DEFAULT = 16 * 1024 * 1024;
 static constexpr uint64_t DUMMY_TOTAL_BYTES_MAX = 64 * 1024 * 1024;
 static constexpr uint64_t DUMMY_STAGE_PING_TILE_ADDR = 0x0;
 static constexpr uint64_t DUMMY_STAGE_PONG_TILE_ADDR = DUMMY_STAGE_CHUNK * sizeof(float);
@@ -149,7 +150,7 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
 
     // Backward compatibility:
     // - old callers may still pass sdma_workspace_ptr here (large address).
-    // - invalid/zero values also fall back to the default 2MB traffic budget.
+    // - invalid/zero values also fall back to the default 16MB traffic budget.
     if (dummy_comm_bytes == 0 || dummy_comm_bytes > DUMMY_TOTAL_BYTES_MAX) {
         dummy_comm_bytes = DUMMY_TOTAL_BYTES_DEFAULT;
     }

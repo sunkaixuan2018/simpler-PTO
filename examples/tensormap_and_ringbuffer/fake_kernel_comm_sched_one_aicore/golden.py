@@ -16,7 +16,7 @@ GATHER_COUNT = int(os.environ.get("GATHER_COUNT", "256"))
 _N_ITER = int(os.environ.get("N_ITER", "200"))
 _SERIALIZE_DUMMY = int(os.environ.get("EXTREME_SERIALIZE_DUMMY", "0"))
 _FLOAT_BYTES = np.dtype(np.float32).itemsize
-_DUMMY_COMM_BYTES = int(os.environ.get("DUMMY_COMM_BYTES", str(2 * 1024 * 1024)))
+_DUMMY_COMM_BYTES = int(os.environ.get("DUMMY_COMM_BYTES", str(16 * 1024 * 1024)))
 _DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024
 _STRATEGY_MAP = {"hybrid": 0, "mte": 1, "sdma": 2}
 

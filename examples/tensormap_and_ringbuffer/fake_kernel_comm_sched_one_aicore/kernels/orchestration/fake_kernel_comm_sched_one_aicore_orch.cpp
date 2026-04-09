@@ -12,6 +12,7 @@
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 constexpr int DEFAULT_N_ITER = 200;
+constexpr uint64_t DUMMY_COMM_BYTES_DEFAULT = 16 * 1024 * 1024;
 constexpr uint64_t DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024;
 constexpr uint64_t DUMMY_PINGPONG_BUFFER_BYTES = 2 * DUMMY_PINGPONG_BYTES;
 
@@ -52,20 +53,20 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
     int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
-    uint64_t dummy_comm_bytes = (arg_count > 15) ? args[15] : (2 * 1024 * 1024ULL);
+    uint64_t dummy_comm_bytes = (arg_count > 15) ? args[15] : DUMMY_COMM_BYTES_DEFAULT;
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
     uint64_t dummy_buffer_elems = DUMMY_PINGPONG_BUFFER_BYTES / sizeof(float);
+    (void)serialize_dummy;
 
     LOG_INFO(rt,
-             "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_comm_bytes=%llu dummy_pingpong_bytes=%llu",
+             "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d dummy_comm_bytes=%llu dummy_pingpong_bytes=%llu",
              strategy,
              gather_count,
              n_ranks,
              rank_id,
              n_iter,
-             serialize_dummy,
              static_cast<unsigned long long>(dummy_comm_bytes),
              static_cast<unsigned long long>(DUMMY_PINGPONG_BYTES));
 
@@ -119,21 +120,10 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
 
         // The communication source window is stable across iterations.
         // Reuse it for the whole benchmark instead of rewriting it every round.
-        Tensor prev_iter_sync = win_src_t;
+        Tensor prev_gather_sync = win_src_t;
+        Tensor prev_dummy_sync = win_src_t;
 
         for (int iter = 0; iter < n_iter; ++iter) {
-            Tensor sync_after_barrier = make_tensor(sync_shapes, 1, DataType::INT32);
-
-            PTOParam params_barrier[] = {
-                make_input_param(barrier_t),
-                make_scalar_param(device_ctx_ptr),
-                make_scalar_param(static_cast<uint64_t>(n_ranks)),
-                make_scalar_param(static_cast<uint64_t>(root)),
-                make_input_param(prev_iter_sync),
-                make_output_param(sync_after_barrier),
-            };
-            pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
-
             Tensor gather_out = (rank_id == root && iter == n_iter - 1)
                 ? win_dst_t
                 : make_tensor(dst_shapes, 1, DataType::FLOAT32);
@@ -150,7 +140,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             PTOParam params_gather[] = {
                 make_output_param(gather_out),
                 make_input_param(win_src_t),
-                make_input_param(sync_after_barrier),
+                make_input_param(prev_gather_sync),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
@@ -166,15 +156,28 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 pto2_rt_submit_variant_task(rt, gather_variants, 2, PTO2_WORKER_VECTOR, params_gather, 8);
             }
 
-            // 2nd communication task: shares the same source window and strategy family.
-            // By default this is concurrent with main gather; serialize_dummy=1 forces
-            // dependency on gather_out for a debug fallback path.
-            Tensor dummy_dep = (serialize_dummy != 0) ? gather_out : sync_after_barrier;
+            if (iter != n_iter - 1) {
+                Tensor sync_after_gather = make_tensor(sync_shapes, 1, DataType::INT32);
+                PTOParam params_barrier[] = {
+                    make_input_param(barrier_t),
+                    make_scalar_param(device_ctx_ptr),
+                    make_scalar_param(static_cast<uint64_t>(n_ranks)),
+                    make_scalar_param(static_cast<uint64_t>(root)),
+                    make_input_param(gather_out),
+                    make_output_param(sync_after_gather),
+                };
+                pto2_rt_submit_task(rt, FUNC_COMM_BARRIER, PTO2_WORKER_VECTOR, params_barrier, 6);
+                prev_gather_sync = sync_after_gather;
+            }
+
+            // Submit dummy communication as a fully separate serial chain.
+            // With split vector queues enabled, runtime routes it to the
+            // dedicated dummy AIV lane instead of the gather lane.
             Tensor dummy_debug_out = make_tensor(debug_row_shapes, 1, DataType::INT32);
             PTOParam params_dummy[] = {
                 make_output_param(dummy_out),
                 make_input_param(win_src_t),
-                make_input_param(dummy_dep),
+                make_input_param(prev_dummy_sync),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
@@ -189,10 +192,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 int32_t dummy_variants[] = {FUNC_DUMMY_COMM_SYNC, FUNC_DUMMY_COMM_ASYNC};
                 pto2_rt_submit_variant_task(rt, dummy_variants, 2, PTO2_WORKER_VECTOR, params_dummy, 8);
             }
-
-            // Keep the next iteration behind dummy completion so the gather/dummy
-            // pair from this round is drained before the next barrier starts.
-            prev_iter_sync = dummy_out;
+            prev_dummy_sync = dummy_out;
         }
 
         if (rank_id == root) {
