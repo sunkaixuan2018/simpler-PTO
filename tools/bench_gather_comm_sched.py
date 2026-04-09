@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Batch benchmark for fake_kernel_comm_sched: gather operator performance.
+Batch benchmark for fake_kernel_comm_sched-family communication kernels.
 
-Tests MTE (sync TGATHER) and SDMA (async TGET_ASYNC) strategies across
-multiple total communication sizes on 4 cards.
+Tests MTE and SDMA strategies across multiple total communication sizes on
+4 cards. Depending on the selected case, the foreground flow may be a
+collective gather or an explicit remote load/store pipeline.
 
 Each invocation runs N_ITER=200 gather pipelines back-to-back. The first
 N_WARMUP=100 are discarded; the remaining measured window is averaged after
@@ -82,6 +83,8 @@ _ONE_AICORE_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore
 _ONE_AICORE_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore" / "golden.py"
 _ONE_AICORE_NODUMMY_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore_nodummy" / "kernels"
 _ONE_AICORE_NODUMMY_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_one_aicore_nodummy" / "golden.py"
+_TRUELOAD_KERNELS_DIR = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload" / "kernels"
+_TRUELOAD_GOLDEN_PATH = _BASE_EXAMPLE_DIR / "fake_kernel_comm_sched_trueload" / "golden.py"
 _RUNNER       = _PROJECT_ROOT / "examples" / "scripts" / "multi_card_run_example.py"
 _SWIMLANE_CONVERTER = _PROJECT_ROOT / "tools" / "swimlane_converter.py"
 
@@ -89,6 +92,32 @@ _SWIMLANE_CONVERTER = _PROJECT_ROOT / "tools" / "swimlane_converter.py"
 def _gather_count_for(total_bytes: int, n_ranks: int) -> int:
     """Elements per rank for a given total comm volume (float32)."""
     return total_bytes // (n_ranks * 4)
+
+
+def _main_kernel_name(func_id: int, case_mode: str) -> str:
+    """Map profiled func_id to the foreground kernel name for the current case."""
+    if case_mode == "trueload":
+        return "TrueLoadSync" if func_id == FUNC_ID_GATHER_SYNC else "TrueLoadAsync"
+    return "GatherSync" if func_id == FUNC_ID_GATHER_SYNC else "GatherAsync"
+
+
+def _main_kernel_tag(func_id: int, case_mode: str) -> str:
+    """User-facing foreground kernel tag with transport hint."""
+    suffix = "MTE" if func_id == FUNC_ID_GATHER_SYNC else "SDMA"
+    return f"{_main_kernel_name(func_id, case_mode)}->{suffix}"
+
+
+def _poll_counts_prefix(case_mode: str) -> str:
+    """Return the poll-count JSON prefix used by the selected case."""
+    if case_mode == "extreme":
+        return "poll_counts_extreme"
+    if case_mode == "one_aicore":
+        return "poll_counts_one_aicore"
+    if case_mode == "one_aicore_nodummy":
+        return "poll_counts_one_aicore_nodummy"
+    if case_mode == "trueload":
+        return "poll_counts_trueload"
+    return "poll_counts"
 
 
 # ---------------------------------------------------------------------------
@@ -407,7 +436,7 @@ def _extract_failure_summary(stdout: str | None, stderr: str | None, max_lines: 
     return " | ".join(compact)
 
 
-def _parse_gather_stats(perf_file: Path, trim_ratio: float) -> dict | None:
+def _parse_gather_stats(perf_file: Path, trim_ratio: float, case_mode: str) -> dict | None:
     """
     Parse gather task stats from the raw perf JSON.
     Keep the last (N_ITER - N_WARMUP) gather samples by dispatch order, then
@@ -455,7 +484,7 @@ def _parse_gather_stats(perf_file: Path, trim_ratio: float) -> dict | None:
     # Determine which gather kernel was used (most frequent in measured window)
     func_ids = [t["func_id"] for t in measured]
     func_id  = max(set(func_ids), key=func_ids.count)
-    func_name = "GatherSync" if func_id == FUNC_ID_GATHER_SYNC else "GatherAsync"
+    func_name = _main_kernel_name(func_id, case_mode)
 
     return {
         "func_id":         func_id,
@@ -500,7 +529,7 @@ def run_case(
     env["N_ITER"]          = str(N_ITER)
     if case_mode == "extreme":
         env["GATHER_CASE"] = "extreme"
-    elif case_mode in ("one_aicore", "one_aicore_nodummy"):
+    elif case_mode in ("one_aicore", "one_aicore_nodummy", "trueload"):
         env["DUMMY_COMM_BYTES"] = str(dummy_comm_bytes)
         env["EXTREME_SERIALIZE_DUMMY"] = str(serialize_dummy)
         env["PROFILE_ROOT_ONLY"] = str(profile_root_only)
@@ -527,9 +556,9 @@ def run_case(
         "measured_samples": N_ITER - N_WARMUP,
         "trim_ratio":      trim_ratio,
         "case_mode":       case_mode,
-        "dummy_comm_bytes": dummy_comm_bytes if case_mode in ("one_aicore", "one_aicore_nodummy") else None,
-        "serialize_dummy": serialize_dummy if case_mode in ("one_aicore", "one_aicore_nodummy") else None,
-        "profile_root_only": profile_root_only if case_mode in ("one_aicore", "one_aicore_nodummy") else None,
+        "dummy_comm_bytes": dummy_comm_bytes if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
+        "serialize_dummy": serialize_dummy if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
+        "profile_root_only": profile_root_only if case_mode in ("one_aicore", "one_aicore_nodummy", "trueload") else None,
         "run_ok":          False,
         "attempts":        0,
         "last_error":      None,
@@ -622,7 +651,7 @@ def run_case(
     if not covered_ok:
         print("  WARN: swimlane conversion failed for this case")
 
-    stats = _parse_gather_stats(perf_file, trim_ratio=trim_ratio)
+    stats = _parse_gather_stats(perf_file, trim_ratio=trim_ratio, case_mode=case_mode)
 
     if stats:
         result.update({
@@ -633,13 +662,13 @@ def run_case(
             "avg_exec_us":     stats["avg_exec_us"],
             "avg_latency_us":  stats["avg_latency_us"],
         })
-        kernel_tag = "GatherSync→MTE" if stats["func_id"] == FUNC_ID_GATHER_SYNC else "GatherAsync→SDMA"
+        kernel_tag = _main_kernel_tag(stats["func_id"], case_mode)
         measured   = stats["measured_count"]
         trimmed    = stats["trimmed_count"]
         print(f"  exec={stats['avg_exec_us']:.1f}us  lat={stats['avg_latency_us']:.1f}us"
               f"  [n={measured}, trimmed={trimmed}]  [{kernel_tag}]")
     else:
-        print("  WARN: gather stats not found in perf JSON")
+        print("  WARN: foreground kernel stats not found in perf JSON")
         if verbose:
             print(f"  (perf file: {perf_file})")
 
@@ -690,7 +719,7 @@ def print_summary(results: list[dict]) -> None:
         trim_ratio = TRIM_RATIO_DEFAULT
     measured = n_iter - warmup
     print(
-        "Gather Performance Summary  "
+        "Foreground Kernel Performance Summary  "
         f"(avg of last {measured} / {n_iter} iterations, trim={trim_ratio * 100:.1f}% each tail)"
     )
     print("=" * len(header))
@@ -701,10 +730,7 @@ def print_summary(results: list[dict]) -> None:
         exec_str = f"{r['avg_exec_us']:.2f}" if r["avg_exec_us"] is not None else "N/A"
         lat_str  = f"{r['avg_latency_us']:.2f}" if r["avg_latency_us"] is not None else "N/A"
         if r["func_name"]:
-            kernel_tag = (
-                f"{r['func_name']} (→MTE)"  if r["func_id"] == FUNC_ID_GATHER_SYNC
-                else f"{r['func_name']} (→SDMA)"
-            )
+            kernel_tag = _main_kernel_tag(r["func_id"], r.get("case_mode", "normal"))
         else:
             kernel_tag = "FAILED" if not r["run_ok"] else "N/A"
 
@@ -740,15 +766,9 @@ def print_wait_status_stats(results: list[dict]) -> None:
 
     for r in sdma_results:
         case_mode = r.get("case_mode", "normal")
-        if case_mode == "extreme":
-            prefix = "poll_counts_extreme"
-        elif case_mode == "one_aicore":
-            prefix = "poll_counts_one_aicore"
-        elif case_mode == "one_aicore_nodummy":
-            prefix = "poll_counts_one_aicore_nodummy"
-        else:
-            prefix = "poll_counts"
-        fname = _OUTPUTS_DIR / f"{prefix}_sdma_gc{r['gather_count']}_r{r['n_ranks']}.json"
+        prefix = _poll_counts_prefix(case_mode)
+        strategy_name = r.get("strategy", "sdma")
+        fname = _OUTPUTS_DIR / f"{prefix}_{strategy_name}_gc{r['gather_count']}_r{r['n_ranks']}.json"
         if not fname.exists():
             print(f"  {r['size']:5s}  (no poll data)")
             continue
@@ -799,7 +819,7 @@ def save_csv(results: list[dict], out_path: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Batch benchmark: fake_kernel_comm_sched gather performance",
+        description="Batch benchmark: fake_kernel_comm_sched-family foreground communication performance",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -824,28 +844,28 @@ Examples:
     parser.add_argument(
         "--case",
         default="normal",
-        choices=["normal", "extreme", "one_aicore", "one_aicore_nodummy"],
+        choices=["normal", "extreme", "one_aicore", "one_aicore_nodummy", "trueload"],
         help="Benchmark case variant (default: normal)",
     )
     parser.add_argument(
         "--dummy-comm-bytes",
         type=int,
         default=16 * 1024 * 1024,
-        help="Dummy comm target bytes for one_aicore case (default: 16777216 = 16MB)",
+        help="Dummy comm target bytes for one_aicore/trueload cases (default: 16777216 = 16MB)",
     )
     parser.add_argument(
         "--serialize-dummy",
         type=int,
         default=0,
         choices=[0, 1],
-        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore case (default: 0)",
+        help="Set EXTREME_SERIALIZE_DUMMY for one_aicore/trueload cases (default: 0)",
     )
     parser.add_argument(
         "--profile-root-only",
         type=int,
         default=1,
         choices=[0, 1],
-        help="Set PROFILE_ROOT_ONLY for one_aicore case (default: 1)",
+        help="Set PROFILE_ROOT_ONLY for one_aicore/trueload cases (default: 1)",
     )
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="Show subprocess output")
@@ -884,11 +904,15 @@ Examples:
         case_name = "fake_kernel_comm_sched_one_aicore_nodummy"
         kernels_dir = _ONE_AICORE_NODUMMY_KERNELS_DIR
         golden_path = _ONE_AICORE_NODUMMY_GOLDEN_PATH
+    elif args.case == "trueload":
+        case_name = "fake_kernel_comm_sched_trueload"
+        kernels_dir = _TRUELOAD_KERNELS_DIR
+        golden_path = _TRUELOAD_GOLDEN_PATH
     else:
         case_name = "fake_kernel_comm_sched"
         kernels_dir = _NORMAL_KERNELS_DIR
         golden_path = _NORMAL_GOLDEN_PATH
-    print(f"Benchmark: {case_name} gather")
+    print(f"Benchmark: {case_name}")
     print(f"  platform={args.platform}  first_device={args.first_device}  n_devices={args.n_devices}")
     print(f"  strategies={args.strategies}")
     print(f"  sizes={args.sizes}")
@@ -896,7 +920,7 @@ Examples:
         f"  iterations per case: {N_ITER} total, {N_WARMUP} warm-up, "
         f"{N_ITER - N_WARMUP} measured, trim={args.trim_ratio * 100:.1f}% per tail"
     )
-    if args.case in ("one_aicore", "one_aicore_nodummy"):
+    if args.case in ("one_aicore", "one_aicore_nodummy", "trueload"):
         print(
             f"  one_aicore-family extras: dummy_comm_bytes={args.dummy_comm_bytes}, "
             f"serialize_dummy={args.serialize_dummy}, profile_root_only={args.profile_root_only}"
