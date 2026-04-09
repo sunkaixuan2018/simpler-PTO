@@ -105,19 +105,25 @@ All modes are controlled by `PTO_SDMA_PREFETCH_MODE`:
 Example: run a small workload on real hardware (skip golden for benchmarking):
 
 ```bash
+# Recommended on machines without Git SSH keys (PTO-ISA is auto-cloned on first run):
+#   --clone-protocol https
+#
+# If you don't have pre-built runtime binaries yet, add:
+#   --build
+#
 # Baseline
 PTO_SDMA_PREFETCH_MODE=baseline \
 python examples/scripts/run_example.py \
   -k examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels \
   -g examples/a2a3/tensormap_and_ringbuffer/vector_example/golden.py \
-  -p a2a3 -d 0 --skip-golden
+  -p a2a3 -d 0 --skip-golden --clone-protocol https --build
 
 # SDMA prefetch
 PTO_SDMA_PREFETCH_MODE=sdma \
 python examples/scripts/run_example.py \
   -k examples/a2a3/tensormap_and_ringbuffer/vector_example/kernels \
   -g examples/a2a3/tensormap_and_ringbuffer/vector_example/golden.py \
-  -p a2a3 -d 0 --skip-golden
+  -p a2a3 -d 0 --skip-golden --clone-protocol https --build
 ```
 
 ## Documentation
