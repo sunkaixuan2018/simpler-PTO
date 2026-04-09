@@ -30,6 +30,7 @@ KERNELS = [
     {"func_id": 4, "name": "CommBarrier",      "source": str(_BASE_CASE_ROOT / "aiv" / "comm_barrier_kernel.cpp"), "core_type": "aiv"},
     {"func_id": 5, "name": "DummyCommSync",    "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
     {"func_id": 6, "name": "DummyCommAsync",   "source": str(_EXTREME_AIV_ROOT / "dummy_remote_read_kernel.cpp"), "core_type": "aiv"},
+    {"func_id": 7, "name": "DummyWindowFill",  "source": str(_EXTREME_AIV_ROOT / "dummy_window_fill_kernel.cpp"), "core_type": "aiv"},
 ]
 
 RUNTIME_CONFIG = {

@@ -13,6 +13,7 @@
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 constexpr int DEFAULT_N_ITER = 200;
 constexpr uint64_t DUMMY_COMM_BYTES_DEFAULT = 16 * 1024 * 1024;
+constexpr uint64_t DUMMY_SOURCE_BYTES = 1 * 1024 * 1024;
 constexpr uint64_t DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024;
 constexpr uint64_t DUMMY_PINGPONG_BUFFER_BYTES = 2 * DUMMY_PINGPONG_BYTES;
 
@@ -23,6 +24,7 @@ constexpr uint64_t DUMMY_PINGPONG_BUFFER_BYTES = 2 * DUMMY_PINGPONG_BYTES;
 #define FUNC_COMM_BARRIER    4
 #define FUNC_DUMMY_COMM_SYNC 5
 #define FUNC_DUMMY_COMM_ASYNC 6
+#define FUNC_DUMMY_WINDOW_FILL 7
 
 extern "C" {
 
@@ -61,19 +63,21 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t dummy_buffer_elems = DUMMY_PINGPONG_BUFFER_BYTES / sizeof(float);
 
     LOG_INFO(rt,
-             "trueload: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d dummy_comm_bytes=%llu dummy_pingpong_bytes=%llu",
+             "trueload: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d dummy_comm_bytes=%llu dummy_source_bytes=%llu dummy_pingpong_bytes=%llu",
              strategy,
              gather_count,
              n_ranks,
              rank_id,
              n_iter,
              static_cast<unsigned long long>(dummy_comm_bytes),
+             static_cast<unsigned long long>(DUMMY_SOURCE_BYTES),
              static_cast<unsigned long long>(DUMMY_PINGPONG_BYTES));
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
     uint64_t win_src = barrier_base + barrier_size;
     uint64_t win_dst = win_src + static_cast<uint64_t>(gather_count) * sizeof(float);
+    uint64_t win_dummy_src = win_dst + static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count) * sizeof(float);
 
     uint64_t src_shapes[1] = {static_cast<uint64_t>(gather_count)};
     uint64_t dst_shapes[1] = {static_cast<uint64_t>(n_ranks) * static_cast<uint64_t>(gather_count)};
@@ -81,12 +85,14 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t sync_shapes[1] = {1};
     uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(n_iter) * static_cast<uint64_t>(n_ranks)};
     uint64_t debug_row_shapes[1] = {static_cast<uint64_t>(n_ranks)};
+    uint64_t dummy_src_shapes[1] = {DUMMY_SOURCE_BYTES / sizeof(float)};
     uint64_t dummy_shapes[1] = {dummy_buffer_elems};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
     Tensor dev_out_t = make_tensor_external(dev_out, dst_shapes, 1, DataType::FLOAT32);
     Tensor win_src_t = make_tensor_external(reinterpret_cast<void*>(win_src), src_shapes, 1, DataType::FLOAT32);
     Tensor win_dst_t = make_tensor_external(reinterpret_cast<void*>(win_dst), dst_shapes, 1, DataType::FLOAT32);
+    Tensor dummy_src_t = make_tensor_external(reinterpret_cast<void*>(win_dummy_src), dummy_src_shapes, 1, DataType::FLOAT32);
 
     Tensor dev_debug_t;
     if (dev_debug != nullptr) {
@@ -118,8 +124,16 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
         };
         pto2_rt_submit_task(rt, FUNC_WIN_MEMCOPY_IN, PTO2_WORKER_VECTOR, params_wmin_once, 4);
 
+        PTOParam params_dummy_fill[] = {
+            make_output_param(dummy_src_t),
+            make_input_param(dev_src_t),
+            make_scalar_param(dummy_src_shapes[0]),
+            make_input_param(sync_t0),
+        };
+        pto2_rt_submit_task(rt, FUNC_DUMMY_WINDOW_FILL, PTO2_WORKER_VECTOR, params_dummy_fill, 4);
+
         Tensor prev_main_sync = win_src_t;
-        Tensor prev_dummy_sync = win_src_t;
+        Tensor prev_dummy_sync = dummy_src_t;
 
         for (int iter = 0; iter < n_iter; ++iter) {
             Tensor main_out = (rank_id == root && iter == n_iter - 1)
@@ -171,7 +185,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             Tensor dummy_debug_out = make_tensor(debug_row_shapes, 1, DataType::INT32);
             PTOParam params_dummy[] = {
                 make_output_param(dummy_out),
-                make_input_param(win_src_t),
+                make_input_param(dummy_src_t),
                 make_input_param(prev_dummy_sync),
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
