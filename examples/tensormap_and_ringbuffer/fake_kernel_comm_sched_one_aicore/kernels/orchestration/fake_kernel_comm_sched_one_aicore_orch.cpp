@@ -12,6 +12,8 @@
 
 constexpr size_t HCCL_WIN_SYNC_PREFIX = 64 * sizeof(int32_t);
 constexpr int DEFAULT_N_ITER = 200;
+constexpr uint64_t DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024;
+constexpr uint64_t DUMMY_PINGPONG_BUFFER_BYTES = 2 * DUMMY_PINGPONG_BYTES;
 
 #define FUNC_WIN_MEMCOPY_IN  0
 #define FUNC_GATHER_SYNC     1
@@ -50,14 +52,22 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     void* dev_debug = (arg_count > 12) ? reinterpret_cast<void*>(args[12]) : nullptr;
     int n_iter = (arg_count > 13) ? static_cast<int>(args[13]) : DEFAULT_N_ITER;
     int serialize_dummy = (arg_count > 14) ? static_cast<int>(args[14]) : 0;
-    int dummy_comm_scale = (arg_count > 15) ? static_cast<int>(args[15]) : 10;
+    uint64_t dummy_comm_bytes = (arg_count > 15) ? args[15] : (2 * 1024 * 1024ULL);
     if (n_iter <= 0) n_iter = DEFAULT_N_ITER;
-    if (dummy_comm_scale <= 0) dummy_comm_scale = 1;
 
     int gather_count = static_cast<int>(size_src / static_cast<int64_t>(sizeof(float)));
+    uint64_t dummy_buffer_elems = DUMMY_PINGPONG_BUFFER_BYTES / sizeof(float);
 
-    LOG_INFO(rt, "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_comm_scale=%d",
-             strategy, gather_count, n_ranks, rank_id, n_iter, serialize_dummy, dummy_comm_scale);
+    LOG_INFO(rt,
+             "one_aicore: strategy=%d gather_count=%d n_ranks=%d rank=%d n_iter=%d serialize_dummy=%d dummy_comm_bytes=%llu dummy_pingpong_bytes=%llu",
+             strategy,
+             gather_count,
+             n_ranks,
+             rank_id,
+             n_iter,
+             serialize_dummy,
+             static_cast<unsigned long long>(dummy_comm_bytes),
+             static_cast<unsigned long long>(DUMMY_PINGPONG_BYTES));
 
     size_t barrier_size = static_cast<size_t>(n_ranks) * sizeof(int32_t);
     uint64_t barrier_base = win_in_base + HCCL_WIN_SYNC_PREFIX;
@@ -70,6 +80,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
     uint64_t sync_shapes[1] = {1};
     uint64_t debug_all_shapes[1] = {static_cast<uint64_t>(n_iter) * static_cast<uint64_t>(n_ranks)};
     uint64_t debug_row_shapes[1] = {static_cast<uint64_t>(n_ranks)};
+    uint64_t dummy_shapes[1] = {dummy_buffer_elems};
 
     Tensor dev_src_t = make_tensor_external(dev_src, src_shapes, 1, DataType::FLOAT32);
     Tensor dev_out_t = make_tensor_external(dev_out, dst_shapes, 1, DataType::FLOAT32);
@@ -126,7 +137,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
             Tensor gather_out = (rank_id == root && iter == n_iter - 1)
                 ? win_dst_t
                 : make_tensor(dst_shapes, 1, DataType::FLOAT32);
-            Tensor dummy_out = make_tensor(dst_shapes, 1, DataType::FLOAT32);
+            Tensor dummy_out = make_tensor(dummy_shapes, 1, DataType::FLOAT32);
 
             void* iter_debug_ptr = (rank_id == root && dev_debug != nullptr)
                 ? reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(dev_debug)
@@ -167,7 +178,7 @@ void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
                 make_scalar_param(device_ctx_ptr),
                 make_scalar_param(static_cast<uint64_t>(n_ranks)),
                 make_scalar_param(static_cast<uint64_t>(root)),
-                make_scalar_param(static_cast<uint64_t>(dummy_comm_scale)),
+                make_scalar_param(dummy_comm_bytes),
                 make_output_param(dummy_debug_out),
             };
             if (strategy == 1) {

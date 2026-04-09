@@ -17,7 +17,8 @@
  *   args[3] = device_ctx_ptr (scalar)
  *   args[4] = nranks (scalar)
  *   args[5] = root (scalar)
- *   args[6] = dummy_comm_scale (scalar, repeat factor; backward-compatible)
+ *   args[6] = dummy_comm_bytes (scalar, total target bytes; large legacy values
+ *             still fall back to the default 2MB traffic)
  *   args[7] = debug_poll_counts (TensorData*, unused)
  */
 
@@ -39,17 +40,20 @@ using namespace pto;
 #define __aicore__ [aicore]
 #endif
 
-// Use 64KB chunks so two UB staging tiles fit comfortably for ping-pong MTE copy.
-static constexpr size_t DUMMY_CHUNK = 128 * 128;
-static constexpr int DUMMY_REPEAT_DEFAULT = 4;
-static constexpr int DUMMY_REPEAT_MAX = 4096;
-static constexpr uint64_t DUMMY_PING_TILE_ADDR = 0x0;
-static constexpr uint64_t DUMMY_PONG_TILE_ADDR = DUMMY_CHUNK * sizeof(float);
+// Use 64KB UB staging tiles for the MTE pipeline, but expose a larger
+// logical communication pattern: 1MB ping + 1MB pong = 2MB total traffic.
+static constexpr size_t DUMMY_STAGE_CHUNK = 128 * 128;
+static constexpr size_t DUMMY_PINGPONG_BYTES = 1 * 1024 * 1024;
+static constexpr size_t DUMMY_PINGPONG_ELEMS = DUMMY_PINGPONG_BYTES / sizeof(float);
+static constexpr uint64_t DUMMY_TOTAL_BYTES_DEFAULT = 2 * 1024 * 1024;
+static constexpr uint64_t DUMMY_TOTAL_BYTES_MAX = 64 * 1024 * 1024;
+static constexpr uint64_t DUMMY_STAGE_PING_TILE_ADDR = 0x0;
+static constexpr uint64_t DUMMY_STAGE_PONG_TILE_ADDR = DUMMY_STAGE_CHUNK * sizeof(float);
 
 using ShapeDyn = pto::Shape<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
 using StrideDyn = pto::Stride<pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC, pto::DYNAMIC>;
 using Global = pto::GlobalTensor<float, ShapeDyn, StrideDyn, pto::Layout::ND>;
-using TileData = pto::Tile<pto::TileType::Vec, float, 1, DUMMY_CHUNK, pto::BLayout::RowMajor, -1, -1>;
+using TileData = pto::Tile<pto::TileType::Vec, float, 1, DUMMY_STAGE_CHUNK, pto::BLayout::RowMajor, -1, -1>;
 
 __aicore__ __attribute__((always_inline)) inline event_t GetDummyEvent(int slot)
 {
@@ -58,7 +62,7 @@ __aicore__ __attribute__((always_inline)) inline event_t GetDummyEvent(int slot)
 
 __aicore__ __attribute__((always_inline)) inline uint64_t GetDummyTileAddr(int slot)
 {
-    return (slot == 0) ? DUMMY_PING_TILE_ADDR : DUMMY_PONG_TILE_ADDR;
+    return (slot == 0) ? DUMMY_STAGE_PING_TILE_ADDR : DUMMY_STAGE_PONG_TILE_ADDR;
 }
 
 __aicore__ __attribute__((always_inline)) inline void DummyLoadChunk(__gm__ float *remote_src, size_t off,
@@ -90,6 +94,49 @@ __aicore__ __attribute__((always_inline)) inline void DummyStoreChunk(__gm__ flo
     set_flag(PIPE_MTE3, PIPE_MTE2, GetDummyEvent(slot));
 }
 
+__aicore__ __attribute__((always_inline)) inline void CopySpanPingPong(__gm__ float *local_dst,
+                                                                       __gm__ float *remote_src,
+                                                                       size_t elem_count)
+{
+    if (elem_count == 0) {
+        return;
+    }
+
+    int pending_slot = -1;
+    size_t pending_off = 0;
+    size_t pending_chunk = 0;
+    int next_slot = 0;
+
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
+
+    for (size_t off = 0; off < elem_count; off += DUMMY_STAGE_CHUNK) {
+        size_t chunk = elem_count - off;
+        if (chunk > DUMMY_STAGE_CHUNK) {
+            chunk = DUMMY_STAGE_CHUNK;
+        }
+
+        wait_flag(PIPE_MTE3, PIPE_MTE2, GetDummyEvent(next_slot));
+        DummyLoadChunk(remote_src, off, chunk, next_slot);
+
+        if (pending_slot >= 0) {
+            DummyStoreChunk(local_dst, pending_off, pending_chunk, pending_slot);
+        }
+
+        pending_slot = next_slot;
+        pending_off = off;
+        pending_chunk = chunk;
+        next_slot ^= 1;
+    }
+
+    if (pending_slot >= 0) {
+        DummyStoreChunk(local_dst, pending_off, pending_chunk, pending_slot);
+    }
+
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
+    wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
+}
+
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ TensorData* dst_td = reinterpret_cast<__gm__ TensorData*>(args[0]);
     __gm__ TensorData* src_td = reinterpret_cast<__gm__ TensorData*>(args[1]);
@@ -97,15 +144,14 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ HcclDeviceContext* hcclCtx = reinterpret_cast<__gm__ HcclDeviceContext*>(args[3]);
     int nranks = static_cast<int>(args[4]);
     int root = static_cast<int>(args[5]);
-    uint64_t scale_raw = static_cast<uint64_t>(args[6]);
+    uint64_t dummy_comm_bytes = static_cast<uint64_t>(args[6]);
     (void)args[7];
 
-    int dummy_repeat = static_cast<int>(scale_raw);
     // Backward compatibility:
-    // - old callers pass sdma_workspace_ptr here (large address), treat as default.
-    // - invalid/zero values also fall back to default.
-    if (dummy_repeat <= 0 || dummy_repeat > DUMMY_REPEAT_MAX) {
-        dummy_repeat = DUMMY_REPEAT_DEFAULT;
+    // - old callers may still pass sdma_workspace_ptr here (large address).
+    // - invalid/zero values also fall back to the default 2MB traffic budget.
+    if (dummy_comm_bytes == 0 || dummy_comm_bytes > DUMMY_TOTAL_BYTES_MAX) {
+        dummy_comm_bytes = DUMMY_TOTAL_BYTES_DEFAULT;
     }
 
     int my_rank = static_cast<int>(hcclCtx->rankId);
@@ -117,45 +163,55 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     __gm__ float* dst = reinterpret_cast<__gm__ float*>(dst_td->buffer.addr);
     __gm__ float* src = reinterpret_cast<__gm__ float*>(src_td->buffer.addr);
 
-    size_t gather_count = src_td->buffer.size / sizeof(float);
+    size_t src_count = src_td->buffer.size / sizeof(float);
+    size_t dst_count = dst_td->buffer.size / sizeof(float);
     int actual_nranks = (nranks > 16) ? 16 : nranks;
+    if (src_count == 0 || dst_count == 0 || actual_nranks <= 0) {
+        pipe_barrier(PIPE_ALL);
+        return;
+    }
 
-    for (int rep = 0; rep < dummy_repeat; ++rep) {
-        for (int r = 0; r < actual_nranks; ++r) {
-            __gm__ float* remote_src = HcclRemotePtr(hcclCtx, src, r);
-            __gm__ float* local_dst = dst + static_cast<ptrdiff_t>(r) * gather_count;
-            int pending_slot = -1;
-            size_t pending_off = 0;
-            size_t pending_chunk = 0;
-            int next_slot = 0;
+    size_t total_count = static_cast<size_t>((dummy_comm_bytes + sizeof(float) - 1) / sizeof(float));
+    size_t region_count = DUMMY_PINGPONG_ELEMS;
+    size_t half_dst_count = dst_count / 2;
+    if (half_dst_count > 0 && region_count > half_dst_count) {
+        region_count = half_dst_count;
+    } else if (half_dst_count == 0 && region_count > dst_count) {
+        region_count = dst_count;
+    }
+    if (region_count == 0) {
+        pipe_barrier(PIPE_ALL);
+        return;
+    }
 
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            set_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
+    bool has_two_regions = dst_count >= (2 * region_count);
+    size_t remaining = total_count;
+    size_t rank_cursor = 0;
+    size_t region_cursor = 0;
 
-            for (size_t off = 0; off < gather_count; off += DUMMY_CHUNK) {
-                size_t chunk = gather_count - off;
-                if (chunk > DUMMY_CHUNK) chunk = DUMMY_CHUNK;
-
-                wait_flag(PIPE_MTE3, PIPE_MTE2, GetDummyEvent(next_slot));
-                DummyLoadChunk(remote_src, off, chunk, next_slot);
-
-                if (pending_slot >= 0) {
-                    DummyStoreChunk(local_dst, pending_off, pending_chunk, pending_slot);
-                }
-
-                pending_slot = next_slot;
-                pending_off = off;
-                pending_chunk = chunk;
-                next_slot ^= 1;
-            }
-
-            if (pending_slot >= 0) {
-                DummyStoreChunk(local_dst, pending_off, pending_chunk, pending_slot);
-            }
-
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID0);
-            wait_flag(PIPE_MTE3, PIPE_MTE2, EVENT_ID1);
+    while (remaining > 0) {
+        size_t region_base = (has_two_regions && ((region_cursor & 1) != 0)) ? region_count : 0;
+        size_t region_target = remaining;
+        if (region_target > region_count) {
+            region_target = region_count;
         }
+
+        size_t region_written = 0;
+        while (region_written < region_target) {
+            int rank = static_cast<int>(rank_cursor % static_cast<size_t>(actual_nranks));
+            __gm__ float* remote_src = HcclRemotePtr(hcclCtx, src, rank);
+            size_t copy_count = region_target - region_written;
+            if (copy_count > src_count) {
+                copy_count = src_count;
+            }
+
+            CopySpanPingPong(dst + region_base + region_written, remote_src, copy_count);
+            region_written += copy_count;
+            ++rank_cursor;
+        }
+
+        remaining -= region_target;
+        ++region_cursor;
     }
 
     pipe_barrier(PIPE_ALL);

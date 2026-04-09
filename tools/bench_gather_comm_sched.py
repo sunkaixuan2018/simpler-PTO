@@ -830,8 +830,8 @@ Examples:
     parser.add_argument(
         "--dummy-comm-bytes",
         type=int,
-        default=512 * 1024,
-        help="Dummy comm target bytes for one_aicore case (default: 524288 = 512KB)",
+        default=2 * 1024 * 1024,
+        help="Dummy comm target bytes for one_aicore case (default: 2097152 = 2MB)",
     )
     parser.add_argument(
         "--serialize-dummy",
