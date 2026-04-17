@@ -452,6 +452,7 @@ struct AicpuExecutor {
     std::atomic<bool> pto2_init_done_{false};
     std::atomic<bool> runtime_init_ready_{false};
     std::atomic<bool> pto2_init_complete_{false};  // init block finished; others wait for this
+    std::atomic<bool> demo_share_mem_updated_{false};
 
     // ===== Dynamic core transition state =====
     std::atomic<bool> transition_requested_{false};
@@ -1713,8 +1714,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
             dump_tensor_init(orch_to_sched_ ? thread_num_ : sched_thread_num_);
         }
 #endif
-        maybe_update_demo_share_mem(runtime);
-
         DEV_INFO("Thread %d: one-time init done", thread_idx);
         pto2_init_complete_.store(true, std::memory_order_release);
     } else {
@@ -2760,6 +2759,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 SPIN_WAIT_HINT();
             }
         }
+        if (!demo_share_mem_updated_.exchange(true, std::memory_order_acq_rel)) {
+            maybe_update_demo_share_mem(runtime);
+        }
         always_assert(rt != nullptr);
         int32_t completed = resolve_and_dispatch_pto2(runtime, thread_idx);
         DEV_INFO("Thread %d: Executed %d tasks from runtime", thread_idx, completed);
@@ -2822,6 +2824,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     pto2_init_done_.store(false, std::memory_order_release);
     pto2_init_complete_.store(false, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
+    demo_share_mem_updated_.store(false, std::memory_order_release);
 
     // Reset core transition state
     transition_requested_.store(false, std::memory_order_release);
