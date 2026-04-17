@@ -31,5 +31,13 @@
 constexpr int32_t kWordCount = 16;
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
-    (void)args;
+    __gm__ Tensor *mapped_host_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
+    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ uint64_t *mapped_host =
+        reinterpret_cast<__gm__ uint64_t *>(mapped_host_tensor->buffer.addr) + mapped_host_tensor->start_offset;
+    __gm__ uint64_t *out = reinterpret_cast<__gm__ uint64_t *>(out_tensor->buffer.addr) + out_tensor->start_offset;
+
+    for (int32_t i = 0; i < kWordCount; ++i) {
+        out[i] = mapped_host[i];
+    }
 }
