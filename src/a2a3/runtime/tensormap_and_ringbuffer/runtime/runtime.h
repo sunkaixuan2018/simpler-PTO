@@ -187,6 +187,14 @@ public:
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
 
 private:
+    // Host/device mapped shared memory for the AICPU scheduler demo.
+    uint32_t share_mem_device_id_;
+    void *share_mem_host_ptr_;
+    void *share_mem_dev_ptr_;
+    uint64_t share_mem_size_bytes_;
+    uint64_t share_mem_u64_count_;
+    bool share_mem_enabled_;
+
     // Tensor pairs for host-device memory tracking
     TensorPair tensor_pairs[RUNTIME_MAX_TENSOR_PAIRS];
     int tensor_pair_count;
@@ -272,6 +280,17 @@ public:
     int get_registered_kernel_count() const;
     int get_registered_kernel_func_id(int index) const;
     void clear_registered_kernels();
+
+    void set_share_mem_registration(
+        uint32_t device_id, void *host_ptr, void *dev_ptr, uint64_t size_bytes, uint64_t u64_count
+    );
+    void clear_share_mem_registration();
+    bool get_share_mem_enabled() const;
+    uint32_t get_share_mem_device_id() const;
+    void *get_share_mem_host_ptr() const;
+    void *get_share_mem_dev_ptr() const;
+    uint64_t get_share_mem_size_bytes() const;
+    uint64_t get_share_mem_u64_count() const;
 
     // =========================================================================
     // Deprecated API (for platform compatibility, always returns 0/nullptr)

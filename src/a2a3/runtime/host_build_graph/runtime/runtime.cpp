@@ -47,6 +47,12 @@ Runtime::Runtime() {
     sche_cpu_num = 1;
     enable_profiling = false;
     perf_data_base = 0;
+    share_mem_device_id_ = 0;
+    share_mem_host_ptr_ = nullptr;
+    share_mem_dev_ptr_ = nullptr;
+    share_mem_size_bytes_ = 0;
+    share_mem_u64_count_ = 0;
+    share_mem_enabled_ = false;
     tensor_pair_count = 0;
     tensor_info_storage_ = nullptr;
     tensor_info_storage_bytes_ = 0;

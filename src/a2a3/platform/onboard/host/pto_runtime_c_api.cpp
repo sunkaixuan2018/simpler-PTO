@@ -20,13 +20,193 @@
 #include "callable.h"
 #include "task_args.h"
 
+#include <algorithm>
+#include <cerrno>
+#include <cinttypes>
+#include <cstdlib>
+#include <cstring>
+#include <dlfcn.h>
+#include <initializer_list>
 #include <pthread.h>
+#include <sstream>
 #include <vector>
 
 #include "common/unified_log.h"
 #include "device_runner.h"
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
+
+namespace {
+
+using RtMallocHostFn = int (*)(void **, uint64_t, uint32_t);
+using RtFreeHostFn = int (*)(void *);
+using RtHostRegisterFn = int (*)(void *, uint64_t, uint32_t, void **);
+using RtHostUnregisterFn = int (*)(void *);
+using AclMallocHostFn = int (*)(void **, size_t);
+using AclFreeHostFn = int (*)(void *);
+using AclHostRegisterFn = int (*)(void *, uint64_t, uint32_t, void **);
+using AclHostUnregisterFn = int (*)(void *);
+using GetDeviceFn = int (*)(int32_t *);
+using DirectSetDeviceFn = int (*)(int32_t);
+
+constexpr const char *kDemoShareMemCountEnv = "PTO2_DEMO_SHARE_MEM_U64_COUNT";
+constexpr uint64_t kDemoShareMemPreviewCount = 16;
+
+template <typename Fn>
+Fn resolve_symbol(const char **resolved_name, std::initializer_list<const char *> names) {
+    for (const char *name : names) {
+        dlerror();
+        void *sym = dlsym(RTLD_DEFAULT, name);
+        const char *err = dlerror();
+        if (err == nullptr && sym != nullptr) {
+            if (resolved_name != nullptr) {
+                *resolved_name = name;
+            }
+            return reinterpret_cast<Fn>(sym);
+        }
+    }
+    if (resolved_name != nullptr) {
+        *resolved_name = nullptr;
+    }
+    return nullptr;
+}
+
+static constexpr uint32_t kHostRegisterMappedFlag =
+#if defined(RT_HOST_REGISTER_MAPPED)
+    RT_HOST_REGISTER_MAPPED;
+#elif defined(ACL_HOST_REGISTER_MAPPED)
+    ACL_HOST_REGISTER_MAPPED;
+#else
+    0U;
+#endif
+
+int ensure_current_device_for_share_mem(uint32_t device_id) {
+    const char *symbol_name = nullptr;
+    if (GetDeviceFn get_device_fn = resolve_symbol<GetDeviceFn>(&symbol_name, {"aclrtGetDevice", "rtGetDevice"})) {
+        int32_t current_device = -1;
+        int rc = get_device_fn(&current_device);
+        if (rc != 0) {
+            LOG_INFO(
+                "ensure_current_device_for_share_mem: %s failed rc=%d, trying to set device to %u",
+                symbol_name, rc, device_id
+            );
+            if (DirectSetDeviceFn set_device_fn =
+                    resolve_symbol<DirectSetDeviceFn>(&symbol_name, {"rtSetDevice", "aclrtSetDevice"})) {
+                rc = set_device_fn(static_cast<int32_t>(device_id));
+                if (rc != 0) {
+                    LOG_ERROR(
+                        "ensure_current_device_for_share_mem: %s(%u) failed: rc=%d", symbol_name, device_id, rc
+                    );
+                    return rc;
+                }
+                return 0;
+            }
+            LOG_ERROR("ensure_current_device_for_share_mem: missing symbols rtSetDevice / aclrtSetDevice");
+            return rc;
+        }
+
+        if (current_device != static_cast<int32_t>(device_id)) {
+            LOG_ERROR(
+                "ensure_current_device_for_share_mem: current device %d does not match requested device %u",
+                static_cast<int>(current_device), device_id
+            );
+            return -1;
+        }
+        return 0;
+    }
+
+    LOG_ERROR("ensure_current_device_for_share_mem: missing symbols aclrtGetDevice / rtGetDevice");
+    return -1;
+}
+
+uint64_t parse_demo_share_mem_u64_count() {
+    const char *env = std::getenv(kDemoShareMemCountEnv);
+    if (env == nullptr || env[0] == '\0') {
+        return 0;
+    }
+
+    char *endptr = nullptr;
+    errno = 0;
+    uint64_t count = strtoull(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0') {
+        LOG_WARN("%s=%s invalid, expected a positive integer", kDemoShareMemCountEnv, env);
+        return 0;
+    }
+
+    return count;
+}
+
+void log_demo_share_mem_preview(const char *label, const uint64_t *values, uint64_t count) {
+    if (values == nullptr || count == 0) {
+        return;
+    }
+
+    uint64_t preview_count = std::min(count, kDemoShareMemPreviewCount);
+    std::ostringstream os;
+    os << label << " first_" << preview_count << "=[";
+    for (uint64_t i = 0; i < preview_count; ++i) {
+        if (i != 0) {
+            os << ", ";
+        }
+        os << values[i];
+    }
+    os << "] total=" << count;
+    LOG_INFO("%s", os.str().c_str());
+}
+
+int setup_demo_share_mem(Runtime *runtime, int device_id) {
+    if (runtime == nullptr) {
+        return -1;
+    }
+
+    uint64_t word_count = parse_demo_share_mem_u64_count();
+    if (word_count == 0) {
+        runtime->clear_share_mem_registration();
+        return 0;
+    }
+
+    uint64_t size_bytes = word_count * sizeof(uint64_t);
+    void *host_ptr = nullptr;
+    void *dev_ptr = nullptr;
+    int rc = mallocHostDeviceShareMem(static_cast<uint32_t>(device_id), size_bytes, &host_ptr, &dev_ptr);
+    if (rc != 0) {
+        LOG_ERROR("host_register_mapped_demo: mallocHostDeviceShareMem failed rc=%d", rc);
+        return rc;
+    }
+
+    auto *host_words = static_cast<uint64_t *>(host_ptr);
+    for (uint64_t i = 0; i < word_count; ++i) {
+        host_words[i] = i;
+    }
+
+    runtime->set_share_mem_registration(static_cast<uint32_t>(device_id), host_ptr, dev_ptr, size_bytes, word_count);
+    log_demo_share_mem_preview("host_register_mapped_demo: host_init_data", host_words, word_count);
+    LOG_INFO(
+        "host_register_mapped_demo: host_ptr=%p mapped_dev_ptr=%p size=%" PRIu64, host_ptr, dev_ptr, size_bytes
+    );
+    return 0;
+}
+
+void release_demo_share_mem(Runtime *runtime) {
+    if (runtime == nullptr || !runtime->get_share_mem_enabled()) {
+        return;
+    }
+
+    log_demo_share_mem_preview(
+        "host_register_mapped_demo: host_data_after_run",
+        static_cast<const uint64_t *>(runtime->get_share_mem_host_ptr()), runtime->get_share_mem_u64_count()
+    );
+    int rc = freeHostDeviceShareMem(runtime->get_share_mem_device_id(), runtime->get_share_mem_host_ptr());
+    if (rc != 0) {
+        LOG_ERROR(
+            "host_register_mapped_demo: freeHostDeviceShareMem failed rc=%d host=%p", rc,
+            runtime->get_share_mem_host_ptr()
+        );
+    }
+    runtime->clear_share_mem_registration();
+}
+
+}  // namespace
 
 extern "C" {
 
@@ -119,6 +299,139 @@ int set_device(DeviceContextHandle ctx, int device_id) {
     return 0;
 }
 
+int mallocHostDeviceShareMem(uint32_t deviceId, uint64_t size, void **hostPtr, void **devPtr) {
+    if (hostPtr == NULL || devPtr == NULL || size == 0) {
+        return -1;
+    }
+
+    *hostPtr = nullptr;
+    *devPtr = nullptr;
+
+    int rc = ensure_current_device_for_share_mem(deviceId);
+    if (rc != 0) {
+        return rc;
+    }
+
+    void *allocated_host_ptr = nullptr;
+    const char *symbol_name = nullptr;
+    if (RtMallocHostFn malloc_fn = resolve_symbol<RtMallocHostFn>(&symbol_name, {"rtMallocHost"})) {
+        rc = malloc_fn(&allocated_host_ptr, size, 0U);
+        if (rc != 0 || allocated_host_ptr == nullptr) {
+            LOG_ERROR(
+                "mallocHostDeviceShareMem via %s failed on rtMallocHost: rc=%d size=%" PRIu64, symbol_name, rc, size
+            );
+            return (rc != 0) ? rc : -1;
+        }
+    } else if (AclMallocHostFn malloc_fn = resolve_symbol<AclMallocHostFn>(&symbol_name, {"aclrtMallocHost"})) {
+        rc = malloc_fn(&allocated_host_ptr, static_cast<size_t>(size));
+        if (rc != 0 || allocated_host_ptr == nullptr) {
+            LOG_ERROR(
+                "mallocHostDeviceShareMem via %s failed on aclrtMallocHost: rc=%d size=%" PRIu64, symbol_name, rc,
+                size
+            );
+            return (rc != 0) ? rc : -1;
+        }
+    } else {
+        LOG_ERROR("mallocHostDeviceShareMem: missing symbols rtMallocHost / aclrtMallocHost");
+        return -1;
+    }
+
+    if (RtHostRegisterFn register_fn =
+            resolve_symbol<RtHostRegisterFn>(&symbol_name, {"rtsHostRegister", "rtHostRegister"})) {
+        rc = register_fn(allocated_host_ptr, size, kHostRegisterMappedFlag, devPtr);
+        if (rc != 0 || *devPtr == nullptr) {
+            LOG_ERROR(
+                "mallocHostDeviceShareMem via %s failed on host register: rc=%d host=%p size=%" PRIu64 " flag=%u",
+                symbol_name, rc, allocated_host_ptr, size, kHostRegisterMappedFlag
+            );
+            if (RtFreeHostFn free_fn = resolve_symbol<RtFreeHostFn>(nullptr, {"rtFreeHost"})) {
+                free_fn(allocated_host_ptr);
+            } else if (AclFreeHostFn free_fn = resolve_symbol<AclFreeHostFn>(nullptr, {"aclrtFreeHost"})) {
+                free_fn(allocated_host_ptr);
+            }
+            return (rc != 0) ? rc : -1;
+        }
+    } else if (AclHostRegisterFn register_fn =
+                   resolve_symbol<AclHostRegisterFn>(&symbol_name, {"aclrtHostRegister"})) {
+        rc = register_fn(allocated_host_ptr, size, kHostRegisterMappedFlag, devPtr);
+        if (rc != 0 || *devPtr == nullptr) {
+            LOG_ERROR(
+                "mallocHostDeviceShareMem via %s failed on host register: rc=%d host=%p size=%" PRIu64 " flag=%u",
+                symbol_name, rc, allocated_host_ptr, size, kHostRegisterMappedFlag
+            );
+            if (RtFreeHostFn free_fn = resolve_symbol<RtFreeHostFn>(nullptr, {"rtFreeHost"})) {
+                free_fn(allocated_host_ptr);
+            } else if (AclFreeHostFn free_fn = resolve_symbol<AclFreeHostFn>(nullptr, {"aclrtFreeHost"})) {
+                free_fn(allocated_host_ptr);
+            }
+            return (rc != 0) ? rc : -1;
+        }
+    } else {
+        LOG_ERROR("mallocHostDeviceShareMem: missing symbols rtsHostRegister / rtHostRegister / aclrtHostRegister");
+        if (RtFreeHostFn free_fn = resolve_symbol<RtFreeHostFn>(nullptr, {"rtFreeHost"})) {
+            free_fn(allocated_host_ptr);
+        } else if (AclFreeHostFn free_fn = resolve_symbol<AclFreeHostFn>(nullptr, {"aclrtFreeHost"})) {
+            free_fn(allocated_host_ptr);
+        }
+        return -1;
+    }
+
+    *hostPtr = allocated_host_ptr;
+    LOG_INFO("mallocHostDeviceShareMem: device=%u host=%p dev=%p size=%" PRIu64, deviceId, *hostPtr, *devPtr, size);
+    return 0;
+}
+
+int freeHostDeviceShareMem(uint32_t deviceId, void *hostPtr) {
+    if (hostPtr == NULL) {
+        return 0;
+    }
+
+    int rc = ensure_current_device_for_share_mem(deviceId);
+    if (rc != 0) {
+        return rc;
+    }
+
+    const char *symbol_name = nullptr;
+    if (RtHostUnregisterFn unregister_fn =
+            resolve_symbol<RtHostUnregisterFn>(&symbol_name, {"rtsHostUnregister", "rtHostUnregister"})) {
+        rc = unregister_fn(hostPtr);
+        if (rc != 0) {
+            LOG_ERROR("freeHostDeviceShareMem via %s failed on unregister: rc=%d host=%p", symbol_name, rc, hostPtr);
+            return rc;
+        }
+    } else if (AclHostUnregisterFn unregister_fn =
+                   resolve_symbol<AclHostUnregisterFn>(&symbol_name, {"aclrtHostUnregister"})) {
+        rc = unregister_fn(hostPtr);
+        if (rc != 0) {
+            LOG_ERROR("freeHostDeviceShareMem via %s failed on unregister: rc=%d host=%p", symbol_name, rc, hostPtr);
+            return rc;
+        }
+    } else {
+        LOG_ERROR("freeHostDeviceShareMem: missing symbols rtsHostUnregister / rtHostUnregister / aclrtHostUnregister");
+        return -1;
+    }
+
+    if (RtFreeHostFn free_fn = resolve_symbol<RtFreeHostFn>(&symbol_name, {"rtFreeHost"})) {
+        rc = free_fn(hostPtr);
+        if (rc != 0) {
+            LOG_ERROR("freeHostDeviceShareMem via %s failed on free: rc=%d host=%p", symbol_name, rc, hostPtr);
+            return rc;
+        }
+    } else if (AclFreeHostFn free_fn = resolve_symbol<AclFreeHostFn>(&symbol_name, {"aclrtFreeHost"})) {
+        rc = free_fn(hostPtr);
+        if (rc != 0) {
+            LOG_ERROR("freeHostDeviceShareMem via %s failed on free: rc=%d host=%p", symbol_name, rc, hostPtr);
+            return rc;
+        }
+    } else {
+        LOG_ERROR("freeHostDeviceShareMem: missing symbols rtFreeHost / aclrtFreeHost");
+        return -1;
+    }
+
+    LOG_INFO("freeHostDeviceShareMem: device=%u host=%p", deviceId, hostPtr);
+    return 0;
+}
+
 int run_runtime(
     DeviceContextHandle ctx, RuntimeHandle runtime, const void *callable, const void *args, int block_dim,
     int aicpu_thread_num, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size, const uint8_t *aicore_binary,
@@ -149,6 +462,15 @@ int run_runtime(
         r->host_api.copy_from_device = copy_from_device;
         r->host_api.upload_kernel_binary = upload_kernel_binary_wrapper;
         r->host_api.remove_kernel_binary = remove_kernel_binary_wrapper;
+        auto demo_share_mem_guard = RAIIScopeGuard([r]() {
+            release_demo_share_mem(r);
+        });
+
+        rc = setup_demo_share_mem(r, device_id);
+        if (rc != 0) {
+            r->~Runtime();
+            return rc;
+        }
 
         LOG_DEBUG("About to call init_runtime_impl, r=%p", (void *)r);
         rc = init_runtime_impl(

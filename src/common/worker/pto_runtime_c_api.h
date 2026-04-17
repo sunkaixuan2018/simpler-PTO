@@ -59,6 +59,10 @@ size_t get_runtime_size(void);
 /** Set the target device. Must be called before the first run_runtime(). */
 int set_device(DeviceContextHandle ctx, int device_id);
 
+int mallocHostDeviceShareMem(uint32_t deviceId, uint64_t size, void **hostPtr, void **devPtr);
+
+int freeHostDeviceShareMem(uint32_t deviceId, void *hostPtr);
+
 /**
  * Build the task graph, execute on device, copy results back, and clean up.
  *

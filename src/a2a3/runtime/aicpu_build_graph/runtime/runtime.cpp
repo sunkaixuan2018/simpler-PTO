@@ -38,6 +38,12 @@ Runtime::Runtime() {
     pto2_heap_size = 0;
     pto2_dep_pool_size = 0;
     orch_to_sched = false;
+    share_mem_device_id_ = 0;
+    share_mem_host_ptr_ = nullptr;
+    share_mem_dev_ptr_ = nullptr;
+    share_mem_size_bytes_ = 0;
+    share_mem_u64_count_ = 0;
+    share_mem_enabled_ = false;
 
     // Initialize tensor pairs
     tensor_pair_count = 0;

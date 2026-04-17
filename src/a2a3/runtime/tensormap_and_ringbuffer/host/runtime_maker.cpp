@@ -184,6 +184,13 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     for (int i = 0; i < scalar_count; i++) {
         device_args.add_scalar(orch_args->scalar(i));
     }
+    if (runtime->get_share_mem_enabled() && runtime->get_share_mem_dev_ptr() != nullptr) {
+        device_args.add_scalar(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(runtime->get_share_mem_dev_ptr())));
+        LOG_INFO(
+            "RT2 init: appended mapped_dev_ptr=0x%" PRIx64 " from runtime-managed shared memory",
+            static_cast<uint64_t>(reinterpret_cast<uintptr_t>(runtime->get_share_mem_dev_ptr()))
+        );
+    }
     int64_t t_args_end = _now_ms();
 
     // Copy orchestration SO to device memory (AICPU cannot access host memory)
