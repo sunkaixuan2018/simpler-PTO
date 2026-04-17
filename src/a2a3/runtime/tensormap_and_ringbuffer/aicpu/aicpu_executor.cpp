@@ -109,23 +109,21 @@ static void maybe_update_demo_share_mem(Runtime *runtime) {
         return;
     }
 
-    cache_invalidate_range(mapped_ptr, size_bytes);
     rmb();
 
-    auto *words = static_cast<uint64_t *>(mapped_ptr);
+    volatile uint64_t *words = static_cast<volatile uint64_t *>(mapped_ptr);
     for (uint64_t i = 0; i < word_count; ++i) {
         words[i] += 1;
     }
 
     wmb();
-    cache_invalidate_range(mapped_ptr, size_bytes);
     DEV_INFO(
         "host_register_mapped_demo: scheduler updated shared memory dev=%p words=%" PRIu64 " first=%" PRIu64
         " last=%" PRIu64,
         mapped_ptr,
         word_count,
-        words[0],
-        words[word_count - 1]
+        static_cast<uint64_t>(words[0]),
+        static_cast<uint64_t>(words[word_count - 1])
     );
 }
 
