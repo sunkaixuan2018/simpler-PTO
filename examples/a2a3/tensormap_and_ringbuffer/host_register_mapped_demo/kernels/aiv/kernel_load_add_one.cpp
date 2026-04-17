@@ -14,6 +14,7 @@
  *
  * The scheduler updates the shared host/device buffer from 0..15 to 1..16.
  * This kernel only copies that result into a regular output tensor.
+ * No explicit dcci is used in this demo kernel.
  */
 
 #include <cstdint>
@@ -57,6 +58,7 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     TLOAD(src_tile, mapped_host_global);
     set_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
     wait_flag(PIPE_MTE2, PIPE_V, EVENT_ID0);
+    // Let the normal TSTORE path write the copied result back to GM.
     TSTORE(dst_global, src_tile);
     set_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
     wait_flag(PIPE_MTE3, PIPE_S, EVENT_ID7);
