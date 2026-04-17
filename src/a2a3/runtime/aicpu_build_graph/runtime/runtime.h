@@ -183,6 +183,14 @@ public:
     uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
 
 private:
+    // Host/device mapped shared memory registration shared with platform code.
+    uint32_t share_mem_device_id_;
+    void *share_mem_host_ptr_;
+    void *share_mem_dev_ptr_;
+    uint64_t share_mem_size_bytes_;
+    uint64_t share_mem_u64_count_;
+    bool share_mem_enabled_;
+
     // Tensor pairs for host-device memory tracking
     TensorPair tensor_pairs[RUNTIME_MAX_TENSOR_PAIRS];
     int tensor_pair_count;
@@ -262,6 +270,31 @@ public:
     int get_registered_kernel_count() const;
     int get_registered_kernel_func_id(int index) const;
     void clear_registered_kernels();
+
+    void set_share_mem_registration(
+        uint32_t device_id, void *host_ptr, void *dev_ptr, uint64_t size_bytes, uint64_t u64_count
+    ) {
+        share_mem_device_id_ = device_id;
+        share_mem_host_ptr_ = host_ptr;
+        share_mem_dev_ptr_ = dev_ptr;
+        share_mem_size_bytes_ = size_bytes;
+        share_mem_u64_count_ = u64_count;
+        share_mem_enabled_ = (host_ptr != nullptr && dev_ptr != nullptr && size_bytes != 0 && u64_count != 0);
+    }
+    void clear_share_mem_registration() {
+        share_mem_device_id_ = 0;
+        share_mem_host_ptr_ = nullptr;
+        share_mem_dev_ptr_ = nullptr;
+        share_mem_size_bytes_ = 0;
+        share_mem_u64_count_ = 0;
+        share_mem_enabled_ = false;
+    }
+    bool get_share_mem_enabled() const { return share_mem_enabled_; }
+    uint32_t get_share_mem_device_id() const { return share_mem_device_id_; }
+    void *get_share_mem_host_ptr() const { return share_mem_host_ptr_; }
+    void *get_share_mem_dev_ptr() const { return share_mem_dev_ptr_; }
+    uint64_t get_share_mem_size_bytes() const { return share_mem_size_bytes_; }
+    uint64_t get_share_mem_u64_count() const { return share_mem_u64_count_; }
 
     // =========================================================================
     // Deprecated API (for platform compatibility, always returns 0/nullptr)

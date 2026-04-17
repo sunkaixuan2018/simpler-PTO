@@ -92,6 +92,43 @@ constexpr int32_t PROGRESS_LOG_INTERVAL = 250;      // log every N completions a
 constexpr const char *DEFAULT_ORCH_ENTRY_SYMBOL = "aicpu_orchestration_entry";
 constexpr const char *DEFAULT_ORCH_CONFIG_SYMBOL = "aicpu_orchestration_config";
 
+static void maybe_update_demo_share_mem(Runtime *runtime) {
+    if (runtime == nullptr || !runtime->get_share_mem_enabled()) {
+        return;
+    }
+
+    void *mapped_ptr = runtime->get_share_mem_dev_ptr();
+    uint64_t word_count = runtime->get_share_mem_u64_count();
+    uint64_t size_bytes = runtime->get_share_mem_size_bytes();
+    if (mapped_ptr == nullptr || word_count == 0 || size_bytes == 0) {
+        DEV_WARN(
+            "host_register_mapped_demo: shared memory registration incomplete enabled=%d dev=%p words=%" PRIu64
+            " bytes=%" PRIu64,
+            static_cast<int>(runtime->get_share_mem_enabled()), mapped_ptr, word_count, size_bytes
+        );
+        return;
+    }
+
+    cache_invalidate_range(mapped_ptr, size_bytes);
+    rmb();
+
+    auto *words = static_cast<uint64_t *>(mapped_ptr);
+    for (uint64_t i = 0; i < word_count; ++i) {
+        words[i] += 1;
+    }
+
+    wmb();
+    cache_invalidate_range(mapped_ptr, size_bytes);
+    DEV_INFO(
+        "host_register_mapped_demo: scheduler updated shared memory dev=%p words=%" PRIu64 " first=%" PRIu64
+        " last=%" PRIu64,
+        mapped_ptr,
+        word_count,
+        words[0],
+        words[word_count - 1]
+    );
+}
+
 static int32_t read_pto2_runtime_status(Runtime *runtime) {
     if (runtime == nullptr) {
         return 0;
@@ -1678,6 +1715,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
             dump_tensor_init(orch_to_sched_ ? thread_num_ : sched_thread_num_);
         }
 #endif
+        maybe_update_demo_share_mem(runtime);
 
         DEV_INFO("Thread %d: one-time init done", thread_idx);
         pto2_init_complete_.store(true, std::memory_order_release);
