@@ -21,10 +21,10 @@ SIZE = 16
 def generate_inputs(params: dict) -> dict:
     del params
     return {
-        "mapped_out": torch.zeros(SIZE, dtype=torch.uint64),
+        "mapped_out": torch.zeros(SIZE, dtype=torch.int64),
     }
 
 
 def compute_golden(tensors: dict, params: dict) -> None:
     del params
-    tensors["mapped_out"][:] = torch.arange(1, SIZE + 1, dtype=torch.uint64)
+    tensors["mapped_out"][:] = torch.arange(1, SIZE + 1, dtype=torch.int64)
