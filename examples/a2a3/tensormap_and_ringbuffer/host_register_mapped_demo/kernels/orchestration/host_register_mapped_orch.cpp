@@ -32,7 +32,7 @@ __attribute__((visibility("default"))) PTO2OrchestrationConfig
 aicpu_orchestration_config(const ChipStorageTaskArgs &orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 2,
+        .expected_arg_count = 1,
     };
 }
 
