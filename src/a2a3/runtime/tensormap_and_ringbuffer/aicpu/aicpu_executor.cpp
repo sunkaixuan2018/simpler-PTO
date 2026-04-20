@@ -91,6 +91,25 @@ constexpr int32_t PROGRESS_VERBOSE_THRESHOLD = 10;  // log every completion for 
 constexpr int32_t PROGRESS_LOG_INTERVAL = 250;      // log every N completions after threshold
 constexpr const char *DEFAULT_ORCH_ENTRY_SYMBOL = "aicpu_orchestration_entry";
 constexpr const char *DEFAULT_ORCH_CONFIG_SYMBOL = "aicpu_orchestration_config";
+constexpr uint64_t DEMO_SHARE_MEM_READ_DELAY_ITERS = 1000000;
+
+static inline void demo_share_mem_delay() {
+    for (uint64_t i = 0; i < DEMO_SHARE_MEM_READ_DELAY_ITERS; ++i) {
+#if defined(__aarch64__)
+        __asm__ __volatile__("nop" ::: "memory");
+#else
+        __asm__ __volatile__("" ::: "memory");
+#endif
+    }
+}
+
+static inline void demo_dsb_ld() {
+#if defined(__aarch64__)
+    __asm__ __volatile__("dsb ld" ::: "memory");
+#else
+    __asm__ __volatile__("" ::: "memory");
+#endif
+}
 
 static void maybe_update_demo_share_mem(Runtime *runtime) {
     if (runtime == nullptr || !runtime->get_share_mem_enabled()) {
@@ -109,9 +128,10 @@ static void maybe_update_demo_share_mem(Runtime *runtime) {
         return;
     }
 
-    rmb();
+    demo_share_mem_delay();
+    demo_dsb_ld();
 
-    volatile uint64_t *words = static_cast<volatile uint64_t *>(mapped_ptr);
+    uint64_t *words = static_cast<uint64_t *>(mapped_ptr);
     for (uint64_t i = 0; i < word_count; ++i) {
         words[i] += 1;
     }
@@ -876,9 +896,6 @@ struct AicpuExecutor {
     ) {
         CoreTracker &tracker = core_trackers_[thread_idx];
         auto core_id = tracker.get_core_id_by_offset(core_offset);
-#if !PTO2_PROFILING
-        (void)runtime;
-#endif
         CoreExecState &core_exec_state = core_exec_states_[core_id];
         // Per-core monotonic counter for register protocol uniqueness (32-bit).
         // PTO2 task_id encodes (ring_id << 32 | local_id); truncation to uint32 loses ring_id,
@@ -904,6 +921,31 @@ struct AicpuExecutor {
         uint32_t buf_idx = reg_task_id & 1u;
         PTO2DispatchPayload &payload = s_pto2_payload_per_core[core_id][buf_idx];
         build_payload(payload, slot_state, subslot);
+        if (runtime != nullptr && runtime->get_share_mem_enabled() &&
+            (subslot == PTO2SubtaskSlot::AIV0 || subslot == PTO2SubtaskSlot::AIV1) && payload.args[0] != 0) {
+            const Tensor *mapped_tensor = reinterpret_cast<const Tensor *>(payload.args[0]);
+            uint64_t mapped_data_addr =
+                mapped_tensor->buffer.addr + mapped_tensor->start_offset * get_element_size(mapped_tensor->dtype);
+            uint64_t word_count = runtime->get_share_mem_u64_count();
+            uint64_t first = 0;
+            uint64_t last = 0;
+            demo_dsb_ld();
+            if (mapped_data_addr != 0 && word_count != 0) {
+                uint64_t *mapped_words = reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(mapped_data_addr));
+                first = mapped_words[0];
+                last = mapped_words[word_count - 1];
+            }
+            DEV_INFO(
+                "host_register_mapped_demo: dispatch_aiv arg0_tensor=%p tensor_buffer_addr=0x%" PRIx64
+                " tensor_data_addr=0x%" PRIx64 " words=%" PRIu64 " first=%" PRIu64 " last=%" PRIu64,
+                mapped_tensor,
+                mapped_tensor->buffer.addr,
+                mapped_data_addr,
+                word_count,
+                first,
+                last
+            );
+        }
 
         // to_pending is determined by the caller (idle dispatch = false, pending dispatch = true).
         if (to_pending) {
