@@ -10,10 +10,10 @@
  */
 /**
  * Demo kernel:
- *   out[i] = mapped_host_buffer[i]
+ *   out[i] = mapped_host_buffer[i] + 3
  *
- * The scheduler updates the shared host/device buffer from 0..15 to 1..16.
- * This kernel only copies that result into a regular output tensor.
+ * This verifies the AIV path can read the host-registered mapped address by
+ * transforming the host-initialized values into a regular output tensor.
  */
 
 #include <cstdint>
@@ -38,6 +38,6 @@ extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     __gm__ uint64_t *out = reinterpret_cast<__gm__ uint64_t *>(out_tensor->buffer.addr) + out_tensor->start_offset;
 
     for (int32_t i = 0; i < kWordCount; ++i) {
-        out[i] = mapped_host[i];
+        out[i] = mapped_host[i] + 3;
     }
 }

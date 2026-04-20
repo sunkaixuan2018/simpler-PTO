@@ -27,4 +27,4 @@ def generate_inputs(params: dict) -> dict:
 
 def compute_golden(tensors: dict, params: dict) -> None:
     del params
-    tensors["mapped_out"][:] = torch.arange(1, SIZE + 1, dtype=torch.int64)
+    tensors["mapped_out"][:] = torch.arange(3, SIZE + 3, dtype=torch.int64)
