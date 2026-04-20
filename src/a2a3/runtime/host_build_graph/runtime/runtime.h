@@ -226,6 +226,8 @@ private:
     uint32_t share_mem_device_id_;
     void *share_mem_host_ptr_;
     void *share_mem_dev_ptr_;
+    void *share_mem_direct_host_ptr_;
+    void *share_mem_direct_dev_ptr_;
     uint64_t share_mem_size_bytes_;
     uint64_t share_mem_u64_count_;
     bool share_mem_enabled_;
@@ -478,17 +480,29 @@ public:
     void set_share_mem_registration(
         uint32_t device_id, void *host_ptr, void *dev_ptr, uint64_t size_bytes, uint64_t u64_count
     ) {
+        set_share_mem_registration(device_id, host_ptr, dev_ptr, nullptr, nullptr, size_bytes, u64_count);
+        share_mem_enabled_ = (host_ptr != nullptr && dev_ptr != nullptr && size_bytes != 0 && u64_count != 0);
+    }
+    void set_share_mem_registration(
+        uint32_t device_id, void *host_ptr, void *dev_ptr, void *direct_host_ptr, void *direct_dev_ptr,
+        uint64_t size_bytes, uint64_t u64_count
+    ) {
         share_mem_device_id_ = device_id;
         share_mem_host_ptr_ = host_ptr;
         share_mem_dev_ptr_ = dev_ptr;
+        share_mem_direct_host_ptr_ = direct_host_ptr;
+        share_mem_direct_dev_ptr_ = direct_dev_ptr;
         share_mem_size_bytes_ = size_bytes;
         share_mem_u64_count_ = u64_count;
-        share_mem_enabled_ = (host_ptr != nullptr && dev_ptr != nullptr && size_bytes != 0 && u64_count != 0);
+        share_mem_enabled_ = (host_ptr != nullptr && dev_ptr != nullptr && direct_host_ptr != nullptr &&
+                              direct_dev_ptr != nullptr && size_bytes != 0 && u64_count != 0);
     }
     void clear_share_mem_registration() {
         share_mem_device_id_ = 0;
         share_mem_host_ptr_ = nullptr;
         share_mem_dev_ptr_ = nullptr;
+        share_mem_direct_host_ptr_ = nullptr;
+        share_mem_direct_dev_ptr_ = nullptr;
         share_mem_size_bytes_ = 0;
         share_mem_u64_count_ = 0;
         share_mem_enabled_ = false;
@@ -497,6 +511,8 @@ public:
     uint32_t get_share_mem_device_id() const { return share_mem_device_id_; }
     void *get_share_mem_host_ptr() const { return share_mem_host_ptr_; }
     void *get_share_mem_dev_ptr() const { return share_mem_dev_ptr_; }
+    void *get_share_mem_direct_host_ptr() const { return share_mem_direct_host_ptr_; }
+    void *get_share_mem_direct_dev_ptr() const { return share_mem_direct_dev_ptr_; }
     uint64_t get_share_mem_size_bytes() const { return share_mem_size_bytes_; }
     uint64_t get_share_mem_u64_count() const { return share_mem_u64_count_; }
 
