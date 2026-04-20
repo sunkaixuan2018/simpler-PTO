@@ -927,23 +927,14 @@ struct AicpuExecutor {
             uint64_t mapped_data_addr =
                 mapped_tensor->buffer.addr + mapped_tensor->start_offset * get_element_size(mapped_tensor->dtype);
             uint64_t word_count = runtime->get_share_mem_u64_count();
-            uint64_t first = 0;
-            uint64_t last = 0;
             demo_dsb_ld();
-            if (mapped_data_addr != 0 && word_count != 0) {
-                uint64_t *mapped_words = reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(mapped_data_addr));
-                first = mapped_words[0];
-                last = mapped_words[word_count - 1];
-            }
             DEV_INFO(
                 "host_register_mapped_demo: dispatch_aiv arg0_tensor=%p tensor_buffer_addr=0x%" PRIx64
-                " tensor_data_addr=0x%" PRIx64 " words=%" PRIu64 " first=%" PRIu64 " last=%" PRIu64,
+                " tensor_data_addr=0x%" PRIx64 " words=%" PRIu64,
                 mapped_tensor,
                 mapped_tensor->buffer.addr,
                 mapped_data_addr,
-                word_count,
-                first,
-                last
+                word_count
             );
         }
 

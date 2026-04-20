@@ -70,21 +70,12 @@ __attribute__((visibility("default"))) void aicpu_orchestration_entry(const Chip
     uint64_t mapped_data_addr = mapped_host_buffer.buffer.addr +
                                 mapped_host_buffer.start_offset * get_element_size(mapped_host_buffer.dtype);
     uint64_t element_count = (out_arg.shapes[0] > 0) ? static_cast<uint64_t>(out_arg.shapes[0]) : 0;
-    uint64_t first = 0;
-    uint64_t last = 0;
-    if (mapped_data_addr != 0 && element_count != 0) {
-        uint64_t *mapped_words = reinterpret_cast<uint64_t *>(static_cast<uintptr_t>(mapped_data_addr));
-        first = mapped_words[0];
-        last = mapped_words[element_count - 1];
-    }
     LOG_INFO(
         "host_register_mapped_demo: before_submit_aiv tensor_buffer_addr=0x%" PRIx64
-        " tensor_data_addr=0x%" PRIx64 " elements=%" PRIu64 " first=%" PRIu64 " last=%" PRIu64,
+        " tensor_data_addr=0x%" PRIx64 " elements=%" PRIu64,
         mapped_host_buffer.buffer.addr,
         mapped_data_addr,
-        element_count,
-        first,
-        last
+        element_count
     );
 
     pto2_rt_submit_aiv_task(0, params);
