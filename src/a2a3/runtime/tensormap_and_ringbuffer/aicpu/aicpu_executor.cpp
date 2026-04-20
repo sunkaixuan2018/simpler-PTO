@@ -111,39 +111,67 @@ static inline void demo_dsb_ld() {
 #endif
 }
 
-static void maybe_update_demo_share_mem(Runtime *runtime) {
-    if (runtime == nullptr || !runtime->get_share_mem_enabled()) {
+static void update_demo_share_mem_region(
+    const char *label, void *dev_ptr, uint64_t word_count, uint64_t size_bytes, uint64_t expected_base
+) {
+    if (dev_ptr == nullptr || word_count == 0 || size_bytes == 0) {
+        DEV_WARN(
+            "host_register_mapped_demo: %s registration incomplete dev=%p words=%" PRIu64 " bytes=%" PRIu64,
+            label,
+            dev_ptr,
+            word_count,
+            size_bytes
+        );
         return;
     }
 
-    void *mapped_ptr = runtime->get_share_mem_dev_ptr();
-    uint64_t word_count = runtime->get_share_mem_u64_count();
-    uint64_t size_bytes = runtime->get_share_mem_size_bytes();
-    if (mapped_ptr == nullptr || word_count == 0 || size_bytes == 0) {
-        DEV_WARN(
-            "host_register_mapped_demo: shared memory registration incomplete enabled=%d dev=%p words=%" PRIu64
-            " bytes=%" PRIu64,
-            static_cast<int>(runtime->get_share_mem_enabled()), mapped_ptr, word_count, size_bytes
-        );
+    demo_dsb_ld();
+    uint64_t *words = static_cast<uint64_t *>(dev_ptr);
+    uint64_t before_first = words[0];
+    uint64_t before_last = words[word_count - 1];
+    uint64_t mismatch_count = 0;
+    for (uint64_t i = 0; i < word_count; ++i) {
+        uint64_t expected = expected_base + i;
+        uint64_t old_value = words[i];
+        if (old_value != expected) {
+            ++mismatch_count;
+        }
+        words[i] = old_value + 1;
+    }
+
+    wmb();
+    demo_dsb_ld();
+    DEV_INFO(
+        "host_register_mapped_demo: scheduler checked/updated %s dev=%p words=%" PRIu64
+        " expected_base=%" PRIu64 " mismatch=%" PRIu64 " before_first=%" PRIu64 " before_last=%" PRIu64
+        " after_first=%" PRIu64 " after_last=%" PRIu64,
+        label,
+        dev_ptr,
+        word_count,
+        expected_base,
+        mismatch_count,
+        before_first,
+        before_last,
+        static_cast<uint64_t>(words[0]),
+        static_cast<uint64_t>(words[word_count - 1])
+    );
+}
+
+static void maybe_update_demo_share_mem(Runtime *runtime) {
+    if (runtime == nullptr || !runtime->get_share_mem_enabled()) {
         return;
     }
 
     demo_share_mem_delay();
     demo_dsb_ld();
 
-    uint64_t *words = static_cast<uint64_t *>(mapped_ptr);
-    for (uint64_t i = 0; i < word_count; ++i) {
-        words[i] += 1;
-    }
-
-    wmb();
-    DEV_INFO(
-        "host_register_mapped_demo: scheduler updated shared memory dev=%p words=%" PRIu64 " first=%" PRIu64
-        " last=%" PRIu64,
-        mapped_ptr,
-        word_count,
-        static_cast<uint64_t>(words[0]),
-        static_cast<uint64_t>(words[word_count - 1])
+    update_demo_share_mem_region(
+        "mapped_host", runtime->get_share_mem_dev_ptr(), runtime->get_share_mem_u64_count(),
+        runtime->get_share_mem_size_bytes(), 0
+    );
+    update_demo_share_mem_region(
+        "direct_device", runtime->get_share_mem_direct_dev_ptr(), runtime->get_share_mem_u64_count(),
+        runtime->get_share_mem_size_bytes(), 100
     );
 }
 
@@ -472,7 +500,8 @@ struct AicpuExecutor {
     std::atomic<bool> pto2_init_done_{false};
     std::atomic<bool> runtime_init_ready_{false};
     std::atomic<bool> pto2_init_complete_{false};  // init block finished; others wait for this
-    std::atomic<bool> demo_share_mem_updated_{false};
+    std::atomic<bool> demo_share_mem_update_started_{false};
+    std::atomic<bool> demo_share_mem_update_done_{false};
 
     // ===== Dynamic core transition state =====
     std::atomic<bool> transition_requested_{false};
@@ -922,18 +951,26 @@ struct AicpuExecutor {
         PTO2DispatchPayload &payload = s_pto2_payload_per_core[core_id][buf_idx];
         build_payload(payload, slot_state, subslot);
         if (runtime != nullptr && runtime->get_share_mem_enabled() &&
-            (subslot == PTO2SubtaskSlot::AIV0 || subslot == PTO2SubtaskSlot::AIV1) && payload.args[0] != 0) {
+            (subslot == PTO2SubtaskSlot::AIV0 || subslot == PTO2SubtaskSlot::AIV1) && payload.args[0] != 0 &&
+            payload.args[1] != 0) {
             const Tensor *mapped_tensor = reinterpret_cast<const Tensor *>(payload.args[0]);
+            const Tensor *direct_tensor = reinterpret_cast<const Tensor *>(payload.args[1]);
             uint64_t mapped_data_addr =
                 mapped_tensor->buffer.addr + mapped_tensor->start_offset * get_element_size(mapped_tensor->dtype);
+            uint64_t direct_data_addr =
+                direct_tensor->buffer.addr + direct_tensor->start_offset * get_element_size(direct_tensor->dtype);
             uint64_t word_count = runtime->get_share_mem_u64_count();
             demo_dsb_ld();
             DEV_INFO(
-                "host_register_mapped_demo: dispatch_aiv arg0_tensor=%p tensor_buffer_addr=0x%" PRIx64
-                " tensor_data_addr=0x%" PRIx64 " words=%" PRIu64,
+                "host_register_mapped_demo: dispatch_aiv mapped_tensor=%p mapped_buffer_addr=0x%" PRIx64
+                " mapped_data_addr=0x%" PRIx64 " direct_tensor=%p direct_buffer_addr=0x%" PRIx64
+                " direct_data_addr=0x%" PRIx64 " words=%" PRIu64,
                 mapped_tensor,
                 mapped_tensor->buffer.addr,
                 mapped_data_addr,
+                direct_tensor,
+                direct_tensor->buffer.addr,
+                direct_data_addr,
                 word_count
             );
         }
@@ -2792,8 +2829,15 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 SPIN_WAIT_HINT();
             }
         }
-        if (!demo_share_mem_updated_.exchange(true, std::memory_order_acq_rel)) {
-            maybe_update_demo_share_mem(runtime);
+        if (runtime->get_share_mem_enabled()) {
+            if (!demo_share_mem_update_started_.exchange(true, std::memory_order_acq_rel)) {
+                maybe_update_demo_share_mem(runtime);
+                demo_share_mem_update_done_.store(true, std::memory_order_release);
+            } else {
+                while (!demo_share_mem_update_done_.load(std::memory_order_acquire)) {
+                    SPIN_WAIT_HINT();
+                }
+            }
         }
         always_assert(rt != nullptr);
         int32_t completed = resolve_and_dispatch_pto2(runtime, thread_idx);
@@ -2857,7 +2901,8 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     pto2_init_done_.store(false, std::memory_order_release);
     pto2_init_complete_.store(false, std::memory_order_release);
     runtime_init_ready_.store(false, std::memory_order_release);
-    demo_share_mem_updated_.store(false, std::memory_order_release);
+    demo_share_mem_update_started_.store(false, std::memory_order_release);
+    demo_share_mem_update_done_.store(false, std::memory_order_release);
 
     // Reset core transition state
     transition_requested_.store(false, std::memory_order_release);

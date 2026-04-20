@@ -17,8 +17,8 @@ _KERNELS_ROOT = Path(__file__).parent
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "host_register_mapped_orch.cpp"),
     "function_name": "aicpu_orchestration_entry",
-    # Host passes only the output tensor. Runtime appends mapped_dev_ptr as a scalar.
-    "signature": [D.OUT],
+    # Host passes two output tensors. Runtime appends mapped and direct device addresses as scalars.
+    "signature": [D.OUT, D.OUT],
 }
 
 KERNELS = [
@@ -26,7 +26,7 @@ KERNELS = [
         "func_id": 0,
         "source": str(_KERNELS_ROOT / "aiv" / "kernel_load_add_one.cpp"),
         "core_type": "aiv",
-        "signature": [D.INOUT, D.OUT],
+        "signature": [D.INOUT, D.INOUT, D.OUT, D.OUT],
     },
 ]
 

@@ -11,10 +11,13 @@
 /**
  * Demo kernel:
  *   mapped_host_buffer[i] += 3
- *   out[i] = mapped_host_buffer[i]
+ *   direct_device_buffer[i] += 3
+ *   mapped_out[i] = mapped_host_buffer[i]
+ *   device_out[i] = direct_device_buffer[i]
  *
- * This verifies the AIV path can read and write the host-registered mapped
- * address, then mirrors the updated values into a regular output tensor.
+ * This verifies the AIV path can read and write both the host-registered
+ * mapped address and a directly allocated device address, then mirrors the
+ * updated values into regular output tensors.
  */
 
 #include <cstdint>
@@ -33,13 +36,22 @@ constexpr int32_t kWordCount = 16;
 
 extern "C" __aicore__ void kernel_entry(__gm__ int64_t *args) {
     __gm__ Tensor *mapped_host_tensor = reinterpret_cast<__gm__ Tensor *>(args[0]);
-    __gm__ Tensor *out_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *direct_device_tensor = reinterpret_cast<__gm__ Tensor *>(args[1]);
+    __gm__ Tensor *mapped_out_tensor = reinterpret_cast<__gm__ Tensor *>(args[2]);
+    __gm__ Tensor *device_out_tensor = reinterpret_cast<__gm__ Tensor *>(args[3]);
     __gm__ uint64_t *mapped_host =
         reinterpret_cast<__gm__ uint64_t *>(mapped_host_tensor->buffer.addr) + mapped_host_tensor->start_offset;
-    __gm__ uint64_t *out = reinterpret_cast<__gm__ uint64_t *>(out_tensor->buffer.addr) + out_tensor->start_offset;
+    __gm__ uint64_t *direct_device =
+        reinterpret_cast<__gm__ uint64_t *>(direct_device_tensor->buffer.addr) + direct_device_tensor->start_offset;
+    __gm__ uint64_t *mapped_out =
+        reinterpret_cast<__gm__ uint64_t *>(mapped_out_tensor->buffer.addr) + mapped_out_tensor->start_offset;
+    __gm__ uint64_t *device_out =
+        reinterpret_cast<__gm__ uint64_t *>(device_out_tensor->buffer.addr) + device_out_tensor->start_offset;
 
     for (int32_t i = 0; i < kWordCount; ++i) {
         mapped_host[i] += 3;
-        out[i] = mapped_host[i];
+        direct_device[i] += 3;
+        mapped_out[i] = mapped_host[i];
+        device_out[i] = direct_device[i];
     }
 }

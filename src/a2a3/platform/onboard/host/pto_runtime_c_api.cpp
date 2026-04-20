@@ -182,16 +182,56 @@ int setup_demo_share_mem(Runtime *runtime, int device_id) {
         LOG_ERROR("host_register_mapped_demo: mallocHostDeviceShareMem failed rc=%d", rc);
         return rc;
     }
+    auto mapped_mem_guard = RAIIScopeGuard([device_id, host_ptr]() {
+        freeHostDeviceShareMem(static_cast<uint32_t>(device_id), host_ptr);
+    });
+
+    void *direct_host_ptr = std::malloc(static_cast<size_t>(size_bytes));
+    if (direct_host_ptr == nullptr) {
+        LOG_ERROR("host_register_mapped_demo: failed to allocate host staging for direct device buffer");
+        return -1;
+    }
+    auto direct_host_guard = RAIIScopeGuard([direct_host_ptr]() {
+        std::free(direct_host_ptr);
+    });
+
+    void *direct_dev_ptr = runtime->host_api.device_malloc(static_cast<size_t>(size_bytes));
+    if (direct_dev_ptr == nullptr) {
+        LOG_ERROR("host_register_mapped_demo: failed to allocate direct device buffer size=%" PRIu64, size_bytes);
+        return -1;
+    }
+    auto direct_dev_guard = RAIIScopeGuard([runtime, direct_dev_ptr]() {
+        runtime->host_api.device_free(direct_dev_ptr);
+    });
 
     auto *host_words = static_cast<uint64_t *>(host_ptr);
+    auto *direct_host_words = static_cast<uint64_t *>(direct_host_ptr);
     for (uint64_t i = 0; i < word_count; ++i) {
         host_words[i] = i;
+        direct_host_words[i] = 100 + i;
     }
 
-    runtime->set_share_mem_registration(static_cast<uint32_t>(device_id), host_ptr, dev_ptr, size_bytes, word_count);
-    log_demo_share_mem_preview("host_register_mapped_demo: host_init_data", host_words, word_count);
+    rc = runtime->host_api.copy_to_device(direct_dev_ptr, direct_host_ptr, static_cast<size_t>(size_bytes));
+    if (rc != 0) {
+        LOG_ERROR("host_register_mapped_demo: failed to initialize direct device buffer rc=%d", rc);
+        return rc;
+    }
+
+    runtime->set_share_mem_registration(
+        static_cast<uint32_t>(device_id), host_ptr, dev_ptr, direct_host_ptr, direct_dev_ptr, size_bytes, word_count
+    );
+    mapped_mem_guard.dismiss();
+    direct_host_guard.dismiss();
+    direct_dev_guard.dismiss();
+
+    log_demo_share_mem_preview("host_register_mapped_demo: mapped_host_init_data", host_words, word_count);
+    log_demo_share_mem_preview("host_register_mapped_demo: direct_device_init_data", direct_host_words, word_count);
     LOG_INFO(
-        "host_register_mapped_demo: host_ptr=%p mapped_dev_ptr=%p size=%" PRIu64, host_ptr, dev_ptr, size_bytes
+        "host_register_mapped_demo: mapped_host_ptr=%p mapped_dev_ptr=%p direct_dev_ptr=%p size=%" PRIu64,
+        host_ptr,
+        dev_ptr,
+        direct_dev_ptr,
+        size_bytes
     );
     return 0;
 }
@@ -201,10 +241,36 @@ void release_demo_share_mem(Runtime *runtime) {
         return;
     }
 
+    uint64_t word_count = runtime->get_share_mem_u64_count();
+    uint64_t size_bytes = runtime->get_share_mem_size_bytes();
     log_demo_share_mem_preview(
-        "host_register_mapped_demo: host_data_after_run",
-        static_cast<const uint64_t *>(runtime->get_share_mem_host_ptr()), runtime->get_share_mem_u64_count()
+        "host_register_mapped_demo: mapped_host_data_after_run",
+        static_cast<const uint64_t *>(runtime->get_share_mem_host_ptr()), word_count
     );
+
+    if (runtime->get_share_mem_direct_host_ptr() != nullptr && runtime->get_share_mem_direct_dev_ptr() != nullptr) {
+        int copy_rc = runtime->host_api.copy_from_device(
+            runtime->get_share_mem_direct_host_ptr(), runtime->get_share_mem_direct_dev_ptr(),
+            static_cast<size_t>(size_bytes)
+        );
+        if (copy_rc != 0) {
+            LOG_ERROR(
+                "host_register_mapped_demo: copy direct device buffer back failed rc=%d dev=%p",
+                copy_rc,
+                runtime->get_share_mem_direct_dev_ptr()
+            );
+        } else {
+            log_demo_share_mem_preview(
+                "host_register_mapped_demo: direct_device_data_after_run",
+                static_cast<const uint64_t *>(runtime->get_share_mem_direct_host_ptr()), word_count
+            );
+        }
+        runtime->host_api.device_free(runtime->get_share_mem_direct_dev_ptr());
+    }
+    if (runtime->get_share_mem_direct_host_ptr() != nullptr) {
+        std::free(runtime->get_share_mem_direct_host_ptr());
+    }
+
     int rc = freeHostDeviceShareMem(runtime->get_share_mem_device_id(), runtime->get_share_mem_host_ptr());
     if (rc != 0) {
         LOG_ERROR(
@@ -597,10 +663,15 @@ int run_runtime(
         auto demo_share_mem_guard = RAIIScopeGuard([r]() {
             release_demo_share_mem(r);
         });
+        auto release_and_destroy_runtime = [&demo_share_mem_guard, r]() {
+            release_demo_share_mem(r);
+            demo_share_mem_guard.dismiss();
+            r->~Runtime();
+        };
 
         rc = setup_demo_share_mem(r, device_id);
         if (rc != 0) {
-            r->~Runtime();
+            release_and_destroy_runtime();
             return rc;
         }
 
@@ -612,7 +683,7 @@ int run_runtime(
         if (rc != 0) {
             r->set_pto2_gm_sm_ptr(nullptr);
             validate_runtime_impl(r);
-            r->~Runtime();
+            release_and_destroy_runtime();
             return rc;
         }
 
@@ -625,12 +696,12 @@ int run_runtime(
         rc = runner->run(*r, block_dim, device_id, aicpu_vec, aicore_vec, aicpu_thread_num, enable_dump_tensor != 0);
         if (rc != 0) {
             validate_runtime_impl(r);
-            r->~Runtime();
+            release_and_destroy_runtime();
             return rc;
         }
 
         rc = validate_runtime_impl(r);
-        r->~Runtime();
+        release_and_destroy_runtime();
         return rc;
     } catch (...) {
         return -1;

@@ -10,8 +10,8 @@
 
 import torch
 
-__outputs__ = ["mapped_out"]
-TENSOR_ORDER = ["mapped_out"]
+__outputs__ = ["mapped_out", "device_out"]
+TENSOR_ORDER = ["mapped_out", "device_out"]
 
 RTOL = 0.0
 ATOL = 0.0
@@ -22,9 +22,11 @@ def generate_inputs(params: dict) -> dict:
     del params
     return {
         "mapped_out": torch.zeros(SIZE, dtype=torch.int64),
+        "device_out": torch.zeros(SIZE, dtype=torch.int64),
     }
 
 
 def compute_golden(tensors: dict, params: dict) -> None:
     del params
-    tensors["mapped_out"][:] = torch.arange(3, SIZE + 3, dtype=torch.int64)
+    tensors["mapped_out"][:] = torch.arange(4, SIZE + 4, dtype=torch.int64)
+    tensors["device_out"][:] = torch.arange(104, SIZE + 104, dtype=torch.int64)

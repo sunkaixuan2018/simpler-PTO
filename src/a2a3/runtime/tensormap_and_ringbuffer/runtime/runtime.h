@@ -191,6 +191,8 @@ private:
     uint32_t share_mem_device_id_;
     void *share_mem_host_ptr_;
     void *share_mem_dev_ptr_;
+    void *share_mem_direct_host_ptr_;
+    void *share_mem_direct_dev_ptr_;
     uint64_t share_mem_size_bytes_;
     uint64_t share_mem_u64_count_;
     bool share_mem_enabled_;
@@ -282,13 +284,16 @@ public:
     void clear_registered_kernels();
 
     void set_share_mem_registration(
-        uint32_t device_id, void *host_ptr, void *dev_ptr, uint64_t size_bytes, uint64_t u64_count
+        uint32_t device_id, void *host_ptr, void *dev_ptr, void *direct_host_ptr, void *direct_dev_ptr,
+        uint64_t size_bytes, uint64_t u64_count
     );
     void clear_share_mem_registration();
     bool get_share_mem_enabled() const;
     uint32_t get_share_mem_device_id() const;
     void *get_share_mem_host_ptr() const;
     void *get_share_mem_dev_ptr() const;
+    void *get_share_mem_direct_host_ptr() const;
+    void *get_share_mem_direct_dev_ptr() const;
     uint64_t get_share_mem_size_bytes() const;
     uint64_t get_share_mem_u64_count() const;
 
