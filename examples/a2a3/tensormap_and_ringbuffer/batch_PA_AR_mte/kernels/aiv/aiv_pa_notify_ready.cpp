@@ -2,8 +2,9 @@
  * Send a ready notification to all peer ranks after local PA output is ready.
  *
  * args[0] = &Tensor(local_out)      -- dependency only
- * args[1] = local notify counter    -- window address
- * args[2] = CommDeviceContext*
+ * args[1] = &Tensor(notify_done)    -- output dependency token
+ * args[2] = local notify counter    -- window address
+ * args[3] = CommDeviceContext*
  */
 
 #include <cstdint>
@@ -35,8 +36,9 @@ AICORE inline __gm__ T* CommRemotePtr(__gm__ CommDeviceContext* ctx, __gm__ T* l
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     (void)reinterpret_cast<__gm__ Tensor*>(args[0]);
-    __gm__ int32_t* local_counter = reinterpret_cast<__gm__ int32_t*>(args[1]);
-    __gm__ CommDeviceContext* comm_ctx = reinterpret_cast<__gm__ CommDeviceContext*>(args[2]);
+    __gm__ Tensor* done_tensor = reinterpret_cast<__gm__ Tensor*>(args[1]);
+    __gm__ int32_t* local_counter = reinterpret_cast<__gm__ int32_t*>(args[2]);
+    __gm__ CommDeviceContext* comm_ctx = reinterpret_cast<__gm__ CommDeviceContext*>(args[3]);
 
     if (comm_ctx == nullptr || comm_ctx->rankNum <= 1) {
         pipe_barrier(PIPE_ALL);
@@ -50,4 +52,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
         __gm__ int32_t* remote_counter = CommRemotePtr(comm_ctx, local_counter, peer_rank);
         pto2_send_notification(remote_counter, 1, PTO2NotifyOp::AtomicAdd);
     }
+
+    __gm__ int32_t* done =
+        reinterpret_cast<__gm__ int32_t*>(done_tensor->buffer.addr) + done_tensor->start_offset;
+    done[0] = 1;
+    pipe_barrier(PIPE_ALL);
 }

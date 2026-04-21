@@ -3,9 +3,12 @@
  * memory and write the element-wise sum to out.
  *
  * args[0] = &Tensor(local_out)
- * args[1] = &Tensor(out)
- * args[2] = CommDeviceContext*
- * args[3] = total element count
+ * args[1] = &Tensor(notify_done) -- dependency only
+ * args[2] = &Tensor(out)
+ * args[3] = CommDeviceContext*
+ * args[4] = total element count
+ * args[5] = local notify counter
+ * args[6] = expected notify count
  */
 
 #include <cstdint>
@@ -19,6 +22,7 @@
 #endif
 
 #include <pto/pto-inst.hpp>
+#include <pto/comm/pto_comm_inst.hpp>
 
 #include "common/comm_context.h"
 #include "tensor.h"
@@ -35,9 +39,12 @@ AICORE inline __gm__ T* CommRemotePtr(__gm__ CommDeviceContext* ctx, __gm__ T* l
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
     __gm__ Tensor* local_out_tensor = reinterpret_cast<__gm__ Tensor*>(args[0]);
-    __gm__ Tensor* out_tensor = reinterpret_cast<__gm__ Tensor*>(args[1]);
-    __gm__ CommDeviceContext* comm_ctx = reinterpret_cast<__gm__ CommDeviceContext*>(args[2]);
-    uint64_t total_elems = static_cast<uint64_t>(args[3]);
+    (void)reinterpret_cast<__gm__ Tensor*>(args[1]);
+    __gm__ Tensor* out_tensor = reinterpret_cast<__gm__ Tensor*>(args[2]);
+    __gm__ CommDeviceContext* comm_ctx = reinterpret_cast<__gm__ CommDeviceContext*>(args[3]);
+    uint64_t total_elems = static_cast<uint64_t>(args[4]);
+    __gm__ int32_t* local_counter = reinterpret_cast<__gm__ int32_t*>(args[5]);
+    int32_t expected_count = static_cast<int32_t>(args[6]);
 
     __gm__ float* local_out =
         reinterpret_cast<__gm__ float*>(local_out_tensor->buffer.addr) + local_out_tensor->start_offset;
@@ -50,6 +57,9 @@ extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ in
     }
 
     int nranks = static_cast<int>(comm_ctx->rankNum);
+
+    pto::comm::Signal ready(local_counter);
+    pto::comm::TWAIT(ready, expected_count, pto::comm::WaitCmp::GE);
 
     if (total_elems == 0 || total_elems > 16 * 16 * 16) {
         pipe_barrier(PIPE_ALL);
