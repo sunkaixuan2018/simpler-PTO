@@ -187,7 +187,9 @@ class DistributedCodeRunner:
             arch = "a2a3"
 
         runtime_include_dirs = [
-            str(SIMPLER_ROOT / "src" / arch / "runtime" / runtime_name / "runtime")
+            str(SIMPLER_ROOT / "src" / arch / "runtime" / runtime_name / "runtime"),
+            str(SIMPLER_ROOT / "src" / arch / "runtime" / runtime_name / "common"),
+            str(SIMPLER_ROOT / "src" / "common" / "task_interface"),
         ]
 
         dist_config = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})

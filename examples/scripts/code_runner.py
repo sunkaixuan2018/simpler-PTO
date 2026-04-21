@@ -782,7 +782,10 @@ class CodeRunner:
             arch = "a2a3"
 
         runtime_include_dirs = [
-            os.path.join(self.project_root, "src", arch, "runtime", self.runtime_name, "runtime")
+            os.path.join(self.project_root, "src", arch, "runtime", self.runtime_name, "runtime"),
+            os.path.join(self.project_root, "src", arch, "runtime", self.runtime_name, "common"),
+            os.path.join(self.project_root, "src", "common", "task_interface"),
+            os.path.join(self.project_root, "src", arch, "platform", "include"),
         ]
 
         def _build_runtime():
