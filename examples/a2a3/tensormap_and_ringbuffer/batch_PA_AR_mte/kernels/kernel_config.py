@@ -15,7 +15,7 @@ from pathlib import Path
 
 _KERNELS_ROOT = Path(__file__).resolve().parent
 _EXAMPLES_ROOT = _KERNELS_ROOT.parent.parent
-_PA_KERNELS_ROOT = _EXAMPLES_ROOT / "batch_paged_attention" / "kernels"
+_PA_KERNELS_ROOT = _EXAMPLES_ROOT / "batch_PA_AR_smda" / "kernels"
 
 _platform = os.environ.get("PTO_PLATFORM", "a2a3sim")
 if _platform != "a2a3":
