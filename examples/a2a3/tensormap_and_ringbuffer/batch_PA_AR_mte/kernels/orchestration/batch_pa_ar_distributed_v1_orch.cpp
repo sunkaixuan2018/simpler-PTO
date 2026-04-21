@@ -40,20 +40,22 @@ static uint64_t float_to_u64(float f) {
 extern "C" {
 
 __attribute__((visibility("default")))
-PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
-    (void)args;
-    (void)arg_count;
+PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
+    (void)orch_args;
     return PTO2OrchestrationConfig{
         .expected_arg_count = 11,
     };
 }
 
 __attribute__((visibility("default")))
-void aicpu_orchestration_entry(uint64_t* args, int arg_count,
-                               int orch_thread_num, int orch_thread_index) {
-    (void)arg_count;
-    (void)orch_thread_num;
-    if (orch_thread_index != 0) return;
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+    if (orch_args.scalar_count() < 11) {
+        LOG_ERROR("batch_PA_AR_distributed_v1 expects 11 scalar args, got %d",
+                  orch_args.scalar_count());
+        return;
+    }
+    const uint64_t* args = orch_args.scalars();
 
     void* host_query = (void*)(uintptr_t)args[0];
     void* host_key_cache = (void*)(uintptr_t)args[1];

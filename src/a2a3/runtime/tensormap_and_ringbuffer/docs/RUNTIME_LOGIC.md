@@ -627,8 +627,9 @@ Tasks are queued by resource shape, which is derived from the `active_mask` in t
 Each orchestration `.so` must export:
 
 ```cpp
-extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
-extern "C" void aicpu_orchestration_entry(uint64_t* args, int arg_count);
+extern "C" PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args);
+extern "C" void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args);
 ```
 
 ---
@@ -661,8 +662,8 @@ RUNTIME_CONFIG = {
 ### 12.2 Orchestration Structure
 
 ```cpp
-void aicpu_orchestration_entry(uint64_t* args, int arg_count) {
-    // Unpack args: query, key_cache, value_cache, block_table, context_lens, out, config
+void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
+    // Unpack tensors and scalars from orch_args.
     for (q_idx = 0; q_idx < q_loop; q_idx++) {
         for (batch_start = 0; batch_start < batch; batch_start += IN_CORE_BATCH) {
             PTO2_SCOPE() {
