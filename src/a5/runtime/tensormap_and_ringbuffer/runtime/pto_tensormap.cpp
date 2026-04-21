@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * PTO Runtime2 - TensorMap Implementation
  *
@@ -10,7 +20,7 @@
  * 3. Automatic stale entry cleanup during lookup
  * 4. Periodic explicit cleanup for long chains
  *
- * Based on: docs/runtime_buffer_manager_methods.md
+ * Based on: docs/RUNTIME_LOGIC.md
  */
 
 #include "pto_tensormap.h"
@@ -28,7 +38,7 @@
 #if PTO2_TENSORMAP_PROFILING
 uint64_t g_lookup_chain_total = 0;
 uint64_t g_lookup_count = 0;
-int32_t  g_lookup_chain_max = 0;
+int32_t g_lookup_chain_max = 0;
 uint64_t g_lookup_overlap_checks = 0;
 uint64_t g_lookup_overlap_hits = 0;
 uint64_t g_insert_count = 0;
@@ -38,14 +48,16 @@ uint64_t g_insert_count = 0;
 // Initialization and Destruction
 // =============================================================================
 
-bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, const int32_t new_task_window_sizes[PTO2_MAX_RING_DEPTH]) {
+bool PTO2TensorMap::init(
+    int32_t new_num_buckets, int32_t new_pool_size, const int32_t new_task_window_sizes[PTO2_MAX_RING_DEPTH]
+) {
     // Validate power of 2 for fast modulo
     if ((new_num_buckets & (new_num_buckets - 1)) != 0) {
         return false;  // num_buckets must be power of 2
     }
 
     // Allocate buckets
-    buckets = (PTO2TensorMapEntry**)malloc(new_num_buckets * sizeof(PTO2TensorMapEntry*));
+    buckets = (PTO2TensorMapEntry **)malloc(new_num_buckets * sizeof(PTO2TensorMapEntry *));
     if (!buckets) {
         return false;
     }
@@ -58,7 +70,8 @@ bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, const i
     num_buckets = new_num_buckets;
 
     // Allocate entry pool (64-byte aligned for cache-line-aligned entries)
-    entry_pool = (PTO2TensorMapEntry*)aligned_alloc(alignof(PTO2TensorMapEntry), new_pool_size * sizeof(PTO2TensorMapEntry));
+    entry_pool =
+        (PTO2TensorMapEntry *)aligned_alloc(alignof(PTO2TensorMapEntry), new_pool_size * sizeof(PTO2TensorMapEntry));
     if (!entry_pool) {
         free(buckets);
         buckets = NULL;
@@ -67,7 +80,7 @@ bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, const i
     memset(entry_pool, 0, new_pool_size * sizeof(PTO2TensorMapEntry));
 
     // Allocate free entry list
-    free_entry_list = (PTO2TensorMapEntry**)calloc(new_pool_size, sizeof(PTO2TensorMapEntry*));
+    free_entry_list = (PTO2TensorMapEntry **)calloc(new_pool_size, sizeof(PTO2TensorMapEntry *));
     if (!free_entry_list) {
         free(buckets);
         free(entry_pool);
@@ -92,7 +105,7 @@ bool PTO2TensorMap::init(int32_t new_num_buckets, int32_t new_pool_size, const i
 
     // Allocate per-ring per-task entry tracking (each ring has its own window size)
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        task_entry_heads[r] = (PTO2TensorMapEntry**)malloc(new_task_window_sizes[r] * sizeof(PTO2TensorMapEntry*));
+        task_entry_heads[r] = (PTO2TensorMapEntry **)malloc(new_task_window_sizes[r] * sizeof(PTO2TensorMapEntry *));
         if (!task_entry_heads[r]) {
             // Cleanup previously allocated rings
             for (int j = 0; j < r; j++) {
@@ -221,11 +234,15 @@ int32_t PTO2TensorMap::valid_count() {
     return count;
 }
 
-void PTO2TensorMap::sync_tensormap(uint8_t ring_id, int32_t sm_last_task_alive) {
+void PTO2TensorMap::sync_tensormap(PTO2TaskId task_id, int32_t sm_last_task_alive) {
+    auto ring_id = task_id.ring();
+    auto local_id = task_id.local();
     sync_validity(ring_id, sm_last_task_alive);
+
     // Only attempt cleanup when last_task_alive has actually advanced;
     // otherwise cleanup_retired would empty-loop and we'd spin forever.
-    if (sm_last_task_alive - last_cleanup[ring_id] >= PTO2_TENSORMAP_CLEANUP_INTERVAL) {
+    auto overlap = get_task_local_id_slot(ring_id, local_id) == get_task_local_id_slot(ring_id, last_cleanup[ring_id]);
+    if (sm_last_task_alive - last_cleanup[ring_id] >= PTO2_TENSORMAP_CLEANUP_INTERVAL || overlap) {
         cleanup_retired(ring_id, last_cleanup[ring_id], sm_last_task_alive);
         last_cleanup[ring_id] = sm_last_task_alive;
     }

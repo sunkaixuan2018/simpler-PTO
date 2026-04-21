@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Copyright (c) PyPTO Contributors.
+# This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+# CANN Open Software License Agreement Version 2.0 (the "License").
+# Please refer to the License for details. You may not use this file except in compliance with the License.
+# THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+# INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+# See LICENSE in the root of the software repository for the full text of the License.
+# -----------------------------------------------------------------------------------------------------------
 # Benchmark wrapper: run examples on hardware,
 # then parse device-log timing lines to report per-round latency.
 #
@@ -11,26 +19,27 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-RUN_EXAMPLE="$PROJECT_ROOT/examples/scripts/run_example.py"
 
 # ---------------------------------------------------------------------------
 # Examples to benchmark and their case lists, per runtime.
-# Key   = directory name under tests/device_tests/<platform>/<runtime>/
+# Key   = directory name under tests/st/<platform>/<runtime>/
 # Value = comma-separated case names to run (empty string = run DEFAULT_CASE)
 # ---------------------------------------------------------------------------
 
 # --- tensormap_and_ringbuffer ---
 declare -A TMR_EXAMPLE_CASES=(
-    [alternating_matmul_add]=""
-    [benchmark_bgemm]=""
+    [alternating_matmul_add]="Case1"
+    [benchmark_bgemm]="Case0"
     [paged_attention_unroll]="Case1,Case2"
-    [batch_paged_attention]=""
+    [batch_paged_attention]="Case1"
+    [spmd_paged_attention_tpush]="Case1,Case2"
 )
 TMR_EXAMPLE_ORDER=(
     alternating_matmul_add
     benchmark_bgemm
     paged_attention_unroll
     batch_paged_attention
+    spmd_paged_attention_tpush
 )
 
 # --- aicpu_build_graph ---
@@ -85,10 +94,11 @@ Options:
   -d, --device   Device ID (default: 0)
   -n, --rounds   Override number of rounds for each example (default: 100)
   -r, --runtime  Runtime to benchmark: tensormap_and_ringbuffer (default), aicpu_build_graph
-  -v, --verbose  Save detailed run_example.py output to a timestamped log file
+  -v, --verbose  Save detailed test_*.py output to a timestamped log file
   -h, --help     Show this help
 
-All other options are passed through to run_example.py (e.g. --case).
+All other options are passed through to the underlying `python test_*.py`
+invocation (e.g. --case).
 
 Edit the EXAMPLE_CASES map at the top of this script to control which
 examples and cases to benchmark.
@@ -122,9 +132,14 @@ vlog() {
 }
 
 # ---------------------------------------------------------------------------
-# Derive arch from platform and set examples directory
+# Derive arch from platform and set examples directories
 # ---------------------------------------------------------------------------
-EXAMPLES_DIR="$PROJECT_ROOT/tests/device_tests/${PLATFORM}/${RUNTIME}"
+# Search both examples/ (migrated tests) and tests/st/ (legacy tests)
+ARCH="${PLATFORM%%sim}"  # strip "sim" suffix if present
+EXAMPLES_DIRS=(
+    "$PROJECT_ROOT/tests/st/${ARCH}/${RUNTIME}"
+    "$PROJECT_ROOT/examples/${ARCH}/${RUNTIME}"
+)
 
 # Clock frequency (MHz) for converting cycle counts to microseconds
 case "$PLATFORM" in
@@ -150,7 +165,7 @@ case "$RUNTIME" in
 esac
 
 # ---------------------------------------------------------------------------
-# Resolve device log directory (mirrors run_example.py / device_log_resolver.py)
+# Resolve device log directory (mirrors simpler_setup/device_log_resolver.py)
 # ---------------------------------------------------------------------------
 if [[ -n "${ASCEND_WORK_PATH:-}" ]]; then
     LOG_ROOT="$ASCEND_WORK_PATH/log/debug"
@@ -357,12 +372,13 @@ wait_for_new_log() {
 }
 
 # ---------------------------------------------------------------------------
-# run_bench <example> <kernels_dir> <golden> [case_name]
-#   Run one benchmark invocation and parse timing from the resulting log.
+# run_bench <example> <example_dir> [case_name]
+#   Run one benchmark invocation (via `python test_*.py`) and parse timing
+#   from the resulting log. Skips the example if it has no test_*.py.
 #   Sets global PASS / FAIL counters.
 # ---------------------------------------------------------------------------
 run_bench() {
-    local example="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
+    local example="$1" example_dir="$2" case_name="${3:-}"
 
     if [[ -n "$case_name" ]]; then
         echo "  ---- $case_name ----"
@@ -374,15 +390,24 @@ run_bench() {
     trap 'rm -f -- "$pre_log_file"' RETURN
     ls -1 "$DEVICE_LOG_DIR"/*.log 2>/dev/null | sort > "$pre_log_file" || true
 
-    # Build run command
-    local run_cmd=(
-        python3 "$RUN_EXAMPLE"
-        -k "$kernels_dir" -g "$golden"
-        -p "$PLATFORM" -d "$DEVICE_ID"
-        -n "$ROUNDS" --skip-golden
-    )
+    # Build run command using test_*.py
+    local test_file
+    test_file=$(find "$example_dir" -maxdepth 1 -name 'test_*.py' -print -quit 2>/dev/null || true)
+
+    local run_cmd
+    if [[ -n "$test_file" ]]; then
+        run_cmd=(
+            python3 "$test_file"
+            --platform "$PLATFORM" --device "$DEVICE_ID"
+            --rounds "$ROUNDS" --skip-golden
+        )
+    else
+        echo "  SKIPPED: no test_*.py found in $example_dir"
+        return
+    fi
     if [[ -n "$case_name" ]]; then
         run_cmd+=(--case "$case_name")
+        [[ -n "$test_file" ]] && run_cmd+=(--manual include)
     fi
     run_cmd+=("${EXTRA_ARGS[@]}")
 
@@ -397,7 +422,7 @@ run_bench() {
         "${run_cmd[@]}" > /dev/null 2>&1 || rc=$?
     fi
     if [[ $rc -ne 0 ]]; then
-        echo "  FAILED: run_example.py returned non-zero"
+        echo "  FAILED: benchmark run returned non-zero"
         vlog "FAILED: exit code $rc"
         ((FAIL++)) || true
         return
@@ -458,32 +483,47 @@ SUMMARY_ORCH=()
 
 echo ""
 echo "Runtime: $RUNTIME"
-echo "Tests dir: $EXAMPLES_DIR"
 
 for example in "${EXAMPLE_ORDER[@]}"; do
     case_list="${EXAMPLE_CASES[$example]:-}"
 
-    EXAMPLE_DIR="$EXAMPLES_DIR/$example"
-    KERNELS_DIR="$EXAMPLE_DIR/kernels"
-    GOLDEN="$EXAMPLE_DIR/golden.py"
+    # Search for example: prefer test_*.py (new style), fall back to golden.py (legacy).
+    # tests/st/ is searched before examples/ since benchmarks use production-scale cases.
+    EXAMPLE_DIR=""
+    for dir in "${EXAMPLES_DIRS[@]}"; do
+        candidate="$dir/$example"
+        if [[ -d "$candidate" ]] && ls "$candidate"/test_*.py 1>/dev/null 2>&1; then
+            EXAMPLE_DIR="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$EXAMPLE_DIR" ]]; then
+        for dir in "${EXAMPLES_DIRS[@]}"; do
+            candidate="$dir/$example"
+            if [[ -f "$candidate/golden.py" && -d "$candidate/kernels" ]]; then
+                EXAMPLE_DIR="$candidate"
+                break
+            fi
+        done
+    fi
 
     echo ""
     echo "================================================================"
     echo "  $example"
     echo "================================================================"
 
-    if [[ ! -f "$GOLDEN" || ! -d "$KERNELS_DIR" ]]; then
-        echo "  SKIP: missing kernels/ or golden.py"
+    if [[ -z "$EXAMPLE_DIR" ]]; then
+        echo "  SKIP: not found in any search directory"
         ((FAIL++)) || true
         continue
     fi
 
     if [[ -z "${case_list:-}" ]]; then
-        run_bench "$example" "$KERNELS_DIR" "$GOLDEN"
+        run_bench "$example" "$EXAMPLE_DIR"
     else
         IFS=',' read -ra cases <<< "$case_list"
         for c in "${cases[@]}"; do
-            run_bench "$example" "$KERNELS_DIR" "$GOLDEN" "$c"
+            run_bench "$example" "$EXAMPLE_DIR" "$c"
         done
     fi
 done

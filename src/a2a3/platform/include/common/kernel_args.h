@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * @file kernel_args.h
  * @brief KernelArgs Structure - Shared between Host, AICPU, and AICore
@@ -49,16 +59,20 @@ extern "C" {
  * - device_args: Written by host, read by AICPU (contains aicpu_so_bin/aicpu_so_len)
  * - runtime_args: Written by host, read by AICPU (task runtime, includes
  *   handshake buffers)
+ * - dump_data_base: Written by host, read by AICPU platform layer; zero when
+ *   tensor dump is unused
  *
- * Note: AICore kernels receive Runtime* directly, not KernelArgs
- *       - AICPU: accesses runtime_args->workers directly
- *       - AICore: receives Runtime* pointer with workers at offset 0
+ * Field Access Patterns:
+ *       - AICPU: receives KernelArgs* via DynTileFwkBackendKernelServer
+ *       - AICore: receives KernelArgs* via KERNEL_ENTRY
  */
 struct KernelArgs {
-    uint64_t unused[5] = {0};          // Alignment padding (required by CANN runtime offset)
-    DeviceArgs* device_args{nullptr};  // Device arguments (AICPU reads, contains SO info)
-    Runtime* runtime_args{nullptr};    // Task runtime in device memory
-    uint64_t regs{0};                  // Per-core register base address array (platform-specific)
+    uint64_t unused[5] = {0};                               // Alignment padding (required by CANN runtime offset)
+    DeviceArgs *device_args{nullptr};                       // Device arguments (AICPU reads, contains SO info)
+    __may_used_by_aicore__ Runtime *runtime_args{nullptr};  // Task runtime in device memory
+    uint64_t regs{0};                                       // Per-core register base address array (platform-specific)
+    uint64_t ffts_base_addr{0};                             // FFTS base address for AICore
+    uint64_t dump_data_base{0};  // Dump shared memory base address; use explicit flags to detect enablement
 };
 
 #ifdef __cplusplus

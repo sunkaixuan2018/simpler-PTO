@@ -36,9 +36,8 @@ Legacy per-task submit (`kernel_id + worker_type`) cannot express atomic co-disp
 
 Design must preserve the current main runtime architecture:
 
-1. Multi-orchestrator runtime wiring (`orchestrators[]`, `orch_count`, thread-local `pto2_current_orch_idx`).
-2. Executor threading split (orchestrator threads vs scheduler threads), and post-orchestrator transition (`transition_requested_` + `reassign_cores_for_all_threads()`).
-3. Shared-memory hot/cold split (`PTO2TaskDescriptor` hot + `PTO2TaskPayload` cold).
+1. Executor threading split (orchestrator thread vs scheduler threads), and post-orchestrator transition (`transition_requested_` + `reassign_cores_for_all_threads()`).
+2. Shared-memory hot/cold split (`PTO2TaskDescriptor` hot + `PTO2TaskPayload` cold).
 
 ## 5. Terminology
 
@@ -61,24 +60,24 @@ struct MixedKernels {
 
 static inline void pto2_rt_submit_task(PTO2Runtime* rt,
                                        const MixedKernels& mixed_kernels,
-                                       PTOParam* params,
-                                       int32_t num_params);
+                                       Arg* args,
+                                       int32_t num_args);
 
 static inline void pto2_rt_submit_aic_task(PTO2Runtime* rt,
                                            int32_t kernel_id,
-                                           PTOParam* params,
-                                           int32_t num_params);
+                                           Arg* args,
+                                           int32_t num_args);
 
 static inline void pto2_rt_submit_aiv_task(PTO2Runtime* rt,
                                            int32_t kernel_id,
-                                           PTOParam* params,
-                                           int32_t num_params);
+                                           Arg* args,
+                                           int32_t num_args);
 ```
 
 Rules:
 
 1. One submit call creates one `MixedTask`.
-2. All active slots share the same `params` and `num_params`.
+2. All active slots share the same `args` and `num_args`.
 3. At least one slot must be active.
 4. `aiv0_kernel_id` and `aiv1_kernel_id` are semantically equivalent.
 5. Wrappers are orchestration sugar only (inline in orchestration API); no dedicated runtime ops entries.
@@ -89,7 +88,7 @@ Rules:
 
 `PTO2TaskDescriptor` (hot path) carries mixed-task identity/state:
 
-1. `mixed_task_id`
+1. `task_id`
 2. `active_mask`
 3. `subtask_done_mask`
 4. `kernel_id[3]` for `(AIC, AIV0, AIV1)`
@@ -97,7 +96,7 @@ Rules:
 
 `PTO2TaskPayload` (cold path) carries:
 
-1. shared params/tensors/scalars copied once per mixed submit
+1. shared args/tensors/scalars copied once per mixed submit
 2. fanin mixed-task IDs
 3. other cold-path submit metadata
 
@@ -128,8 +127,8 @@ Queueing key is normalized resource shape (not raw slot label).
 
 1. Fanin release/readiness remains dependency-correct and graph-level.
 2. Two-stage completion:
-   - `on_subtask_complete(mixed_task_id, subslot)`
-   - `on_mixed_task_complete(mixed_task_id)` only when `subtask_done_mask == active_mask`
+   - `on_subtask_complete(task_id, subslot)`
+   - `on_mixed_task_complete(task_id)` only when `subtask_done_mask == active_mask`
 3. Downstream release is triggered once per mixed task completion, not once per subslot.
 
 ## 9. Executor Ownership and Numbering
@@ -164,9 +163,9 @@ This project-defined flattened numbering is kept unchanged.
 ### 10.2 Runtime Behavior per Submit
 
 1. Validate submit arguments.
-2. Allocate mixed-task ID and initialize descriptor/payload once.
-3. Build fanin/fanout at mixed-task granularity.
-4. Enqueue by shape when ready.
+2. Allocate mixed-task ID and initialize descriptor/payload/slot_state once.
+3. Lookup producers via TensorMap; collect fanin metadata and increment producers' `fanout_count`.
+4. Push task to scheduler's wiring queue (scheduler thread 0 asynchronously wires fanout edges and determines readiness).
 5. Dispatch all active lanes atomically when resources allow.
 6. Aggregate completion and release downstream once.
 
@@ -197,23 +196,21 @@ Recommended validation coverage:
 2. Atomic dispatch for multi-slot shapes.
 3. Dependency gating and completion aggregation (`done_mask == active_mask`).
 4. Lane-occupancy co-residency behavior for compatible shapes.
-5. Multi-orchestrator and core-transition ownership stability.
+5. Core-transition ownership stability.
 6. Invalid submit handling (`always_assert` path).
 7. Regression coverage for existing examples/tests.
 
 Milestone command (device):
 
 ```bash
-python examples/scripts/run_example.py \
-  -k tests/device_tests/tensormap_and_ringbuffer/batch_paged_attention/kernels \
-  -g tests/device_tests/tensormap_and_ringbuffer/batch_paged_attention/golden.py \
+python tests/st/a2a3/tensormap_and_ringbuffer/batch_paged_attention/test_batch_paged_attention.py \
   -p a2a3 -d 9
 ```
 
 Final validation:
 
 ```bash
-./ci.sh
+pytest examples tests/st --platform a2a3
 ```
 
 ## 14. Resolved Decisions
@@ -223,4 +220,3 @@ Final validation:
 3. Per-cluster concurrent capacity is lane-occupancy-driven, not a fixed constant.
 4. Submit-contract types live in one shared header-only surface.
 5. Resource-aware dispatch heuristics are allowed without a strict starvation-free guarantee.
-

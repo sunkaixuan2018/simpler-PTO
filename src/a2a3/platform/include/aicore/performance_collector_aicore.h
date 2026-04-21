@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * @file performance_collector_aicore.h
  * @brief AICore performance data collection interface
@@ -14,8 +24,8 @@
 
 // Include platform-specific timestamp implementation
 // Build system selects the correct inner_kernel.h based on platform:
-// - src/platform/a2a3/aicore/inner_kernel.h (real hardware)
-// - src/platform/a2a3sim/aicore/inner_kernel.h (simulation)
+// - src/a2a3/platform/onboard/aicore/inner_kernel.h (real hardware)
+// - src/a2a3/platform/sim/aicore/inner_kernel.h (simulation)
 // Both provide unified get_sys_cnt_aicore() interface
 #include "inner_kernel.h"
 
@@ -24,47 +34,30 @@
 /**
  * Record task execution performance data
  *
- * Writes performance metrics to the provided buffer. Buffer management
- * and status tracking are handled by AICPU.
+ * Writes timing metrics to the WIP staging slot (wip[task_id & 1]).
+ * Buffer management and final commit are handled by AICPU.
  *
- * AICore records task_id and timestamps only. AICPU fills func_id and
- * core_type at completion time from TaskDescriptor.
+ * AICore writes PerfRecord.task_id as the register dispatch token (low 32 bits, zero-extended).
+ * For multi-ring runtimes (tensormap_and_ringbuffer, aicpu_build_graph), AICPU overwrites
+ * with the full (ring_id << 32) | local_id encoding after handshake match.
  *
  * @param perf_buf Performance buffer pointer
- * @param task_id Task ID
+ * @param task_id Register dispatch id (DATA_MAIN_BASE), stored in task_id low 32 bits
  * @param start_time Start timestamp
  * @param end_time End timestamp
- * @param kernel_ready_time Kernel ready timestamp
  */
-__aicore__ __attribute__((always_inline))
-static inline void perf_aicore_record_task(
-    __gm__ PerfBuffer* perf_buf,
-    uint32_t task_id,
-    uint64_t start_time,
-    uint64_t end_time,
-    uint64_t kernel_ready_time) {
+__aicore__ __attribute__((always_inline)) static inline void
+perf_aicore_record_task(__gm__ PerfBuffer *perf_buf, uint32_t task_id, uint64_t start_time, uint64_t end_time) {
+    // Write to WIP staging slot — parity alternates with dual-slot dispatch
+    __gm__ PerfRecord *record = &perf_buf->wip[task_id & 1u];
 
-    // Read current buffer count
-    dcci(&perf_buf->count, SINGLE_CACHE_LINE);
-    uint32_t idx = perf_buf->count;
-
-    if (idx >= PLATFORM_PROF_BUFFER_SIZE) {
-        return;
-    }
-
-    __gm__ PerfRecord* record = &perf_buf->records[idx];
-
-    // Write record data (func_id and core_type filled by AICPU at completion)
     record->start_time = start_time;
     record->end_time = end_time;
-    record->kernel_ready_time = kernel_ready_time;
-    record->task_id = task_id;
+    record->task_id = static_cast<uint64_t>(task_id);
 
-    perf_buf->count = idx + 1;
-
-    // Flush cache to make data visible
-    dcci(&perf_buf->count, SINGLE_CACHE_LINE, CACHELINE_OUT);
-    dcci(record, ENTIRE_DATA_CACHE, CACHELINE_OUT);
+    // Flush cache to make data visible to AICPU
+    dcci(record, SINGLE_CACHE_LINE, CACHELINE_OUT);
+    dsb((mem_dsb_t)0);
 }
 
 #endif  // PLATFORM_AICORE_PERFORMANCE_COLLECTOR_AICORE_H_

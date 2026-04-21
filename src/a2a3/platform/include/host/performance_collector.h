@@ -1,3 +1,14 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
 /**
  * @file performance_collector.h
  * @brief Platform-agnostic performance data collector with dynamic memory management
@@ -11,11 +22,12 @@
  * Design Pattern: Dependency Injection via Callbacks for memory operations.
  */
 
-#ifndef PLATFORM_HOST_PERFORMANCE_COLLECTOR_H_
-#define PLATFORM_HOST_PERFORMANCE_COLLECTOR_H_
+#ifndef SRC_A2A3_PLATFORM_INCLUDE_HOST_PERFORMANCE_COLLECTOR_H_
+#define SRC_A2A3_PLATFORM_INCLUDE_HOST_PERFORMANCE_COLLECTOR_H_
 
 #include <atomic>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <string>
@@ -31,10 +43,9 @@
  * Memory allocation callback for performance profiling
  *
  * @param size Memory size in bytes
- * @param user_data User-provided context pointer
  * @return Allocated device memory pointer, or nullptr on failure
  */
-using PerfAllocCallback = void* (*)(size_t size, void* user_data);
+using PerfAllocCallback = void *(*)(size_t size);
 
 /**
  * Memory registration callback (for Host-Device shared memory)
@@ -42,31 +53,38 @@ using PerfAllocCallback = void* (*)(size_t size, void* user_data);
  * @param dev_ptr Device memory pointer
  * @param size Memory size in bytes
  * @param device_id Device ID
- * @param user_data User-provided context pointer
  * @param[out] host_ptr Host-mapped pointer
  * @return 0 on success, error code on failure
  */
-using PerfRegisterCallback = int (*)(void* dev_ptr, size_t size, int device_id,
-                                      void* user_data, void** host_ptr);
+using PerfRegisterCallback = int (*)(void *dev_ptr, size_t size, int device_id, void **host_ptr);
 
 /**
  * Memory unregister callback
  *
  * @param dev_ptr Device memory pointer
  * @param device_id Device ID
- * @param user_data User-provided context pointer
  * @return 0 on success, error code on failure
  */
-using PerfUnregisterCallback = int (*)(void* dev_ptr, int device_id, void* user_data);
+using PerfUnregisterCallback = int (*)(void *dev_ptr, int device_id);
 
 /**
  * Memory free callback
  *
  * @param dev_ptr Device memory pointer
- * @param user_data User-provided context pointer
  * @return 0 on success, error code on failure
  */
-using PerfFreeCallback = int (*)(void* dev_ptr, void* user_data);
+using PerfFreeCallback = int (*)(void *dev_ptr);
+
+/**
+ * Thread factory callback for creating threads with device binding
+ *
+ * Creates a std::thread that runs the given function with proper device
+ * context setup/teardown (e.g., rtSetDevice/rtDeviceReset on onboard).
+ *
+ * @param fn Function to execute in the new thread
+ * @return The newly created thread
+ */
+using ThreadFactory = std::function<std::thread(std::function<void()>)>;
 
 // =============================================================================
 // ProfMemoryManager - Dynamic Buffer Memory Management Thread
@@ -82,18 +100,19 @@ enum class ProfBufferType { PERF_RECORD, PHASE };
  */
 struct ReadyBufferInfo {
     ProfBufferType type;
-    uint32_t index;           // core_index (PERF_RECORD) or thread_idx (PHASE)
-    uint32_t slot_idx;        // Reserved (unused in free queue design)
-    void* dev_buffer_ptr;     // Device address of the full buffer
-    void* host_buffer_ptr;    // Host-mapped address (sim: same as dev)
-    uint32_t buffer_seq;      // Sequence number for ordering
+    uint32_t index;         // core_index (PERF_RECORD) or thread_idx (PHASE)
+    uint32_t slot_idx;      // Reserved (unused in free queue design)
+    void *dev_buffer_ptr;   // Device address of the full buffer
+    void *host_buffer_ptr;  // Host-mapped address (sim: same as dev)
+    uint32_t buffer_seq;    // Sequence number for ordering
 };
 
 /**
  * Notification that a buffer has been copied and can be freed
  */
 struct CopyDoneInfo {
-    void* dev_buffer_ptr;     // Device buffer to free
+    void *dev_buffer_ptr;  // Device buffer to free
+    ProfBufferType type;   // Buffer type (for recycling)
 };
 
 /**
@@ -112,8 +131,8 @@ public:
     ~ProfMemoryManager();
 
     // Disable copy
-    ProfMemoryManager(const ProfMemoryManager&) = delete;
-    ProfMemoryManager& operator=(const ProfMemoryManager&) = delete;
+    ProfMemoryManager(const ProfMemoryManager &) = delete;
+    ProfMemoryManager &operator=(const ProfMemoryManager &) = delete;
 
     // Allow PerformanceCollector to register initial buffer mappings
     friend class PerformanceCollector;
@@ -127,12 +146,14 @@ public:
      * @param alloc_cb Device memory allocation callback
      * @param register_cb Host-device mapping callback (nullptr for simulation)
      * @param free_cb Device memory free callback
-     * @param user_data User context for callbacks
      * @param device_id Device ID for registration
+     * @param thread_factory Thread factory for creating device-bound threads (empty to use std::thread)
      */
-    void start(void* shared_mem_host, int num_cores, int num_phase_threads,
-               PerfAllocCallback alloc_cb, PerfRegisterCallback register_cb,
-               PerfFreeCallback free_cb, void* user_data, int device_id);
+    void start(
+        void *shared_mem_host, int num_cores, int num_phase_threads, PerfAllocCallback alloc_cb,
+        PerfRegisterCallback register_cb, PerfFreeCallback free_cb, int device_id,
+        const ThreadFactory &thread_factory = {}
+    );
 
     /**
      * Stop the memory management thread
@@ -146,7 +167,7 @@ public:
      * @param[out] info Ready buffer info
      * @return true if an item was available, false otherwise
      */
-    bool try_pop_ready(ReadyBufferInfo& info);
+    bool try_pop_ready(ReadyBufferInfo &info);
 
     /**
      * Wait for a ready buffer info with timeout
@@ -155,14 +176,14 @@ public:
      * @param timeout Maximum wait time
      * @return true if an item was available, false on timeout
      */
-    bool wait_pop_ready(ReadyBufferInfo& info, std::chrono::milliseconds timeout);
+    bool wait_pop_ready(ReadyBufferInfo &info, std::chrono::milliseconds timeout);
 
     /**
      * Notify that a buffer has been copied and can be freed
      *
      * @param info Copy done notification
      */
-    void notify_copy_done(const CopyDoneInfo& info);
+    void notify_copy_done(const CopyDoneInfo &info);
 
     /**
      * Check if the manager thread is running
@@ -174,7 +195,7 @@ private:
     std::atomic<bool> running_{false};
 
     // Shared memory references
-    void* shared_mem_host_{nullptr};
+    void *shared_mem_host_{nullptr};
     int num_cores_{0};
     int num_phase_threads_{0};
 
@@ -182,7 +203,6 @@ private:
     PerfAllocCallback alloc_cb_{nullptr};
     PerfRegisterCallback register_cb_{nullptr};
     PerfFreeCallback free_cb_{nullptr};
-    void* user_data_{nullptr};
     int device_id_{-1};
 
     // Management thread → main thread (ready buffers)
@@ -195,26 +215,29 @@ private:
     std::queue<CopyDoneInfo> done_queue_;
 
     // Device-to-host pointer mapping (populated during alloc_and_register)
-    std::unordered_map<void*, void*> dev_to_host_;
+    std::unordered_map<void *, void *> dev_to_host_;
+
+    // Recycled buffer pools (avoids alloc/free churn in mgmt_loop)
+    std::vector<void *> recycled_perf_buffers_;
+    std::vector<void *> recycled_phase_buffers_;
 
     // Management thread main loop
     void mgmt_loop();
 
     // Allocate a new buffer and optionally register for host access
-    void* alloc_and_register(size_t size, void** host_ptr_out);
+    void *alloc_and_register(size_t size, void **host_ptr_out);
 
     // Free a previously allocated buffer
-    void free_buffer(void* dev_ptr);
+    void free_buffer(void *dev_ptr);
 
     // Resolve device pointer to host pointer
-    void* resolve_host_ptr(void* dev_ptr);
+    void *resolve_host_ptr(void *dev_ptr);
 
     // Register an external dev→host mapping (for initial buffers)
-    void register_mapping(void* dev_ptr, void* host_ptr);
+    void register_mapping(void *dev_ptr, void *host_ptr);
 
     // Process one ReadyQueue entry
-    void process_ready_entry(PerfDataHeader* header, int thread_idx,
-                              const ReadyQueueEntry& entry);
+    void process_ready_entry(PerfDataHeader *header, int thread_idx, const ReadyQueueEntry &entry);
 };
 
 // =============================================================================
@@ -238,8 +261,8 @@ public:
     ~PerformanceCollector();
 
     // Disable copy and move
-    PerformanceCollector(const PerformanceCollector&) = delete;
-    PerformanceCollector& operator=(const PerformanceCollector&) = delete;
+    PerformanceCollector(const PerformanceCollector &) = delete;
+    PerformanceCollector &operator=(const PerformanceCollector &) = delete;
 
     /**
      * Initialize performance profiling
@@ -253,23 +276,21 @@ public:
      * @param alloc_cb Memory allocation callback
      * @param register_cb Memory registration callback (can be nullptr for simulation)
      * @param free_cb Memory free callback
-     * @param user_data User-provided context pointer passed to callbacks
      * @return 0 on success, error code on failure
      */
-    int initialize(Runtime& runtime,
-                   int num_aicore,
-                   int device_id,
-                   PerfAllocCallback alloc_cb,
-                   PerfRegisterCallback register_cb,
-                   PerfFreeCallback free_cb,
-                   void* user_data);
+    int initialize(
+        Runtime &runtime, int num_aicore, int device_id, PerfAllocCallback alloc_cb, PerfRegisterCallback register_cb,
+        PerfFreeCallback free_cb
+    );
 
     /**
      * Start the memory management thread
      *
      * Must be called after initialize() and before device execution starts.
+     *
+     * @param thread_factory Thread factory for creating device-bound threads (empty to use std::thread)
      */
-    void start_memory_manager();
+    void start_memory_manager(const ThreadFactory &thread_factory = {});
 
     /**
      * Poll and collect performance data from the memory manager's queue
@@ -288,7 +309,7 @@ public:
      * @param output_path Output directory path
      * @return 0 on success, error code on failure
      */
-    int export_swimlane_json(const std::string& output_path = "outputs");
+    int export_swimlane_json(const std::string &output_path = "outputs");
 
     /**
      * Stop the memory management thread and clean up remaining data
@@ -302,12 +323,9 @@ public:
      *
      * @param unregister_cb Memory unregister callback (can be nullptr)
      * @param free_cb Memory free callback
-     * @param user_data User-provided context pointer
      * @return 0 on success, error code on failure
      */
-    int finalize(PerfUnregisterCallback unregister_cb,
-                 PerfFreeCallback free_cb,
-                 void* user_data);
+    int finalize(PerfUnregisterCallback unregister_cb, PerfFreeCallback free_cb);
 
     /**
      * Check if collector is initialized
@@ -334,14 +352,30 @@ public:
     void collect_phase_data();
 
     /**
+     * Scan PerfBufferState::current_buf_ptr for all cores to recover
+     * partial records not delivered through the pipeline.
+     *
+     * Must be called after device execution completes and after
+     * stop_memory_manager(). Follows the same pattern as collect_phase_data()
+     * for PhaseBufferStates.
+     */
+    void scan_remaining_perf_buffers();
+
+    /**
+     * Signal that device execution is complete (streams synchronized).
+     * poll_and_collect() will drain remaining pipeline data and exit.
+     */
+    void signal_execution_complete();
+
+    /**
      * Get collected records (for testing)
      */
-    const std::vector<std::vector<PerfRecord>>& get_records() const { return collected_perf_records_; }
+    const std::vector<std::vector<PerfRecord>> &get_records() const { return collected_perf_records_; }
 
 private:
     // Shared memory pointers
-    void* perf_shared_mem_dev_{nullptr};   // Device memory pointer (slot arrays)
-    void* perf_shared_mem_host_{nullptr};  // Host-mapped pointer (slot arrays)
+    void *perf_shared_mem_dev_{nullptr};   // Device memory pointer (slot arrays)
+    void *perf_shared_mem_host_{nullptr};  // Host-mapped pointer (slot arrays)
     bool was_registered_{false};           // True if register_cb was called successfully
     int device_id_{-1};
 
@@ -352,7 +386,6 @@ private:
     PerfAllocCallback alloc_cb_{nullptr};
     PerfRegisterCallback register_cb_{nullptr};
     PerfFreeCallback free_cb_{nullptr};
-    void* user_data_{nullptr};
 
     // Memory manager
     ProfMemoryManager memory_manager_;
@@ -368,8 +401,11 @@ private:
     // Core-to-thread mapping (core_id → scheduler thread index, -1 = unassigned)
     std::vector<int8_t> core_to_thread_;
 
+    // Signal from device_runner that execution is complete
+    std::atomic<bool> execution_complete_{false};
+
     // Allocate a single buffer (PerfBuffer or PhaseBuffer) and register it
-    void* alloc_single_buffer(size_t size, void** host_ptr_out);
+    void *alloc_single_buffer(size_t size, void **host_ptr_out);
 };
 
-#endif  // PLATFORM_HOST_PERFORMANCE_COLLECTOR_H_
+#endif  // SRC_A2A3_PLATFORM_INCLUDE_HOST_PERFORMANCE_COLLECTOR_H_

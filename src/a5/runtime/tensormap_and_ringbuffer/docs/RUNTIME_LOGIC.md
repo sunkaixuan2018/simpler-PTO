@@ -9,10 +9,10 @@ PTO2 (Parallel Task Orchestration v2) is a runtime system for executing task gra
 - **AICore** (AI compute cores): executes kernel functions dispatched by the scheduler.
 - **Shared Memory** (Global Memory): ring buffers, task descriptors, heap, and TensorMap shared between orchestrator and schedulers.
 
-```
+```text
 ┌───────────────────────────────────────────────────────────────────────┐
 │                            Host (CPU)                                 │
-│  golden.py → code_runner.py → compile kernels → init Runtime          │
+│  test_*.py (SceneTestCase) → compile kernels → init Runtime           │
 │  → upload binaries → launch AICPU/AICore → collect results            │
 └───────────────────────────┬───────────────────────────────────────────┘
                             │ device memory / GM
@@ -73,7 +73,7 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 ### 2.1 a2a3 (Real Ascend Hardware)
 
 | Component | Description |
-|-----------|-------------|
+| --------- | ----------- |
 | `device_runner.cpp` | Uses CANN APIs: `rtMalloc`, `rtMemcpy`, `rtLaunchKernel` |
 | `memory_allocator.cpp` | Wraps `rtMalloc`/`rtFree` with allocation tracking |
 | `aicore/kernel.cpp` | `KERNEL_ENTRY(aicore_kernel)` → `aicore_execute` |
@@ -83,7 +83,7 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 ### 2.2 a2a3sim (Thread Simulation)
 
 | Component | Description |
-|-----------|-------------|
+| --------- | ----------- |
 | `device_runner.cpp` | Uses `std::thread` to simulate AICPU/AICore |
 | `memory_allocator.cpp` | Wraps `malloc`/`free` |
 | `aicore/kernel.cpp` | `aicore_execute_wrapper` sets `g_sim_reg_base` per core |
@@ -92,7 +92,7 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 ### 2.3 Platform Constants (`platform_config.h`)
 
 | Constant | Value | Description |
-|----------|-------|-------------|
+| -------- | ----- | ----------- |
 | `PLATFORM_MAX_BLOCKDIM` | 24 | Maximum blocks (each = 1 AIC + 2 AIV) |
 | `PLATFORM_MAX_AICPU_THREADS` | 4 | AICPU thread count (3 schedulers + 1 orchestrator) |
 | `PLATFORM_MAX_AIC_PER_THREAD` | 24 | Max AIC cores per scheduler thread |
@@ -105,7 +105,7 @@ Two platform implementations exist under `src/platform/`, sharing a common inter
 
 The orchestrator and schedulers communicate through a contiguous shared memory region in Global Memory (GM). Each ring level has its own TaskDescriptor and DepListPool sections. See [MULTI_RING.md §4.3–4.4](MULTI_RING.md) for the per-ring shared memory header and handle layout.
 
-```
+```text
 ┌─────────────────────────────┐  offset 0
 │  PTO2SharedMemoryHeader     │  (flow control, config, sync flags)
 ├─────────────────────────────┤  aligned
@@ -118,7 +118,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 ### 3.1 SharedMemoryHeader Fields
 
 | Field | Writer | Reader | Purpose |
-|-------|--------|--------|---------|
+| ----- | ------ | ------ | ------- |
 | `current_task_index` | Orchestrator | Scheduler | Next task ID to allocate (task ring head) |
 | `last_task_alive` | Scheduler | Orchestrator | Oldest still-active task (task ring tail) |
 | `heap_top` | Orchestrator | Scheduler | Heap ring allocation pointer |
@@ -136,7 +136,7 @@ The orchestrator and schedulers communicate through a contiguous shared memory r
 
 ### 3.2 Size Calculation
 
-```
+```text
 total = ALIGN(Header) + ALIGN(window_size * sizeof(TaskDescriptor))
       + ALIGN((dep_pool_size + 1) * sizeof(DepListEntry))
 ```
@@ -154,6 +154,7 @@ Alignment is 64 bytes (`PTO2_ALIGN_SIZE`).
 The task ring manages task slot allocation with back-pressure flow control.
 
 **Structure** (`PTO2TaskRing`):
+
 - `descriptors`: pointer to `TaskDescriptor[]` in shared memory
 - `window_size`: number of slots (power of 2)
 - `current_index`: next task ID to allocate (monotonically increasing)
@@ -162,7 +163,8 @@ The task ring manages task slot allocation with back-pressure flow control.
 **Slot mapping**: `slot = task_id & (window_size - 1)`
 
 **Allocation** (`pto2_task_ring_alloc`):
-```
+
+```text
 active_count = current_index - *last_alive_ptr
 if active_count < window_size - 1:
     allocate slot, advance current_index
@@ -179,6 +181,7 @@ else:
 The heap ring manages output buffer allocation from a circular GM heap.
 
 **Structure** (`PTO2HeapRing`):
+
 - `base`: GM heap base address
 - `size`: total heap size (default 1 GB)
 - `top`: allocation pointer (local to orchestrator)
@@ -212,7 +215,7 @@ This back-pressure is essential for correctness with small ring sizes — for ex
 
 A ring that is **too small** can cause a **deadlock**. The root cause is the scope mechanism: each task's `fanout_count` includes a reference from its owning scope. The scope reference is only released when `scope_end()` runs — but `scope_end()` is called by the orchestrator, which is blocked waiting for ring space. This creates a circular dependency:
 
-```
+```text
 Orchestrator blocked on task_ring_alloc (ring full)
     → needs scheduler to advance last_task_alive
     → needs tasks to reach CONSUMED state (fanout_count == 0)
@@ -224,13 +227,15 @@ Orchestrator blocked on task_ring_alloc (ring full)
 The runtime detects this automatically by counting spin iterations in the allocation functions:
 
 **Periodic BLOCKED warnings** (every 10,000 spins):
-```
+
+```text
 [TaskRing] BLOCKED (Flow Control): current=208, last_alive=192, active=16/16 (100.0%), spins=10000
 [HeapRing] BLOCKED: requesting 4096 bytes, available=0, top=65536, tail=0, spins=10000
 ```
 
 **Deadlock detection** (after 100,000 spins with no progress):
-```
+
+```text
 FATAL: Flow Control Deadlock Detected!
 Task Ring is FULL and no progress after 100000 spins.
   - Active tasks:  16
@@ -275,6 +280,7 @@ This design avoids the complexity of ring-based wrapping while still being bound
 ### 5.4 Stale Entry Cleanup: Three-Layer Defense
 
 TensorMap must ensure entries for retired tasks (`producer_task_id < last_task_alive`) are removed, so that:
+
 - The pool does not grow unboundedly (capacity is finite)
 - Lookup performance does not degrade as stale entries accumulate in bucket chains
 
@@ -301,7 +307,7 @@ This forms a back-pressure mechanism analogous to the Task Ring's flow control.
 **Summary**:
 
 | Layer | Trigger | Method | Guarantees |
-|-------|---------|--------|------------|
+| ----- | ------- | ------ | ---------- |
 | Chain Truncation | Every lookup | Truncate stale tail of bucket chain | Lookup only visits valid entries |
 | Periodic Cleanup | Every 64 retired tasks | Walk per-task chains, free entries | Pool capacity reclaimed in bounded time |
 | Pool Back-Pressure | Pool exhausted | Block until scheduler advances watermark | Hard capacity bound, no OOM |
@@ -324,13 +330,13 @@ When `pto2_submit_task` processes parameters:
 ### 6.1 PTO2TaskDescriptor (Hot Path)
 
 | Field | Description |
-|-------|-------------|
-| `mixed_task_id` | Canonical mixed-task ID (64-bit: `ring_id << 32 | local_id`). See [MULTI_RING.md §3](MULTI_RING.md). |
+| ----- | ----------- |
+| `task_id` | Canonical mixed-task ID (64-bit: `ring_id << 32 \| local_id`). See [MULTI_RING.md §3](MULTI_RING.md). |
 | `kernel_id[3]` | Per-slot kernel IDs: `[AIC, AIV0, AIV1]`; `INVALID_KERNEL_ID` = inactive |
 | `active_mask` | Bitmask of active subtask slots: `bit0=AIC`, `bit1=AIV0`, `bit2=AIV1` |
 | `subtask_done_mask` | Atomic bitmask; each subtask sets its done bit on completion |
-| `fanin_count` | Number of producer dependencies |
-| `fanout_lock` | Per-task spinlock for concurrent fanout modification |
+| `fanin_count` | Number of producer dependencies (set by scheduler during wiring) |
+| `fanout_lock` | Per-task spinlock for concurrent fanout modification (used by scheduler wiring + completion) |
 | `fanout_head` | Head of fanout consumer list (pointer, protected by `fanout_lock`) |
 | `fanout_count` | 1 (scope ref) + number of consumers |
 | `packed_buffer_base` | Start of packed buffer in GM Heap |
@@ -339,7 +345,7 @@ When `pto2_submit_task` processes parameters:
 ### 6.1b PTO2TaskPayload (Cold Path)
 
 | Field | Description |
-|-------|-------------|
+| ----- | ----------- |
 | `tensors[16]` | Tensor descriptors for parameters |
 | `scalar_value[16]` | Scalar parameter values |
 | `is_tensor[16]` | Whether each parameter is tensor or scalar |
@@ -349,7 +355,7 @@ When `pto2_submit_task` processes parameters:
 
 ### 6.2 Task State Machine
 
-```
+```text
   [0] PENDING ──fanin satisfied──► [1] READY ──dispatch──► [2] RUNNING
       ▲                                                         │
       │                                                         ▼
@@ -357,6 +363,7 @@ When `pto2_submit_task` processes parameters:
 ```
 
 In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
+
 - **0 (PENDING)**: waiting for dependencies (`fanin_refcount < fanin_count`)
 - **1 (READY)**: all dependencies satisfied, waiting in ready queue
 - **2 (RUNNING)**: currently executing on a worker
@@ -372,53 +379,63 @@ In the scheduler's `task_state[]` array (`std::atomic<PTO2TaskState>`):
 The orchestrator runs on AICPU Thread 3 and builds the task graph by calling the user-provided orchestration function.
 
 Key members:
-- `rings[PTO2_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + DepPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
+
+- `rings[PTO2_MAX_RING_DEPTH]`: per-ring `PTO2RingSet` (HeapRing + TaskRing + FaninPool). See [MULTI_RING.md §4.2](MULTI_RING.md).
 - `tensor_map`, `tensor_pool`: dependency tracking
 - `scope_tasks[]`, `scope_begins[]`, `scope_stack_top`: scope nesting stack (flat buffer partitioned by level)
-- `scheduler`: pointer to scheduler state (for simulated mode or `init_task_on_submit`)
+- `scheduler`: pointer to scheduler state (for wiring queue and ready queue access)
 - `gm_heap_base`, `gm_heap_size`: GM heap for output buffers
 
-### 7.2 Task Submission Flow (`pto2_submit_task`)
+### 7.2 Task Submission Flow (`pto2_submit_mixed_task`)
 
 | Step | Operation |
-|------|-----------|
+| ---- | --------- |
 | 0 | `pto2_orchestrator_sync_tensormap` — prune stale TensorMap entries |
 | 1 | `pto2_task_ring_alloc` — allocate task slot (may block on flow control) |
-| 2 | Initialize task descriptor, copy parameters |
-| 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers |
-| 4 | **Dependency**: `pto2_add_consumer_to_producer` for each producer found |
-| 5 | **Heap alloc**: `pto2_alloc_packed_buffer` for OUTPUT params (addr=0) |
-| 6 | **Insert**: register OUTPUT/INOUT params in TensorMap |
-| 7 | **Fanin**: finalize `fanin_count`; if `init_task_on_submit`, call scheduler's `init_task` |
-| 8 | **Publish**: `STORE_RELEASE(current_task_index)` makes task visible to scanners |
+| 2 | Initialize task descriptor + slot state, copy parameters |
+| 3 | **Lookup**: for each INPUT/INOUT param, search TensorMap for producers; collect producer pointers in `PTO2FaninBuilder` |
+| 4 | **Insert**: register OUTPUT/INOUT args in TensorMap |
+| 5 | **Record fanin metadata**: store producer pointers in `payload->fanin_inline_slot_states[]` (+ spill pool if >16); increment each producer's `fanout_count` (no lock needed — single writer) |
+| 6 | **Push to wiring queue**: push to global `PTO2SpscQueue`; scheduler thread 0 asynchronously wires fanout edges (lock + dep_pool + early_finished check + ready push) |
 
-### 7.3 Lock Protocol for Concurrent Dependency Setup
+> **Note**: Fanout wiring (Steps 4–7 in earlier versions) has been moved from the
+> orchestrator submit hot path to the scheduler's global `wiring_queue` (SPSC). This reduces the
+> orchestrator's shared L2 cache / memory bus pressure, as the orchestrator no longer
+> acquires `fanout_lock` or allocates from `dep_pool` during submission.
 
-The orchestrator and scheduler run concurrently. When adding a consumer to a producer's fanout list:
+### 7.3 Deferred Fanout Wiring (Scheduler Wiring Queue)
 
-1. **Orchestrator acquires** the producer's `fanout_lock` via `pto2_fanout_lock(task)` (CAS spin-lock)
-2. **Normal path**: prepend consumer to the producer's fanout list, increment `fanout_count`
-3. **Release** `fanout_lock`
+The orchestrator pushes each submitted task to the global `scheduler->wiring_queue` (a wait-free SPSC queue). Scheduler thread 0 drains this queue in batches, deferring if the queue holds fewer than a full batch of items to reduce contention (unless a final flush is needed at end of execution). For each task:
+
+1. Sets `fanin_count = N + 1` (+1 redundance to prevent premature readiness)
+2. For each producer in `payload->fanin_slot_states[]`:
+   - **Acquires** the producer's `fanout_lock`
+   - Checks `task_state >= COMPLETED` (early-finished optimization)
+   - If not completed: prepends consumer to producer's `fanout_head` via `dep_pool.prepend`
+   - **Releases** `fanout_lock`
+3. Atomically releases the +1 redundance + early_finished count via `fanin_refcount.fetch_add`
+4. If all deps satisfied: pushes task to ready queue
 
 The scheduler's completion handler mirrors this:
-1. Mark `task_state[slot] = COMPLETED`
-2. **Acquire** `fanout_lock`, read `fanout_head`, **release** lock
-3. Traverse fanout list, incrementing each consumer's `fanin_refcount`
-4. Mark `task_state[slot] = CONSUMED` when `fanout_refcount` reaches `fanout_count`
 
-This lock protocol guarantees every consumer is accounted for exactly once.
+1. **Acquire** `fanout_lock`, mark `task_state = COMPLETED`, read `fanout_head`, **release** lock
+2. Traverse fanout list, incrementing each consumer's `fanin_refcount`
+3. Mark `task_state = CONSUMED` when `fanout_refcount` reaches `fanout_count`
+
+This protocol guarantees every consumer is accounted for exactly once.
 
 ### 7.4 Scope Mechanism (`PTO2_SCOPE`)
 
 Scopes control the lifetime of intermediate buffers. Each scope:
+
 - Tracks tasks submitted within it via a flat `scope_tasks[]` buffer partitioned by `scope_begins[]`
 - On `scope_end`: increments `fanout_refcount` for scope tasks; when it reaches `fanout_count`, the task's packed buffer can be reclaimed
 
 ```cpp
 PTO2_SCOPE(rt) {
     // Tasks submitted here belong to this scope
-    pto2_rt_submit_aic_task(rt, FUNC_QK, params, n);
-    pto2_rt_submit_aiv_task(rt, FUNC_SF, params, n);
+    pto2_rt_submit_aic_task(FUNC_QK, args);
+    pto2_rt_submit_aiv_task(FUNC_SF, args);
 }
 // scope_end: scope reference released from all tasks above
 ```
@@ -432,7 +449,7 @@ PTO2_SCOPE(rt) {
 With `aicpu_thread_num=4`, the AICPU runs 4 threads:
 
 | Thread | Role | Cores |
-|--------|------|-------|
+| ------ | ---- | ----- |
 | 0 | Scheduler | 6 AIC + ~13 AIV |
 | 1 | Scheduler | 6 AIC + ~13 AIV |
 | 2 | Scheduler | 6 AIC + ~13 AIV |
@@ -445,12 +462,14 @@ Core assignment: AICs and AIVs are divided equally among the 3 scheduler threads
 Each scheduler thread runs a tight loop with two main phases:
 
 **Phase 1 — Completion Handling**:
+
 - Poll register `COND` on each managed core
-- When `TASK_FIN_STATE` detected: record completion timestamps, call `on_subtask_complete(mixed_task_id, subslot)` to set the done bit; when `subtask_done_mask == active_mask`, trigger `on_mixed_task_complete(mixed_task_id)` which marks `task_state[slot] = COMPLETED`, acquires fanout lock, traverses fanout list (incrementing consumers' `fanin_refcount`), marks `task_state[slot] = CONSUMED`, and advances `last_task_alive` watermark
+- When `TASK_FIN_STATE` detected: record completion timestamps, call `on_subtask_complete(task_id, subslot)` to set the done bit; when `subtask_done_mask == active_mask`, trigger `on_mixed_task_complete(task_id)` which marks `task_state[slot] = COMPLETED`, acquires fanout lock, traverses fanout list (incrementing consumers' `fanin_refcount`), marks `task_state[slot] = CONSUMED`, and advances `last_task_alive` watermark
 
 **Phase 2 — Dispatch**:
+
 - For each idle core: pop a task from the matching shape-based ready queue (lock-free MPMC Vyukov queue, one per resource shape)
-- Build `PTO2DispatchPayload` from `TaskDescriptor` with `mixed_task_id`, `subslot`, `kernel_id`, and `core_type`
+- Build `PTO2DispatchPayload` from `TaskDescriptor` with `task_id`, `subslot`, `kernel_id`, and `core_type`
 - Write task pointer to `Handshake.task`, signal AICore via register `DATA_MAIN_BASE`
 
 After these phases, the scheduler updates profiling headers and checks for termination (all tasks completed and orchestrator done).
@@ -469,7 +488,7 @@ Ready queues use a lock-free bounded MPMC (Vyukov) design:
 
 After a task reaches state CONSUMED (4), the scheduler tries to advance `last_task_alive`:
 
-```
+```text
 while la < current_task_index:
     if task_state[la & mask] < CONSUMED: break
     reset fanin_refcount[la & mask] = 0
@@ -489,7 +508,7 @@ This is lock-free (CAS-based) and multiple scheduler threads can attempt it conc
 Each AICore worker has a `Handshake` struct in shared memory:
 
 | Field | Direction | Purpose |
-|-------|-----------|---------|
+| ----- | --------- | ------- |
 | `task` | AICPU→AICore | Pointer to `PTO2DispatchPayload` |
 | `control` | AICPU→AICore | 0=normal, 1=shutdown |
 | `perf_records_addr` | AICPU→AICore | Performance buffer address |
@@ -498,14 +517,15 @@ Each AICore worker has a `Handshake` struct in shared memory:
 
 Instead of polling `Handshake.task_status`, the production protocol uses hardware registers.
 
-> **Multi-ring note**: `mixed_task_id` is 64-bit but registers are 32-bit. A per-core monotonic dispatch counter (`s_dispatch_seq`) replaces `mixed_task_id` in register writes to prevent collisions. See [MULTI_RING.md §6](MULTI_RING.md).
+> **Multi-ring note**: `task_id` is 64-bit but registers are 32-bit. A per-core monotonic dispatch counter (`s_dispatch_seq`) replaces `task_id` in register writes to prevent collisions. See [MULTI_RING.md §6](MULTI_RING.md).
 
 | Register | Direction | Usage |
-|----------|-----------|-------|
+| -------- | --------- | ----- |
 | `DATA_MAIN_BASE` | AICPU→AICore | Write `task_id` to dispatch (idle=0x7FFFFFFD); `EXIT_SIGNAL` to shut down |
 | `COND` | AICore→AICPU | `[bit31=state, bits30:0=task_id]`: ACK (state=0) or FIN (state=1) |
 
 **AICore execution loop**:
+
 1. Poll `DATA_MAIN_BASE` for value != AICPU_IDLE_TASK_ID
 2. Read payload from `Handshake.task`
 3. Write ACK to `COND`
@@ -517,8 +537,8 @@ Instead of polling `Handshake.task_status`, the production protocol uses hardwar
 Built by the scheduler from `PTO2TaskDescriptor`:
 
 | Field | Description |
-|-------|-------------|
-| `mixed_task_id` | Mixed-task identifier (for completion aggregation) |
+| ----- | ----------- |
+| `task_id` | Mixed-task identifier (for completion aggregation) |
 | `subslot` | Which subtask slot this dispatch represents (`AIC`, `AIV0`, or `AIV1`) |
 | `kernel_id` | Function ID for this subtask slot |
 | `core_type` | AIC or AIV |
@@ -550,12 +570,13 @@ Built by the scheduler from `PTO2TaskDescriptor`:
 ### 10.3 Thread Startup Synchronization
 
 | Flag | Set by | Waited by | Purpose |
-|------|--------|-----------|---------|
+| ---- | ------ | --------- | ------- |
 | `runtime_init_ready_` | Thread 3 | Threads 0-2 | Runtime and SM handle initialized |
 | `pto2_init_done_` | First init thread | Others | One-time memset of arrays started (exchange guard) |
 | `pto2_init_complete_` | Init thread | Thread 3 + others | One-time init of per-task arrays done |
 
 Startup sequence:
+
 1. Thread 3: create SM handle + runtime → set `runtime_init_ready_`
 2. Scheduler threads: wait for `runtime_init_ready_` → one thread wins `pto2_init_done_` exchange → memset per-task arrays → set `pto2_init_complete_`; other threads wait for `pto2_init_complete_`
 3. Thread 3: wait for `pto2_init_complete_` → configure orchestrator-scheduler pointers
@@ -571,31 +592,30 @@ The orchestration API is defined in `pto_orchestration_api.h`. Orchestration cod
 ### 11.1 Core API
 
 | Function/Macro | Purpose |
-|----------------|---------|
-| `pto2_rt_submit_task(rt, mixed_kernels, params, n)` | Submit a mixed task with `MixedKernels` struct |
-| `pto2_rt_submit_aic_task(rt, kernel_id, params, n)` | Convenience: submit AIC-only task |
-| `pto2_rt_submit_aiv_task(rt, kernel_id, params, n)` | Convenience: submit AIV-only task |
-| `PTO2_SCOPE(rt) { ... }` | RAII scope for buffer lifetime |
-| `pto2_rt_orchestration_done(rt)` | Signal orchestration complete |
-| `pto2_rt_init_tensor_pool(rt)` | Initialize tensor pool for `make_tensor()` |
+| -------------- | ------- |
+| `pto2_rt_submit_task(mixed_kernels, args)` | Submit a mixed task with `MixedKernels` struct |
+| `pto2_rt_submit_aic_task(kernel_id, args)` | Convenience: submit AIC-only task |
+| `pto2_rt_submit_aiv_task(kernel_id, args)` | Convenience: submit AIV-only task |
+| `PTO2_SCOPE() { ... }` | RAII scope for buffer lifetime |
+| `pto2_rt_orchestration_done()` | Signal orchestration complete |
 
 ### 11.2 Parameter Construction
 
 | Function | Description |
-|----------|-------------|
+| -------- | ----------- |
 | `make_tensor_external(ptr, shapes, ndim, dtype)` | Wrap an existing device pointer as a tensor |
-| `make_tensor(shapes, ndim, dtype)` | Create an intermediate tensor (addr=0, allocated by runtime from heap) |
-| `make_input_param(tensor)` | INPUT parameter — read by the task |
-| `make_output_param(tensor)` | OUTPUT parameter — written by the task (auto-allocated if addr=0) |
-| `make_inout_param(tensor)` | INOUT parameter — read then written |
-| `make_scalar_param(value)` | 64-bit scalar parameter |
+| `TensorCreateInfo(shapes, ndim, dtype)` | Describe a runtime-created output buffer |
+| `Arg::add_input(tensor)` | INPUT parameter — read by the task |
+| `Arg::add_output(create_info)` | OUTPUT parameter — runtime allocates and returns a Tensor |
+| `Arg::add_inout(tensor)` | INOUT parameter — existing tensor read then written |
+| `Arg::add_scalar(value)` | 64-bit scalar parameter |
 
 ### 11.3 Resource Shapes
 
 Tasks are queued by resource shape, which is derived from the `active_mask` in the `MixedKernels` struct:
 
 | Shape | Active Mask | Description |
-|-------|-------------|-------------|
+| ----- | ----------- | ----------- |
 | `AIC_ONLY` | AIC only | AIC cores (matrix multiplication) |
 | `AIV_X1` | AIV0 or AIV1 only | Single AIV core (vector operations) |
 | `AIV_X2` | AIV0 + AIV1 | Two AIV cores |
@@ -608,7 +628,7 @@ Each orchestration `.so` must export:
 
 ```cpp
 extern "C" PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count);
-extern "C" void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count);
+extern "C" void aicpu_orchestration_entry(uint64_t* args, int arg_count);
 ```
 
 ---
@@ -641,12 +661,12 @@ RUNTIME_CONFIG = {
 ### 12.2 Orchestration Structure
 
 ```cpp
-void aicpu_orchestration_entry(PTO2Runtime* rt, uint64_t* args, int arg_count) {
+void aicpu_orchestration_entry(uint64_t* args, int arg_count) {
     // Unpack args: query, key_cache, value_cache, block_table, context_lens, out, config
     for (q_idx = 0; q_idx < q_loop; q_idx++) {
         for (batch_start = 0; batch_start < batch; batch_start += IN_CORE_BATCH) {
-            PTO2_SCOPE(rt) {
-                // Allocate accumulator tensors (oi, li, mi) via make_tensor()
+            PTO2_SCOPE() {
+                // Describe accumulator tensors (oi, li, mi) with TensorCreateInfo
                 // Submit AIV_HUB to initialize accumulators
                 for (bn = 0; bn < max_bn; bn++) {
                     // Allocate intermediate tensors (sij, pij, mij, lij, oi_new)

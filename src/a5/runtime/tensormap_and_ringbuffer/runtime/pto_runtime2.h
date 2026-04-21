@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * PTO Runtime2 - Main Interface
  *
@@ -19,7 +29,7 @@
  *   3. Mark orchestration complete: pto2_orchestrator_done()
  *   4. Destroy runtime: pto2_runtime_destroy()
  *
- * Based on: docs/runtime_buffer_manager_methods.md
+ * Based on: docs/RUNTIME_LOGIC.md
  */
 
 #ifndef PTO_RUNTIME2_H
@@ -32,9 +42,6 @@
 #include "pto_tensormap.h"
 #include "pto_scheduler.h"
 #include "pto_orchestrator.h"
-
-// Maximum number of orchestrator threads supported
-constexpr int PTO2_MAX_ORCH_THREADS = 4;
 
 // =============================================================================
 // Runtime Context
@@ -59,19 +66,27 @@ enum PTO2RuntimeMode {
 typedef struct PTO2Runtime PTO2Runtime;  // forward declare for ops signatures
 
 struct PTO2RuntimeOps {
-    void (*submit_task)(PTO2Runtime* rt, const MixedKernels& mixed_kernels,
-                        const PTOParam& params);
-    void (*scope_begin)(PTO2Runtime* rt);
-    void (*scope_end)(PTO2Runtime* rt);
-    void (*orchestration_done)(PTO2Runtime* rt);
-    bool (*is_fatal)(PTO2Runtime* rt);
+    TaskOutputTensors (*submit_task)(PTO2Runtime *rt, const MixedKernels &mixed_kernels, const Arg &args);
+    void (*scope_begin)(PTO2Runtime *rt);
+    void (*scope_end)(PTO2Runtime *rt);
+    void (*orchestration_done)(PTO2Runtime *rt);
+    bool (*is_fatal)(PTO2Runtime *rt);
+    void (*report_fatal)(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...);
 
     // Logging (populated by runtime, called by orchestration)
-    void (*log_error)(const char* func, const char* fmt, ...);
-    void (*log_warn)(const char* func, const char* fmt, ...);
-    void (*log_info)(const char* func, const char* fmt, ...);
-    void (*log_debug)(const char* func, const char* fmt, ...);
-    void (*log_always)(const char* func, const char* fmt, ...);
+    void (*log_error)(const char *func, const char *fmt, ...);
+    void (*log_warn)(const char *func, const char *fmt, ...);
+    void (*log_info)(const char *func, const char *fmt, ...);
+    void (*log_debug)(const char *func, const char *fmt, ...);
+    void (*log_always)(const char *func, const char *fmt, ...);
+
+    // Cross-layer data access (orchestration reads/writes tensor values via runtime)
+    // Placed after logging to avoid shifting hot-path field offsets.
+    uint64_t (*get_tensor_data)(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[]);
+    void (*set_tensor_data)(
+        PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+    );
+    TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const Arg &args);
 };
 
 /**
@@ -82,24 +97,23 @@ struct PTO2RuntimeOps {
  */
 struct PTO2Runtime {
     // Ops table (first field — used by orchestration .so via function pointers)
-    const PTO2RuntimeOps*   ops;
+    const PTO2RuntimeOps *ops;
 
     // Components
-    PTO2SharedMemoryHandle* sm_handle;
-    PTO2OrchestratorState   orchestrators[PTO2_MAX_ORCH_THREADS];
-    int                     orch_count;     // Number of active orchestrator states
-    PTO2SchedulerState      scheduler;
+    PTO2SharedMemoryHandle *sm_handle;
+    PTO2OrchestratorState orchestrator;
+    PTO2SchedulerState scheduler;
 
     // GM Heap for output buffers
-    void*                   gm_heap;
-    uint64_t                  gm_heap_size;
-    bool                    gm_heap_owned;  // True if we allocated it
+    void *gm_heap;
+    uint64_t gm_heap_size;
+    bool gm_heap_owned;  // True if we allocated it
 
     // Mode
-    PTO2RuntimeMode         mode;
+    PTO2RuntimeMode mode;
 
     // Statistics
-    int64_t                 total_cycles;
+    int64_t total_cycles;
 };
 
 // =============================================================================
@@ -112,7 +126,7 @@ struct PTO2Runtime {
  * @param mode Execution mode
  * @return Runtime context, or NULL on failure
  */
-PTO2Runtime* pto2_runtime_create(PTO2RuntimeMode mode);
+PTO2Runtime *pto2_runtime_create(PTO2RuntimeMode mode);
 
 /**
  * Create runtime with custom sizes
@@ -122,10 +136,10 @@ PTO2Runtime* pto2_runtime_create(PTO2RuntimeMode mode);
  * @param heap_size        Size of GM heap
  * @return Runtime context, or NULL on failure
  */
-PTO2Runtime* pto2_runtime_create_custom(PTO2RuntimeMode mode,
-                                         uint64_t task_window_size,
-                                         uint64_t heap_size,
-                                         int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
+PTO2Runtime *pto2_runtime_create_custom(
+    PTO2RuntimeMode mode, uint64_t task_window_size, uint64_t heap_size,
+    int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+);
 
 /**
  * Create runtime from existing shared memory and GM heap (e.g. on device).
@@ -137,28 +151,20 @@ PTO2Runtime* pto2_runtime_create_custom(PTO2RuntimeMode mode,
  * @param heap_size GM heap size in bytes
  * @return Runtime context, or NULL on failure
  */
-PTO2Runtime* pto2_runtime_create_from_sm(PTO2RuntimeMode mode,
-                                          PTO2SharedMemoryHandle* sm_handle,
-                                          void* gm_heap,
-                                          uint64_t heap_size,
-                                          int orch_count = 1,
-                                          int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE);
+PTO2Runtime *pto2_runtime_create_from_sm(
+    PTO2RuntimeMode mode, PTO2SharedMemoryHandle *sm_handle, void *gm_heap, uint64_t heap_size,
+    int32_t dep_pool_capacity = PTO2_DEP_LIST_POOL_SIZE
+);
 
 /**
  * Destroy runtime and free all resources
  */
-void pto2_runtime_destroy(PTO2Runtime* rt);
+void pto2_runtime_destroy(PTO2Runtime *rt);
 
 /**
  * Set execution mode
  */
-void pto2_runtime_set_mode(PTO2Runtime* rt, PTO2RuntimeMode mode);
-
-/**
- * Set the orchestrator index for the current thread.
- * Must be called before any orchestration API calls on a given thread.
- */
-void pto2_set_orch_thread_idx(int idx);
+void pto2_runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
 
 // =============================================================================
 // Orchestration API (called by orchestration function)
@@ -171,7 +177,7 @@ void pto2_set_orch_thread_idx(int idx);
  * bounded by the scope. When scope_end() is called, the scope
  * releases its reference to all enclosed tasks.
  */
-void pto2_rt_scope_begin(PTO2Runtime* rt);
+void pto2_rt_scope_begin(PTO2Runtime *rt);
 
 /**
  * End current scope
@@ -179,95 +185,33 @@ void pto2_rt_scope_begin(PTO2Runtime* rt);
  * Releases scope reference for all tasks submitted since scope_begin().
  * Tasks whose refcount reaches zero will have their buffers released.
  */
-void pto2_rt_scope_end(PTO2Runtime* rt);
+void pto2_rt_scope_end(PTO2Runtime *rt);
 
 /**
  * Mark orchestration as complete
  *
  * Signals that no more tasks will be submitted.
  */
-void pto2_rt_orchestration_done(PTO2Runtime* rt);
+void pto2_rt_orchestration_done(PTO2Runtime *rt);
 
 /**
- * Scope helper macros for C
- *
- * These macros provide scope management for C code.
- * For C++, prefer using PTO2_SCOPE_GUARD or PTO2_SCOPE (see below).
- *
- * Usage (C):
- *   PTO2_SCOPE_BEGIN(rt);
- *   pto2_rt_submit_task(...);
- *   pto2_rt_submit_task(...);
- *   PTO2_SCOPE_END(rt);
+ * Enter fatal state explicitly from orchestration.
  */
-#define PTO2_SCOPE_BEGIN(rt) pto2_rt_scope_begin(rt)
-#define PTO2_SCOPE_END(rt)   pto2_rt_scope_end(rt)
+void pto2_rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...);
 
 /**
- * RAII Scope Guard for C++
- *
- * PTO2ScopeGuard is a C++ RAII wrapper that automatically manages scope lifetime.
- * It calls pto2_rt_scope_begin() on construction and pto2_rt_scope_end() on destruction,
- * ensuring proper cleanup even in error paths.
- *
- * Usage Option 1 - Direct instantiation (recommended):
- *   PTO2ScopeGuard scope_guard(rt);
- *   pto2_rt_submit_task(...);
- *   pto2_rt_submit_task(...);
- *   // scope automatically ends here when scope_guard destructor is called
- *
- * Usage Option 2 - Macro for anonymous guard:
- *   PTO2_SCOPE_GUARD(rt);
- *   pto2_rt_submit_task(...);
- *   // scope automatically ends at end of current block
- *
- * Usage Option 3 - Scoped block with if statement:
- *   PTO2_SCOPE(rt) {
- *       pto2_rt_submit_task(...);
- *       pto2_rt_submit_task(...);
- *   } // scope automatically ends here
- *
- * Benefits:
- * - Exception-safe: scope ends even if exceptions are thrown
- * - Error-safe: no need to manually call PTO2_SCOPE_END in error paths
- * - Cleaner code: less boilerplate, automatic cleanup
- * - Less error-prone: impossible to forget scope cleanup
+ * Cross-layer data access: read a tensor value by waiting for its producer.
  */
-class PTO2ScopeGuard {
-public:
-    PTO2ScopeGuard(PTO2Runtime* rt) : rt_(rt) {
-        pto2_rt_scope_begin(rt_);
-    }
-    ~PTO2ScopeGuard() {
-        pto2_rt_scope_end(rt_);
-    }
-private:
-    PTO2Runtime* rt_;
-};
+uint64_t pto2_get_tensor_data(PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[]);
 
 /**
- * Macro to create an anonymous scope guard with a unique name.
- * The [[maybe_unused]] attribute suppresses warnings if the guard
- * variable is not explicitly used.
- *
- * Example:
- *   PTO2_SCOPE_GUARD(rt);
- *   pto2_rt_submit_task(...);
+ * Cross-layer data access: write a value to a tensor at given indices.
+ * Waits for producer completion (WAW) and all consumers (WAR) via TensorMap.
+ * See set_tensor_data in pto_orchestration_api.h for full documentation.
  */
-#define _PTO2_CONCATENATE_IMPL(x, y) x ## y
-#define _PTO2_CONCATENATE(x, y) _PTO2_CONCATENATE_IMPL(x, y)
-#define PTO2_SCOPE_GUARD(rt) [[maybe_unused]] PTO2ScopeGuard _PTO2_CONCATENATE(scope_guard_, __COUNTER__)(rt)
-
-/**
- * Macro to create a scoped block with automatic scope management.
- * Uses if-statement initialization (C++17) to create guard and execute block.
- *
- * Example:
- *   PTO2_SCOPE(rt) {
- *       pto2_rt_submit_task(...);
- *   } // scope automatically ends here
- */
-#define PTO2_SCOPE(rt) if (PTO2_SCOPE_GUARD(rt); true)
+void pto2_set_tensor_data(
+    PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
+);
 
 /**
  * Slim config struct exported by orchestration .so via aicpu_orchestration_config().
@@ -276,8 +220,8 @@ private:
 #ifndef PTO2_ORCHESTRATION_CONFIG_DEFINED
 #define PTO2_ORCHESTRATION_CONFIG_DEFINED
 struct PTO2OrchestrationConfig {
-    int         expected_arg_count;
+    int expected_arg_count;
 };
 #endif
 
-#endif // PTO_RUNTIME2_H
+#endif  // PTO_RUNTIME2_H

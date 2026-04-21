@@ -1,16 +1,24 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * PTO Runtime2 - Scheduler Implementation
  *
  * Implements scheduler state management, ready queues, and task lifecycle.
  *
- * Based on: docs/runtime_buffer_manager_methods.md
+ * Based on: docs/RUNTIME_LOGIC.md
  */
 
 #include "pto_scheduler.h"
 #include <inttypes.h>
-#include <new>
 #include <stdlib.h>
-#include <utility>
 #include "common/unified_log.h"
 
 // =============================================================================
@@ -57,14 +65,20 @@ PTO2SchedProfilingData pto2_scheduler_get_profiling(int thread_idx) {
 // Task State Names
 // =============================================================================
 
-const char* pto2_task_state_name(PTO2TaskState state) {
+const char *pto2_task_state_name(PTO2TaskState state) {
     switch (state) {
-        case PTO2_TASK_PENDING:   return "PENDING";
-        case PTO2_TASK_READY:     return "READY";
-        case PTO2_TASK_RUNNING:   return "RUNNING";
-        case PTO2_TASK_COMPLETED: return "COMPLETED";
-        case PTO2_TASK_CONSUMED:  return "CONSUMED";
-        default:                  return "UNKNOWN";
+    case PTO2_TASK_PENDING:
+        return "PENDING";
+    case PTO2_TASK_READY:
+        return "READY";
+    case PTO2_TASK_RUNNING:
+        return "RUNNING";
+    case PTO2_TASK_COMPLETED:
+        return "COMPLETED";
+    case PTO2_TASK_CONSUMED:
+        return "CONSUMED";
+    default:
+        return "UNKNOWN";
     }
 }
 
@@ -72,8 +86,8 @@ const char* pto2_task_state_name(PTO2TaskState state) {
 // Ready Queue Implementation
 // =============================================================================
 
-bool pto2_ready_queue_init(PTO2ReadyQueue* queue, uint64_t capacity) {
-    queue->slots = (PTO2ReadyQueueSlot*)malloc(capacity * sizeof(PTO2ReadyQueueSlot));
+bool pto2_ready_queue_init(PTO2ReadyQueue *queue, uint64_t capacity) {
+    queue->slots = (PTO2ReadyQueueSlot *)malloc(capacity * sizeof(PTO2ReadyQueueSlot));
     if (!queue->slots) {
         return false;
     }
@@ -91,7 +105,7 @@ bool pto2_ready_queue_init(PTO2ReadyQueue* queue, uint64_t capacity) {
     return true;
 }
 
-void pto2_ready_queue_destroy(PTO2ReadyQueue* queue) {
+void pto2_ready_queue_destroy(PTO2ReadyQueue *queue) {
     if (queue->slots) {
         free(queue->slots);
         queue->slots = NULL;
@@ -102,54 +116,31 @@ void pto2_ready_queue_destroy(PTO2ReadyQueue* queue) {
 // Scheduler Initialization
 // =============================================================================
 
-bool PTO2SchedulerState::RingSchedState::init(
-    PTO2SharedMemoryHandle* sm_handle, int32_t ring_id,
-    void* gm_heap_base, uint64_t per_ring_heap_size) {
-    task_descriptors = sm_handle->task_descriptors[ring_id];
-    heap_base = (char*)gm_heap_base + ring_id * per_ring_heap_size;
-    task_window_size = sm_handle->header->rings[ring_id].task_window_size;
-    task_window_mask = static_cast<int32_t>(task_window_size - 1);
+bool PTO2SchedulerState::RingSchedState::init(PTO2SharedMemoryHeader *sm_header, int32_t ring_id) {
+    ring = &sm_header->rings[ring_id];
     last_task_alive = 0;
-    last_heap_consumed = 0;
-    heap_tail = 0;
-    slot_states = nullptr;
     advance_lock.store(0, std::memory_order_relaxed);
 
-    // Allocate per-task slot state array (dynamically sized based on runtime window_size)
-    slot_states = new (std::nothrow) PTO2TaskSlotState[task_window_size];
-    if (!slot_states) {
-        return false;
-    }
-
-    // Zero-initialize all per-task slot state fields.
-    for (uint64_t i = 0; i < task_window_size; i++) {
-        slot_states[i].fanout_lock.store(0, std::memory_order_relaxed);
-        slot_states[i].fanout_count = 0;
-        slot_states[i].fanout_head = nullptr;
-        slot_states[i].task_state.store(static_cast<PTO2TaskState>(0), std::memory_order_relaxed);
-        slot_states[i].fanin_refcount.store(0, std::memory_order_relaxed);
-        slot_states[i].fanin_count = 0;
-        slot_states[i].fanout_refcount.store(0, std::memory_order_relaxed);
-        slot_states[i].payload = nullptr;
-        slot_states[i].task = nullptr;
-        slot_states[i].active_mask = 0;
-        slot_states[i].subtask_done_mask.store(0, std::memory_order_relaxed);
-        slot_states[i].ring_id = 0;
+    // Initialize all per-task slot state fields.
+    // bind() sets payload, task, ring_id — immutable after init, bound once
+    // to their fixed shared-memory addresses.
+    // reset_for_reuse() sets dynamic fields to reclaim defaults (fanout_count=1,
+    // rest zero) so the first submit needs no reset.
+    for (uint64_t i = 0; i < ring->task_window_size; i++) {
+        ring->slot_states[i].bind(&ring->task_payloads[i], &ring->task_descriptors[i], static_cast<uint8_t>(ring_id));
+        ring->slot_states[i].reset_for_reuse();
+        ring->slot_states[i].fanin_count = 0;
+        ring->slot_states[i].active_mask = 0;
+        ring->slot_states[i].subtask_done_mask.store(0, std::memory_order_relaxed);
     }
 
     return true;
 }
 
-void PTO2SchedulerState::RingSchedState::destroy() {
-    if (!slot_states) return;
-    delete[] slot_states;
-    slot_states = nullptr;
-}
+void PTO2SchedulerState::RingSchedState::destroy() { ring = nullptr; }
 
-bool pto2_scheduler_init(PTO2SchedulerState* sched,
-                          PTO2SharedMemoryHandle* sm_handle,
-                          void* gm_heap_base, uint64_t per_ring_heap_size) {
-    sched->sm_handle = sm_handle;
+bool pto2_scheduler_init(PTO2SchedulerState *sched, PTO2SharedMemoryHeader *sm_header, int32_t dep_pool_capacity) {
+    sched->sm_header = sm_header;
 #if PTO2_SCHED_PROFILING
     sched->tasks_completed.store(0, std::memory_order_relaxed);
     sched->tasks_consumed.store(0, std::memory_order_relaxed);
@@ -157,7 +148,7 @@ bool pto2_scheduler_init(PTO2SchedulerState* sched,
 
     // Initialize per-ring state
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        if (!sched->ring_sched_states[r].init(sm_handle, r, gm_heap_base, per_ring_heap_size)) {
+        if (!sched->ring_sched_states[r].init(sm_header, r)) {
             for (int j = 0; j < r; j++) {
                 sched->ring_sched_states[j].destroy();
             }
@@ -179,13 +170,54 @@ bool pto2_scheduler_init(PTO2SchedulerState* sched,
         }
     }
 
+    // Initialize per-ring wiring queues and dep pools (exclusively managed by scheduler thread 0)
+    for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+        PTO2DepListEntry *dep_entries =
+            reinterpret_cast<PTO2DepListEntry *>(calloc(dep_pool_capacity, sizeof(PTO2DepListEntry)));
+        if (!dep_entries) {
+            for (int j = 0; j < r; j++) {
+                free(sched->ring_sched_states[j].dep_pool.base);
+            }
+            for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+                pto2_ready_queue_destroy(&sched->ready_queues[i]);
+            }
+            sched->wiring.queue.destroy();
+            for (int rr = 0; rr < PTO2_MAX_RING_DEPTH; rr++) {
+                sched->ring_sched_states[rr].destroy();
+            }
+            return false;
+        }
+        sched->ring_sched_states[r].dep_pool.init(dep_entries, dep_pool_capacity, &sm_header->orch_error_code);
+    }
+
+    // Initialize global wiring queue (SPSC: orchestrator pushes, scheduler thread 0 drains)
+    if (!sched->wiring.queue.init(PTO2_WRIRING_QUEUE_SIZE)) {
+        for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
+            free(sched->ring_sched_states[r].dep_pool.base);
+        }
+        for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
+            pto2_ready_queue_destroy(&sched->ready_queues[i]);
+        }
+        for (int rr = 0; rr < PTO2_MAX_RING_DEPTH; rr++) {
+            sched->ring_sched_states[rr].destroy();
+        }
+        return false;
+    }
+    sched->wiring.batch_count = 0;
+    sched->wiring.batch_index = 0;
+    sched->wiring.backoff_counter = 0;
+
     return true;
 }
 
-void pto2_scheduler_destroy(PTO2SchedulerState* sched) {
+void pto2_scheduler_destroy(PTO2SchedulerState *sched) {
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
         sched->ring_sched_states[r].destroy();
+        free(sched->ring_sched_states[r].dep_pool.base);
+        sched->ring_sched_states[r].dep_pool.base = nullptr;
     }
+
+    sched->wiring.queue.destroy();
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
         pto2_ready_queue_destroy(&sched->ready_queues[i]);
@@ -196,14 +228,19 @@ void pto2_scheduler_destroy(PTO2SchedulerState* sched) {
 // Debug Utilities
 // =============================================================================
 
-void pto2_scheduler_print_stats(PTO2SchedulerState* sched) {
+void pto2_scheduler_print_stats(PTO2SchedulerState *sched) {
     LOG_INFO("=== Scheduler Statistics ===");
     for (int r = 0; r < PTO2_MAX_RING_DEPTH; r++) {
-        if (sched->ring_sched_states[r].last_task_alive > 0 ||
-            sched->ring_sched_states[r].heap_tail > 0) {
+        if (sched->ring_sched_states[r].last_task_alive > 0) {
             LOG_INFO("Ring %d:", r);
             LOG_INFO("  last_task_alive: %d", sched->ring_sched_states[r].last_task_alive);
-            LOG_INFO("  heap_tail:       %" PRIu64, sched->ring_sched_states[r].heap_tail);
+            auto &dp = sched->ring_sched_states[r].dep_pool;
+            if (dp.top > 0) {
+                LOG_INFO(
+                    "  dep_pool: top=%d tail=%d used=%d high_water=%d capacity=%d", dp.top, dp.tail, dp.top - dp.tail,
+                    dp.high_water, dp.capacity
+                );
+            }
         }
     }
 #if PTO2_SCHED_PROFILING
@@ -213,14 +250,13 @@ void pto2_scheduler_print_stats(PTO2SchedulerState* sched) {
     LOG_INFO("============================");
 }
 
-void pto2_scheduler_print_queues(PTO2SchedulerState* sched) {
+void pto2_scheduler_print_queues(PTO2SchedulerState *sched) {
     LOG_INFO("=== Ready Queues ===");
 
-    const char* shape_names[] = {"AIC_ONLY", "AIV_X1", "AIV_X2", "AIC_AIV_X1", "AIC_AIV_X2"};
+    const char *shape_names[] = {"AIC", "AIV", "MIX"};
 
     for (int i = 0; i < PTO2_NUM_RESOURCE_SHAPES; i++) {
-        LOG_INFO("  %s: count=%" PRIu64, shape_names[i],
-                 sched->ready_queues[i].size());
+        LOG_INFO("  %s: count=%" PRIu64, shape_names[i], sched->ready_queues[i].size());
     }
 
     LOG_INFO("====================");

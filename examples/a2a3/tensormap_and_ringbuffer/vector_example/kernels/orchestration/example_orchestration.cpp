@@ -1,5 +1,15 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
- * Example: aicpu_orchestration_entry 设备端编排
+ * Example: aicpu_orchestration_entry (device-side orchestration)
  *
  * DAG structure for formula: (a + b + 1)(a + b + 2) + (a + b)
  *   t0: c = a + b     (func_id=0, kernel_add)       [outer scope]
@@ -21,44 +31,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "pto_orchestration_api.h"
-
-// =============================================================================
-// Args layout (from code_runner.py + runtime_maker.cpp extension):
-// Base args from code_runner.py: [tensors..., sizes..., SIZE]
-// Extended by runtime_maker.cpp: [..., gm_heap, heap_size] (always last 2)
-//
-// For this example (a+b+1)(a+b+2)+(a+b):
-//   [a, b, f, size_a, size_b, size_f, SIZE]
-//   + [gm_heap, heap_size] appended by runtime_maker.cpp
-//
-// Intermediate tensors (c, d, e, g) are allocated on-device by the runtime heap.
-// Generic access: gm_heap = args[arg_count - 2], heap_size = args[arg_count - 1]
-// =============================================================================
-
-// Tensor device pointers (order from code_runner.py: inputs, outputs)
-#define ARG_PTR_A 0
-#define ARG_PTR_B 1
-#define ARG_PTR_F 2  // output
-
-// Tensor sizes (same order as pointers)
-#define ARG_SIZE_A 3
-#define ARG_SIZE_B 4
-#define ARG_SIZE_F 5
-
-// Element count (scalar)
-#define ARG_SIZE 6
-
-// Helper to encode float as uint64_t for scalar params
-static uint64_t float_to_u64(float f) {
-    union {
-        float f32;
-        uint64_t u64;
-    } conv;
-    conv.u64 = 0;  // Clear upper bits
-    conv.f32 = f;
-    return conv.u64;
-}
+#include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
 
 extern "C" {
 
@@ -66,12 +39,11 @@ extern "C" {
  * Orchestration config — the executor reads these values to set up
  * shared memory and runtime before calling aicpu_orchestration_entry.
  */
-__attribute__((visibility("default")))
-PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count) {
-    (void)args;
-    (void)arg_count;
+__attribute__((visibility("default"))) PTO2OrchestrationConfig
+aicpu_orchestration_config(const ChipStorageTaskArgs &orch_args) {
+    (void)orch_args;  // NOLINT(readability/casting)
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 7,
+        .expected_arg_count = 3,
     };
 }
 
@@ -80,71 +52,62 @@ PTO2OrchestrationConfig aicpu_orchestration_config(uint64_t* args, int arg_count
  * The executor wraps this call in PTO2_SCOPE, so we are already inside
  * the outer scope on entry.
  */
-__attribute__((visibility("default")))
-void aicpu_orchestration_entry(uint64_t* args, int arg_count, int orch_thread_num, int orch_thread_index) {
-    (void)arg_count;
-    (void)orch_thread_num;
-    (void)orch_thread_index;
+__attribute__((visibility("default"))) void aicpu_orchestration_entry(const ChipStorageTaskArgs &orch_args) {
+    // golden shape = kernel shape, use from_tensor_arg() directly
+    Tensor ext_a = from_tensor_arg(orch_args.tensor(0));
+    Tensor ext_b = from_tensor_arg(orch_args.tensor(1));
+    Tensor ext_f = from_tensor_arg(orch_args.tensor(2));
 
-    void* arg_a_ptr = (void*)(uintptr_t)args[ARG_PTR_A];
-    void* arg_b_ptr = (void*)(uintptr_t)args[ARG_PTR_B];
-    void* arg_f_ptr = (void*)(uintptr_t)args[ARG_PTR_F];
-    int SIZE = (int)(args[ARG_SIZE] & 0x7FFFFFFF);
+    uint32_t SIZE = orch_args.tensor(0).shapes[0];
+    LOG_INFO("===============SIZE=%u", SIZE);
 
-    LOG_INFO("===============SIZE=%d", SIZE);
-
-    uint32_t ext_shapes[1] = {(uint32_t)SIZE};
-    Tensor ext_a = make_tensor_external(arg_a_ptr, ext_shapes, 1, DataType::FLOAT32);
-    Tensor ext_b = make_tensor_external(arg_b_ptr, ext_shapes, 1, DataType::FLOAT32);
-    Tensor ext_f = make_tensor_external(arg_f_ptr, ext_shapes, 1, DataType::FLOAT32);
-
-    uint32_t inter_shapes[1] = {(uint32_t)SIZE};
-    Tensor c = make_tensor(inter_shapes, 1, DataType::FLOAT32);  // c = a + b
+    uint32_t inter_shapes[1] = {SIZE};
+    TensorCreateInfo inter_ci(inter_shapes, 1, DataType::FLOAT32);
 
     // t0: c = a + b (kernel_id=0, kernel_add) [outer scope]
-    PTOParam params_t0;
+    Arg params_t0;
     params_t0.add_input(ext_a);
     params_t0.add_input(ext_b);
-    params_t0.add_output(c);
-    pto2_rt_submit_aiv_task(0, params_t0); // kernel_add
+    params_t0.add_output(inter_ci);
+    TaskOutputTensors outs_t0 = pto2_rt_submit_aiv_task(0, params_t0);  // kernel_add
+    const Tensor &c = outs_t0.get_ref(0);
 
     // Inner scope: owns t1, t2, t3, t4; intermediates d, e, g release on scope end.
     // c flows in from outer scope (outer-scope tensors are visible to inner scopes).
     PTO2_SCOPE() {
-        Tensor d = make_tensor(inter_shapes, 1, DataType::FLOAT32);  // d = c + 1
-        Tensor e = make_tensor(inter_shapes, 1, DataType::FLOAT32);  // e = c + 2
-        Tensor g = make_tensor(inter_shapes, 1, DataType::FLOAT32);  // g = d * e
-
         // t1: d = c + 1 (kernel_id=1, kernel_add_scalar)
-        PTOParam params_t1;
+        Arg params_t1;
         params_t1.add_input(c);
-        params_t1.add_output(d);
-        params_t1.add_scalar(float_to_u64(1.0f));
-        params_t1.add_scalar((uint64_t)3);
-        pto2_rt_submit_aiv_task(1, params_t1); // kernel_add_scalar
+        params_t1.add_output(inter_ci);
+        params_t1.add_scalar(1.0f);
+        params_t1.add_scalar(3u);
+        TaskOutputTensors outs_t1 = pto2_rt_submit_aiv_task(1, params_t1);  // kernel_add_scalar
+        const Tensor &d = outs_t1.get_ref(0);
 
         // t2: e = c + 2 (kernel_id=1, kernel_add_scalar)
-        PTOParam params_t2;
+        Arg params_t2;
         params_t2.add_input(c);
-        params_t2.add_output(e);
-        params_t2.add_scalar(float_to_u64(2.0f));
-        params_t2.add_scalar((uint64_t)3);
-        pto2_rt_submit_aiv_task(1, params_t2); // kernel_add_scalar
+        params_t2.add_output(inter_ci);
+        params_t2.add_scalar(2.0f);
+        params_t2.add_scalar(3u);
+        TaskOutputTensors outs_t2 = pto2_rt_submit_aiv_task(1, params_t2);  // kernel_add_scalar
+        const Tensor &e = outs_t2.get_ref(0);
 
         // t3: g = d * e (kernel_id=2, kernel_mul)
-        PTOParam params_t3;
+        Arg params_t3;
         params_t3.add_input(d);
         params_t3.add_input(e);
-        params_t3.add_output(g);
-        params_t3.add_scalar((uint64_t)3);
-        pto2_rt_submit_aiv_task(2, params_t3); // kernel_mul
+        params_t3.add_output(inter_ci);
+        params_t3.add_scalar(3u);
+        TaskOutputTensors outs_t3 = pto2_rt_submit_aiv_task(2, params_t3);  // kernel_mul
+        const Tensor &g = outs_t3.get_ref(0);
 
         // t4: f = g + c (kernel_id=0, kernel_add)
-        PTOParam params_t4;
+        Arg params_t4;
         params_t4.add_input(g);
         params_t4.add_input(c);
         params_t4.add_output(ext_f);
-        pto2_rt_submit_aiv_task(0, params_t4); // kernel_add
+        pto2_rt_submit_aiv_task(0, params_t4);  // kernel_add
     }  // inner scope ends: releases d, e, g
 }
 

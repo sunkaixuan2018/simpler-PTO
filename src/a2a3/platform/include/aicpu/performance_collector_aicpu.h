@@ -1,3 +1,13 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
 /**
  * @file performance_collector_aicpu.h
  * @brief AICPU performance data collection interface
@@ -26,20 +36,29 @@
  *
  * @param runtime Runtime instance pointer
  */
-void perf_aicpu_init_profiling(Runtime* runtime);
+void perf_aicpu_init_profiling(Runtime *runtime);
 
 /**
- * Record dispatch and finish timestamps
+ * Complete a PerfRecord with AICPU-side metadata after AICore task completion
  *
- * Updates task record with AICPU-side timing information.
+ * Reads perf_buf->count, validates task_id match against the latest record,
+ * and fills all AICPU-side fields. Callers must pre-extract fanout into a
+ * plain uint64_t array (platform layer cannot depend on runtime linked-list types).
  *
- * @param record PerfRecord pointer to update
- * @param dispatch_time Dispatch timestamp
- * @param finish_time Finish timestamp
+ * @param perf_buf              PerfBuffer pointer (from handshake perf_records_addr)
+ * @param expected_reg_task_id  Register dispatch token (low 32 bits) to validate
+ * @param task_id               Task identifier to write (PTO2 encoding or plain id)
+ * @param func_id               Kernel function identifier
+ * @param core_type             Core type (AIC/AIV)
+ * @param dispatch_time         AICPU timestamp when task was dispatched
+ * @param finish_time           AICPU timestamp when task completion was observed
+ * @param fanout                Pre-extracted successor task ID array (nullptr if none)
+ * @param fanout_count          Number of entries in fanout array (0 if none)
  */
-void perf_aicpu_record_dispatch_and_finish_time(PerfRecord* record,
-                                                 uint64_t dispatch_time,
-                                                 uint64_t finish_time);
+int perf_aicpu_complete_record(
+    PerfBuffer *perf_buf, uint32_t expected_reg_task_id, uint64_t task_id, uint32_t func_id, CoreType core_type,
+    uint64_t dispatch_time, uint64_t finish_time, const uint64_t *fanout, int32_t fanout_count
+);
 
 /**
  * Switch performance buffer when current buffer is full
@@ -50,7 +69,7 @@ void perf_aicpu_record_dispatch_and_finish_time(PerfRecord* record,
  * @param core_id Core ID
  * @param thread_idx Thread index
  */
-void perf_aicpu_switch_buffer(Runtime* runtime, int core_id, int thread_idx);
+void perf_aicpu_switch_buffer(Runtime *runtime, int core_id, int thread_idx);
 
 /**
  * Flush remaining performance data
@@ -62,10 +81,7 @@ void perf_aicpu_switch_buffer(Runtime* runtime, int core_id, int thread_idx);
  * @param cur_thread_cores Array of core IDs managed by this thread
  * @param core_num Number of cores managed by this thread
  */
-void perf_aicpu_flush_buffers(Runtime* runtime,
-                               int thread_idx,
-                               const int* cur_thread_cores,
-                               int core_num);
+void perf_aicpu_flush_buffers(Runtime *runtime, int thread_idx, const int *cur_thread_cores, int core_num);
 
 /**
  * Update total task count in performance header
@@ -76,7 +92,7 @@ void perf_aicpu_flush_buffers(Runtime* runtime,
  * @param runtime Runtime instance pointer
  * @param total_tasks Current total task count
  */
-void perf_aicpu_update_total_tasks(Runtime* runtime, uint32_t total_tasks);
+void perf_aicpu_update_total_tasks(Runtime *runtime, uint32_t total_tasks);
 
 /**
  * Initialize AICPU phase profiling
@@ -86,9 +102,8 @@ void perf_aicpu_update_total_tasks(Runtime* runtime, uint32_t total_tasks);
  *
  * @param runtime Runtime instance pointer
  * @param num_sched_threads Number of scheduler threads
- * @param num_orch_threads Number of orchestrator threads (may become schedulers after transition)
  */
-void perf_aicpu_init_phase_profiling(Runtime* runtime, int num_sched_threads, int num_orch_threads = 1);
+void perf_aicpu_init_phase_profiling(Runtime *runtime, int num_sched_threads);
 
 /**
  * Record a single scheduler phase
@@ -101,12 +116,14 @@ void perf_aicpu_init_phase_profiling(Runtime* runtime, int num_sched_threads, in
  * @param start_time Phase start timestamp
  * @param end_time Phase end timestamp
  * @param loop_iter Current loop iteration number
- * @param tasks_processed Number of tasks processed in this phase
+ * @param tasks_processed Number of tasks processed in this batch (scheduler phases), or
+ *                        full PTO2 task_id encoding (ring_id << 32) | local_id (orchestrator
+ *                        phases in multi-ring runtimes: tensormap_and_ringbuffer, aicpu_build_graph)
  */
-void perf_aicpu_record_phase(int thread_idx,
-                              AicpuPhaseId phase_id,
-                              uint64_t start_time, uint64_t end_time,
-                              uint32_t loop_iter, uint32_t tasks_processed);
+void perf_aicpu_record_phase(
+    int thread_idx, AicpuPhaseId phase_id, uint64_t start_time, uint64_t end_time, uint32_t loop_iter,
+    uint64_t tasks_processed
+);
 
 /**
  * Write orchestrator cumulative summary
@@ -116,7 +133,7 @@ void perf_aicpu_record_phase(int thread_idx,
  *
  * @param src Pointer to populated AicpuOrchSummary (magic field is set internally)
  */
-void perf_aicpu_write_orch_summary(const AicpuOrchSummary* src);
+void perf_aicpu_write_orch_summary(const AicpuOrchSummary *src);
 
 /**
  * Set orchestrator thread index for per-task phase recording
@@ -138,11 +155,13 @@ void perf_aicpu_set_orch_thread_idx(int thread_idx);
  * @param start_time Phase start timestamp
  * @param end_time Phase end timestamp
  * @param submit_idx Task submission index (acts as loop_iter)
- * @param task_id Task ID (stored in tasks_processed field for task tracking)
+ * @param task_id Task identifier. For multi-ring runtimes (tensormap_and_ringbuffer, aicpu_build_graph), this is the
+ * full PTO2 encoding: (ring_id << 32) | local_id, enabling cross-view correlation between orchestrator and scheduler
+ * swimlanes.
  */
-void perf_aicpu_record_orch_phase(AicpuPhaseId phase_id,
-                                   uint64_t start_time, uint64_t end_time,
-                                   uint32_t submit_idx, uint32_t task_id);
+void perf_aicpu_record_orch_phase(
+    AicpuPhaseId phase_id, uint64_t start_time, uint64_t end_time, uint32_t submit_idx, uint64_t task_id
+);
 
 /**
  * Write core-to-thread assignment mapping to shared memory
@@ -155,10 +174,10 @@ void perf_aicpu_record_orch_phase(AicpuPhaseId phase_id,
  * @param num_threads Number of scheduler threads
  * @param total_cores Total number of cores
  */
-void perf_aicpu_write_core_assignments(const int core_assignments[][PLATFORM_MAX_CORES_PER_THREAD],
-                                        const int* core_counts,
-                                        int num_threads,
-                                        int total_cores);
+void perf_aicpu_write_core_assignments(
+    const int core_assignments[][PLATFORM_MAX_CORES_PER_THREAD], const int *core_counts, int num_threads,
+    int total_cores
+);
 
 /**
  * Flush remaining phase records for a thread

@@ -1,3 +1,14 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
 /**
  * Runtime Class - Task Dependency Runtime Management
  *
@@ -15,8 +26,8 @@
  * and lightweight scheduling use cases.
  */
 
-#ifndef RUNTIME_H
-#define RUNTIME_H
+#ifndef SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_RUNTIME_H_
+#define SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_RUNTIME_H_
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -28,6 +39,7 @@
 #include "common/core_type.h"
 #include "common/perf_profiling.h"
 #include "common/platform_config.h"
+#include "tensor_info.h"
 
 // Logging macros using unified logging interface
 #include "common/unified_log.h"
@@ -45,7 +57,7 @@
 #endif
 
 #ifndef RUNTIME_MAX_FANOUT
-#define RUNTIME_MAX_FANOUT 512
+#define RUNTIME_MAX_FANOUT 128
 #endif
 
 #ifndef RUNTIME_MAX_WORKER
@@ -89,6 +101,10 @@
  * The structure is cache-line aligned (64 bytes) to prevent false sharing
  * between cores and optimize cache coherency operations.
  *
+ * enable_profiling_flag bit definitions:
+ * - bit0: tensor dump enabled
+ * - remaining bits: reserved for future runtime controls
+ *
  * Field Access Patterns:
  * - aicpu_ready: Written by AICPU, read by AICore
  * - aicore_done: Written by AICore, read by AICPU
@@ -99,19 +115,21 @@
  * - perf_records_addr: Written by AICPU, read by AICore (performance records address)
  * - perf_buffer_status: Written by both (AICPU=1 on buffer full, AICore=0 on buffer empty)
  * - physical_core_id: Written by AICPU, read by AICore (physical core ID)
+ * - enable_profiling_flag: Written by host/AICPU init, read by AICore (bitmask)
  */
 struct Handshake {
-    volatile uint32_t aicpu_ready;          // AICPU ready signal: 0=not ready, 1=ready
-    volatile uint32_t aicore_done;          // AICore ready signal: 0=not ready, core_id+1=ready
-    volatile uint64_t task;                 // Task pointer: 0=no task, non-zero=Task* address
-    volatile int32_t task_status;           // Task execution status: 0=idle, 1=busy
-    volatile int32_t control;               // Control signal: 0=execute, 1=quit
-    volatile CoreType core_type;            // Core type: CoreType::AIC or CoreType::AIV
-    volatile uint64_t perf_records_addr;    // Performance records address
-    volatile uint32_t perf_buffer_status;   // 0 = not full, 1 = full
-    volatile uint32_t physical_core_id;     // Physical core ID
-    volatile uint32_t aicpu_regs_ready;    // AICPU register init done: 0=pending, 1=done
-    volatile uint32_t aicore_regs_ready;     // AICore ID reported: 0=pending, 1=done
+    volatile uint32_t aicpu_ready;            // AICPU ready signal: 0=not ready, 1=ready
+    volatile uint32_t aicore_done;            // AICore ready signal: 0=not ready, core_id+1=ready
+    volatile uint64_t task;                   // Task pointer: 0=no task, non-zero=Task* address
+    volatile int32_t task_status;             // Task execution status: 0=idle, 1=busy
+    volatile int32_t control;                 // Control signal: 0=execute, 1=quit
+    volatile CoreType core_type;              // Core type: CoreType::AIC or CoreType::AIV
+    volatile uint64_t perf_records_addr;      // Performance records address
+    volatile uint32_t perf_buffer_status;     // 0 = not full, 1 = full
+    volatile uint32_t physical_core_id;       // Physical core ID
+    volatile uint32_t aicpu_regs_ready;       // AICPU register init done: 0=pending, 1=done
+    volatile uint32_t aicore_regs_ready;      // AICore ID reported: 0=pending, 1=done
+    volatile uint32_t enable_profiling_flag;  // Generic profiling-related flags; bit0=dump tensor
 } __attribute__((aligned(64)));
 
 /**
@@ -119,8 +137,8 @@ struct Handshake {
  * Used for copy-back during finalize.
  */
 struct TensorPair {
-    void* host_ptr;
-    void* dev_ptr;
+    void *host_ptr;
+    void *dev_ptr;
     size_t size;
 };
 
@@ -129,11 +147,11 @@ struct TensorPair {
  * Allows runtime to use pluggable device memory backends.
  */
 struct HostApi {
-    void* (*device_malloc)(size_t size);
-    void (*device_free)(void* dev_ptr);
-    int (*copy_to_device)(void* dev_ptr, const void* host_ptr, size_t size);
-    int (*copy_from_device)(void* host_ptr, const void* dev_ptr, size_t size);
-    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t* bin_data, size_t bin_size);
+    void *(*device_malloc)(size_t size);
+    void (*device_free)(void *dev_ptr);
+    int (*copy_to_device)(void *dev_ptr, const void *host_ptr, size_t size);
+    int (*copy_from_device)(void *host_ptr, const void *dev_ptr, size_t size);
+    uint64_t (*upload_kernel_binary)(int func_id, const uint8_t *bin_data, size_t bin_size);
     void (*remove_kernel_binary)(int func_id);
 };
 
@@ -189,25 +207,24 @@ public:
 
     // Execution parameters for AICPU scheduling
     int sche_cpu_num;  // Number of AICPU threads for scheduling
-    int orch_thread_num;  // Number of orchestrator threads (unused, for API compatibility)
 
     // Profiling support
-    bool enable_profiling;                  // Enable profiling flag
-    uint64_t perf_data_base;                // Performance data shared memory base address (device-side)
+    bool enable_profiling;    // Enable profiling flag
+    uint64_t perf_data_base;  // Performance data shared memory base address (device-side)
 
     // Task storage
     Task tasks[RUNTIME_MAX_TASKS];  // Fixed-size task array
 
 private:
-    int next_task_id;               // Next available task ID
+    int next_task_id;  // Next available task ID
 
     // Initial ready tasks (computed once, read-only after)
     int initial_ready_tasks[RUNTIME_MAX_TASKS];
     int initial_ready_count;
 
-  // Tensor pairs for host-device memory tracking
-  TensorPair tensor_pairs[RUNTIME_MAX_TENSOR_PAIRS];
-  int tensor_pair_count;
+    // Tensor pairs for host-device memory tracking
+    TensorPair tensor_pairs[RUNTIME_MAX_TENSOR_PAIRS];
+    int tensor_pair_count;
 
     // Function address mapping (for API compatibility with rt2)
     uint64_t func_id_to_addr_[RUNTIME_MAX_FUNC_ID];
@@ -216,11 +233,25 @@ private:
     int registered_kernel_func_ids_[RUNTIME_MAX_FUNC_ID];
     int registered_kernel_count_;
 
+    // Tensor info metadata for tensor dump
+    void *tensor_info_storage_;
+    uint64_t tensor_info_storage_bytes_;
+    uint32_t tensor_info_offsets_[RUNTIME_MAX_TASKS];
+    uint16_t tensor_info_counts_[RUNTIME_MAX_TASKS];
+
+    // Device allocation ranges used to recover tensor buffer addresses from task.args[]
+    void *tensor_allocation_storage_;
+    uint64_t tensor_allocation_storage_bytes_;
+    uint32_t tensor_allocation_count_;
+
 public:
     /**
      * Constructor - zero-initialize all arrays
      */
     Runtime();
+
+    // Orchestration is always built on the host for this runtime
+    bool get_orch_built_on_host() const { return true; }
 
     // =========================================================================
     // Task Management
@@ -302,14 +333,14 @@ public:
      * @param dev_ptr   Device memory pointer (source for copy-back)
      * @param size     Size of tensor in bytes
      */
-    void record_tensor_pair(void* host_ptr, void* dev_ptr, size_t size);
+    void record_tensor_pair(void *host_ptr, void *dev_ptr, size_t size);
 
     /**
      * Get pointer to tensor pairs array.
      *
      * @return Pointer to tensor pairs array
      */
-    TensorPair* get_tensor_pairs();
+    TensorPair *get_tensor_pairs();
 
     /**
      * Get number of recorded tensor pairs.
@@ -324,18 +355,76 @@ public:
     void clear_tensor_pairs();
 
     // =========================================================================
-    // Performance Profiling
+    // Tensor Info Metadata
     // =========================================================================
 
-    /**
-     * Fill fanout information for performance records
-     *
-     * Extracts task dependency data from the task graph and populates
-     * fanout arrays in performance records.
-     *
-     * @param perf_buf Performance buffer containing records to complete
-     */
-    void complete_perf_records(PerfBuffer* perf_buf);
+    void set_tensor_info_storage(void *ptr, uint64_t bytes) {
+        tensor_info_storage_ = ptr;
+        tensor_info_storage_bytes_ = bytes;
+    }
+
+    void clear_tensor_info_storage() {
+        tensor_info_storage_ = nullptr;
+        tensor_info_storage_bytes_ = 0;
+    }
+
+    void set_tensor_info_range(int task_id, uint32_t offset, uint16_t count) {
+        if (task_id < 0 || task_id >= RUNTIME_MAX_TASKS) return;
+        tensor_info_offsets_[task_id] = offset;
+        tensor_info_counts_[task_id] = count;
+    }
+
+    const TensorInfo *get_tensor_info(int task_id, int *count) const {
+        if (count != nullptr) {
+            *count = 0;
+        }
+        if (task_id < 0 || task_id >= RUNTIME_MAX_TASKS || tensor_info_storage_ == nullptr) {
+            return nullptr;
+        }
+        uint16_t tensor_info_count = tensor_info_counts_[task_id];
+        if (tensor_info_count == 0) {
+            return nullptr;
+        }
+        if (count != nullptr) {
+            *count = static_cast<int>(tensor_info_count);
+        }
+        const TensorInfo *base = reinterpret_cast<const TensorInfo *>(tensor_info_storage_);
+        return base + tensor_info_offsets_[task_id];
+    }
+
+    void *get_tensor_info_storage() const { return tensor_info_storage_; }
+
+    uint64_t get_tensor_info_storage_bytes() const { return tensor_info_storage_bytes_; }
+
+    void set_tensor_allocation_storage(void *ptr, uint32_t count, uint64_t bytes) {
+        tensor_allocation_storage_ = ptr;
+        tensor_allocation_count_ = count;
+        tensor_allocation_storage_bytes_ = bytes;
+    }
+
+    void clear_tensor_allocation_storage() {
+        tensor_allocation_storage_ = nullptr;
+        tensor_allocation_count_ = 0;
+        tensor_allocation_storage_bytes_ = 0;
+    }
+
+    bool is_tensor_buffer_addr(uint64_t addr) const {
+        if (tensor_allocation_storage_ == nullptr || tensor_allocation_count_ == 0) {
+            return false;
+        }
+        const TensorAllocationInfo *allocations =
+            reinterpret_cast<const TensorAllocationInfo *>(tensor_allocation_storage_);
+        for (uint32_t i = 0; i < tensor_allocation_count_; i++) {
+            if (allocations[i].contains(addr)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void *get_tensor_allocation_storage() const { return tensor_allocation_storage_; }
+
+    uint64_t get_tensor_allocation_storage_bytes() const { return tensor_allocation_storage_bytes_; }
 
     // =========================================================================
     // Device Orchestration (stub for API compatibility)
@@ -345,7 +434,7 @@ public:
      * Set PTO2 shared memory pointer (stub for host_build_graph).
      * This is a no-op for host orchestration; only used by rt2.
      */
-    void set_pto2_gm_sm_ptr(void*) { /* no-op */ }
+    void set_pto2_gm_sm_ptr(void *) { /* no-op */ }
 
     /**
      * Get function binary address by func_id.
@@ -387,4 +476,4 @@ public:
     HostApi host_api;
 };
 
-#endif  // RUNTIME_H
+#endif  // SRC_A2A3_RUNTIME_HOST_BUILD_GRAPH_RUNTIME_RUNTIME_H_
