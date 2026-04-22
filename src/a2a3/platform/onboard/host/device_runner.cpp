@@ -545,7 +545,10 @@ int DeviceRunner::run(
         perf_collector_.drain_remaining_buffers();
         perf_collector_.scan_remaining_perf_buffers();
         perf_collector_.collect_phase_data();
-        export_swimlane_json();
+        int export_rc = export_swimlane_json();
+        if (export_rc != 0) {
+            return export_rc;
+        }
     }
 
     // Print handshake results (reads from device memory, must be before free)

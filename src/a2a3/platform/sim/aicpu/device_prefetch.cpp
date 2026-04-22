@@ -7,8 +7,9 @@
 
 #include "aicpu/device_prefetch.h"
 
-void aicpu_prefetch_init(void* sdma_workspace) {
+void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window) {
     (void)sdma_workspace;
+    (void)suppress_window;
 }
 
 void aicpu_prefetch_deinit() {

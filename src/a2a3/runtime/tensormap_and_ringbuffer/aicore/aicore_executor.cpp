@@ -131,6 +131,10 @@ __aicore__ __attribute__((weak)) void aicore_execute(__gm__ Runtime *runtime, in
             // Performance profiling: record task execution
             if (profiling_enabled) {
                 uint64_t end_time = get_sys_cnt_aicore();
+                // AICPU assigns perf buffers after the initial handshake and may rotate
+                // them later, so refresh the handshake cache line before reading the
+                // current perf buffer pointer.
+                dcci(my_hank, SINGLE_CACHE_LINE);
                 __gm__ PerfBuffer *perf_buf = (__gm__ PerfBuffer *)my_hank->perf_records_addr;
                 perf_aicore_record_task(perf_buf, task_id, start_time, end_time);
             }

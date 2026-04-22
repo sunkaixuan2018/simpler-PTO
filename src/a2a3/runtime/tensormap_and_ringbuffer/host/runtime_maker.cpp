@@ -116,6 +116,36 @@ static const char *prefetch_mode_name(uint32_t mode) {
     }
 }
 
+static uint64_t parse_prefetch_min_bytes() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_MIN_BYTES");
+    if (env == nullptr || *env == '\0') {
+        return 256 * 1024;
+    }
+    char *endptr = nullptr;
+    errno = 0;
+    uint64_t value = strtoull(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0') {
+        LOG_WARN("PTO_SDMA_PREFETCH_MIN_BYTES=%s invalid, using default %u", env, 256 * 1024);
+        return 256 * 1024;
+    }
+    return value;
+}
+
+static uint32_t parse_prefetch_suppress_window() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_SUPPRESS_WINDOW");
+    if (env == nullptr || *env == '\0') {
+        return 2;
+    }
+    char *endptr = nullptr;
+    errno = 0;
+    unsigned long value = strtoul(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0') {
+        LOG_WARN("PTO_SDMA_PREFETCH_SUPPRESS_WINDOW=%s invalid, using default %u", env, 2u);
+        return 2;
+    }
+    return static_cast<uint32_t>(value);
+}
+
 /**
  * Initialize a pre-allocated runtime for device orchestration.
  *
@@ -250,7 +280,11 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     }
 
     runtime->prefetch_mode = parse_prefetch_mode();
+    runtime->sdma_prefetch_min_bytes = parse_prefetch_min_bytes();
+    runtime->sdma_prefetch_suppress_window = parse_prefetch_suppress_window();
     LOG_INFO("Prefetch mode: %s", prefetch_mode_name(runtime->prefetch_mode));
+    LOG_INFO("SDMA prefetch min bytes: %" PRIu64, runtime->sdma_prefetch_min_bytes);
+    LOG_INFO("SDMA prefetch suppress window: %u", runtime->sdma_prefetch_suppress_window);
 
     // Read orchestrator-to-scheduler transition flag from environment
     {

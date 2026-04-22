@@ -254,7 +254,9 @@ def print_task_statistics(tasks, func_id_to_name=None, sched_info=None):
         }
     )
 
-    # Track global min dispatch and max finish times
+    # Track global AICore execution window and dispatch->finish window
+    min_start_time = float("inf")
+    max_end_time = float("-inf")
     min_dispatch_time = float("inf")
     max_finish_time = float("-inf")
 
@@ -262,13 +264,15 @@ def print_task_statistics(tasks, func_id_to_name=None, sched_info=None):
         func_id = task["func_id"]
         duration = task["duration_us"]
         func_stats[func_id]["durations"].append(duration)
+        start_time = task["start_time_us"]
+        end_time = task["end_time_us"]
+        min_start_time = min(min_start_time, start_time)
+        max_end_time = max(max_end_time, end_time)
 
         # Calculate new metrics if dispatch_time_us and finish_time_us are available
         if "dispatch_time_us" in task and "finish_time_us" in task:
             dispatch_time = task["dispatch_time_us"]
             finish_time = task["finish_time_us"]
-            start_time = task["start_time_us"]
-            end_time = task["end_time_us"]
 
             # Head overhead: start_time_us - dispatch_time_us
             head_overhead = start_time - dispatch_time
@@ -350,17 +354,28 @@ def print_task_statistics(tasks, func_id_to_name=None, sched_info=None):
     if min_dispatch_time != float("inf") and max_finish_time != float("-inf"):
         total_test_time = max_finish_time - min_dispatch_time
         print(f"\nTotal Test Time: {total_test_time:.2f} us (from earliest dispatch to latest finish)")
+    if min_start_time != float("inf") and max_end_time != float("-inf"):
+        aicore_span = max_end_time - min_start_time
+        print(f"AICore Span: {aicore_span:.2f} us (from earliest AICore start to latest AICore end)")
 
     # Task execution vs Scheduler overhead summary
     if total_count > 0 and total_latency_sum > 0:
         avg_exec_us = total_duration / total_count
         avg_latency_us = total_latency_sum / total_count
+        total_head_overhead = sum(sum(stats["head_overheads"]) for stats in func_stats.values())
+        total_tail_overhead = sum(sum(stats["tail_overheads"]) for stats in func_stats.values())
+        avg_head_oh_us = total_head_overhead / total_count
+        avg_tail_oh_us = total_tail_overhead / total_count
         exec_latency_ratio_pct = total_duration / total_latency_sum * 100
         print("\n--- Task execution vs Scheduler overhead ---")
         print(
             f"  Per-task (all):  Avg Exec = {avg_exec_us:.2f} us,  "
             f"Avg Latency (dispatch->finish) = {avg_latency_us:.2f} us,  "
             f"Exec/Latency = {exec_latency_ratio_pct:.2f}%"
+        )
+        print(
+            f"  Avg Head OH (dispatch->start) = {avg_head_oh_us:.2f} us,  "
+            f"Avg Tail OH (end->finish) = {avg_tail_oh_us:.2f} us"
         )
         if sched_info is not None:
             sched_cpu = sched_info["us_per_task"]

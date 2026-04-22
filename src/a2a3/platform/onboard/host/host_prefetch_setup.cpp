@@ -44,6 +44,30 @@ struct sdma_op_res_info_t {
     uint8_t reserved[40];
 };
 
+// Device workspace layout returned by aclnnShmemSdmaStarsQuery.
+// Keep these in sync with the AICPU-side definitions for logging/debug only.
+struct stars_channel_flag_info_t {
+    uint32_t flag;
+    uint32_t totalQueueNum;
+    uint8_t reserved[56];
+};
+
+struct stars_channel_info_t {
+    uint32_t sq_head;
+    uint32_t sq_tail;
+    uint64_t sq_base;
+    uint64_t sq_reg_base;
+    uint32_t sq_depth;
+    uint32_t sq_id;
+    uint32_t cq_id;
+    uint32_t logic_cq_id;
+    uint64_t cqe_addr;
+    uint32_t report_cqe_num;
+    uint32_t stream_id;
+    uint32_t dev_id;
+    uint8_t reserved[4];
+};
+
 // dlsym function pointer types
 using RtStreamGetSqidFn = int (*)(const void* stream, uint32_t* sqId);
 using RtStreamGetCqidFn = int (*)(const void* stream, uint32_t* cqId, uint32_t* logicCqId);
@@ -67,6 +91,18 @@ static void* g_workspace_device_ptr = nullptr;
 static int g_cached_device_id = -1;
 static int g_cached_channel_count = 0;
 
+static const char* symbol_owner_path(void* symbol)
+{
+    if (symbol == nullptr) {
+        return "(null)";
+    }
+    Dl_info info{};
+    if (dladdr(symbol, &info) == 0 || info.dli_fname == nullptr) {
+        return "(unknown)";
+    }
+    return info.dli_fname;
+}
+
 static void* try_dlopen_opapi_from_provider_root()
 {
     const char* provider_root = std::getenv("PTO_SDMA_PROVIDER_ROOT");
@@ -75,11 +111,14 @@ static void* try_dlopen_opapi_from_provider_root()
     }
 
     std::string lib_path(provider_root);
-    lib_path += "/x86_64-linux/lib64/libopapi.so";
+    lib_path += "/aarch64-linux/lib64/libopapi.so";
+    LOG_INFO("SDMA prefetch: trying provider lib at %s", lib_path.c_str());
     void* handle = dlopen(lib_path.c_str(), RTLD_LAZY | RTLD_GLOBAL);
     if (handle == nullptr) {
         LOG_WARN("SDMA prefetch: failed to dlopen provider libopapi.so from %s (%s)",
                  lib_path.c_str(), dlerror());
+    } else {
+        LOG_INFO("SDMA prefetch: dlopen provider libopapi.so succeeded from %s", lib_path.c_str());
     }
     return handle;
 }
@@ -190,6 +229,13 @@ void* host_prefetch_setup(int channel_count)
         LOG_INFO("SDMA prefetch: shmem aclnn ops not found, skipping");
         return nullptr;
     }
+    LOG_INFO(
+        "SDMA prefetch: resolved symbols rtStreamGetSqid=%s aclCreateTensor=%s aclnnGetWs=%s aclnnExec=%s",
+        symbol_owner_path(reinterpret_cast<void*>(rtStreamGetSqid)),
+        symbol_owner_path(reinterpret_cast<void*>(aclCreateTensor)),
+        symbol_owner_path(reinterpret_cast<void*>(aclnnGetWs)),
+        symbol_owner_path(reinterpret_cast<void*>(aclnnExec))
+    );
 
     int rc;
 
@@ -197,6 +243,11 @@ void* host_prefetch_setup(int channel_count)
     aclrtGetDevice(&dev_id);
     void* ctx = nullptr;
     aclrtGetCurrentContext(&ctx);
+    LOG_INFO(
+        "SDMA prefetch: setup start (device=%d ctx=%p channels=%d provider_root=%s opp=%s)", dev_id, ctx, channel_count,
+        std::getenv("PTO_SDMA_PROVIDER_ROOT") ? std::getenv("PTO_SDMA_PROVIDER_ROOT") : "(unset)",
+        std::getenv("ASCEND_OPP_PATH") ? std::getenv("ASCEND_OPP_PATH") : "(unset)"
+    );
 
     // Fast path: reuse existing channels/workspace when device and count match.
     if (g_workspace_device_ptr != nullptr &&
@@ -249,6 +300,7 @@ void* host_prefetch_setup(int channel_count)
         goto fail_streams;
     }
     aclrtMemset(workspace, SDMA_WORKSPACE_SIZE, 0, SDMA_WORKSPACE_SIZE);
+    LOG_INFO("SDMA prefetch: workspace allocated at %p size=%zu", workspace, SDMA_WORKSPACE_SIZE);
 
     // 3. Copy stream info to device
     {
@@ -258,6 +310,10 @@ void* host_prefetch_setup(int channel_count)
         if (rc != 0) goto fail_workspace;
         aclrtMemcpy(si_dev, stream_infos_size, stream_infos.data(), stream_infos_size, ACL_MEMCPY_HOST_TO_DEVICE);
         g_streams_device_ptr = si_dev;
+        LOG_INFO(
+            "SDMA prefetch: stream infos uploaded host_count=%zu bytes=%zu device_ptr=%p", stream_infos.size(),
+            stream_infos_size, si_dev
+        );
 
         // 4. Prepare op_res_info
         sdma_op_res_info_t op_res = {};
@@ -270,6 +326,11 @@ void* host_prefetch_setup(int channel_count)
         if (rc != 0) goto fail_si_dev;
         aclrtMemcpy(op_dev, sizeof(op_res), &op_res, sizeof(op_res), ACL_MEMCPY_HOST_TO_DEVICE);
         g_op_res_device_ptr = op_dev;
+        LOG_INFO(
+            "SDMA prefetch: op_res uploaded device_ptr=%p streams_addr=0x%llx workspace_addr=0x%llx queue_count=%llu",
+            op_dev, static_cast<unsigned long long>(op_res.streams_addr),
+            static_cast<unsigned long long>(op_res.workspace_addr), static_cast<unsigned long long>(op_res.size)
+        );
 
         // 5. Create input/output tensors and launch op
         uint64_t in_data[2] = {reinterpret_cast<uint64_t>(op_dev), reinterpret_cast<uint64_t>(workspace)};
@@ -305,14 +366,61 @@ void* host_prefetch_setup(int channel_count)
         uint64_t ws_size = 0;
         void* executor = nullptr;
         rc = aclnnGetWs(input, output, &ws_size, &executor);
+        LOG_INFO("SDMA prefetch: aclnnShmemSdmaStarsQuery ws_size=%llu executor=%p rc=%d",
+                 static_cast<unsigned long long>(ws_size), executor, rc);
 
         void* ws = nullptr;
         if (rc == 0) {
             if (ws_size > 0) aclrtMalloc(&ws, ws_size, ACL_MEM_MALLOC_HUGE_FIRST);
             rc = aclnnExec(ws, ws_size, executor, aicpu_stream);
             if (rc == 0) {
-                aclrtSynchronizeStream(reinterpret_cast<aclrtStream>(aicpu_stream));
-                LOG_INFO("SDMA prefetch: STARS channel initialized");
+                int sync_rc = aclrtSynchronizeStream(reinterpret_cast<aclrtStream>(aicpu_stream));
+                LOG_INFO(
+                    "SDMA prefetch: STARS channel init sync rc=%d workspace=%p ws=%p ws_size=%llu", sync_rc, workspace,
+                    ws, static_cast<unsigned long long>(ws_size)
+                );
+                if (sync_rc == 0) {
+                    std::vector<unsigned char> workspace_dump(128, 0);
+                    int copy_rc = aclrtMemcpy(
+                        workspace_dump.data(), workspace_dump.size(), workspace, workspace_dump.size(), ACL_MEMCPY_DEVICE_TO_HOST
+                    );
+                    if (copy_rc == 0) {
+                        auto* flag_info_host = reinterpret_cast<const stars_channel_flag_info_t*>(workspace_dump.data());
+                        auto* ch0_host = reinterpret_cast<const stars_channel_info_t*>(
+                            workspace_dump.data() + sizeof(stars_channel_flag_info_t)
+                        );
+                        LOG_INFO(
+                            "SDMA prefetch: workspace dump flag=0x%x totalQueueNum=%u ch0{head=%u tail=%u sq_base=0x%llx sq_reg=0x%llx depth=%u stream=%u}",
+                            flag_info_host->flag, flag_info_host->totalQueueNum, ch0_host->sq_head, ch0_host->sq_tail,
+                            static_cast<unsigned long long>(ch0_host->sq_base),
+                            static_cast<unsigned long long>(ch0_host->sq_reg_base), ch0_host->sq_depth, ch0_host->stream_id
+                        );
+                    } else {
+                        LOG_WARN("SDMA prefetch: workspace dump memcpy failed (rc=%d)", copy_rc);
+                    }
+                    LOG_INFO("SDMA prefetch: STARS channel initialized");
+                } else {
+                    std::vector<unsigned char> workspace_dump(128, 0);
+                    int copy_rc = aclrtMemcpy(
+                        workspace_dump.data(), workspace_dump.size(), workspace, workspace_dump.size(), ACL_MEMCPY_DEVICE_TO_HOST
+                    );
+                    if (copy_rc == 0) {
+                        auto* flag_info_host = reinterpret_cast<const stars_channel_flag_info_t*>(workspace_dump.data());
+                        auto* ch0_host = reinterpret_cast<const stars_channel_info_t*>(
+                            workspace_dump.data() + sizeof(stars_channel_flag_info_t)
+                        );
+                        LOG_ERROR(
+                            "SDMA prefetch: workspace after failed sync flag=0x%x totalQueueNum=%u ch0{head=%u tail=%u sq_base=0x%llx sq_reg=0x%llx depth=%u stream=%u}",
+                            flag_info_host->flag, flag_info_host->totalQueueNum, ch0_host->sq_head, ch0_host->sq_tail,
+                            static_cast<unsigned long long>(ch0_host->sq_base),
+                            static_cast<unsigned long long>(ch0_host->sq_reg_base), ch0_host->sq_depth, ch0_host->stream_id
+                        );
+                    } else {
+                        LOG_ERROR("SDMA prefetch: workspace dump after failed sync memcpy failed (rc=%d)", copy_rc);
+                    }
+                    LOG_ERROR("SDMA prefetch: STARS channel sync failed (rc=%d)", sync_rc);
+                    rc = sync_rc;
+                }
             } else {
                 LOG_ERROR("SDMA prefetch: aclnnShmemSdmaStarsQuery exec failed (rc=%d)", rc);
             }

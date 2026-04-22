@@ -26,6 +26,7 @@
 #include "common/memory_barrier.h"
 #include "common/platform_config.h"
 #include "common/unified_log.h"
+#include "aicpu/platform_regs.h"
 
 // Cached pointers for hot-path access (set during init)
 static AicpuPhaseHeader *s_phase_header = nullptr;
@@ -134,7 +135,12 @@ int perf_aicpu_complete_record(
     if (count >= PLATFORM_PROF_BUFFER_SIZE) return -1;
 
     PerfRecord *record = &perf_buf->records[count];
-    if (static_cast<uint32_t>(record->task_id) != expected_reg_task_id) return -1;
+    cache_invalidate_range(record, sizeof(*record));
+    rmb();
+    uint32_t observed_reg_task_id = static_cast<uint32_t>(record->task_id);
+    if (observed_reg_task_id != expected_reg_task_id) {
+        return -1;
+    }
 
     record->task_id = task_id;
     record->func_id = func_id;

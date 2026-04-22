@@ -89,19 +89,6 @@ constexpr int32_t PROGRESS_LOG_INTERVAL = 250;      // log every N completions a
 
 static PTO2Runtime *rt{nullptr};
 
-static size_t get_prefetch_min_bytes_from_env() {
-    const char *env = std::getenv("PTO_SDMA_PREFETCH_MIN_BYTES");
-    if (env == nullptr || *env == '\0') {
-        return 256 * 1024;
-    }
-    char *end = nullptr;
-    unsigned long long value = strtoull(env, &end, 10);
-    if (end == env || *end != '\0') {
-        return 256 * 1024;
-    }
-    return static_cast<size_t>(value);
-}
-
 // Per-core dispatch payload storage (one aligned cache line per physical core)
 static PTO2DispatchPayload s_pto2_payload_per_core[RUNTIME_MAX_WORKER];
 
@@ -362,6 +349,16 @@ struct AicpuExecutor {
     const ChipStorageTaskArgs *orch_args_cached_{nullptr};
     uint32_t prefetch_mode_{Runtime::PREFETCH_MODE_TWOSLOT};
     size_t prefetch_min_bytes_{256 * 1024};
+    uint32_t prefetch_suppress_window_{2};
+    mutable std::atomic<uint64_t> prefetch_considered_count_{0};
+    mutable std::atomic<uint64_t> prefetch_task_count_{0};
+    mutable std::atomic<uint64_t> prefetch_tensor_count_{0};
+    mutable std::atomic<uint64_t> prefetch_total_bytes_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_not_sdma_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_not_available_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_null_payload_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_below_min_bytes_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_no_valid_tensor_{0};
 
     uint64_t *func_id_to_addr_;
     uint64_t get_function_bin_addr(int func_id) const {
@@ -593,25 +590,47 @@ struct AicpuExecutor {
         return total_bytes;
     }
 
-    bool should_issue_task_prefetch(const PTO2TaskSlotState &slot_state) const {
-        if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA || !aicpu_prefetch_available() || slot_state.payload == nullptr) {
-            return false;
-        }
-        return get_task_prefetch_bytes(slot_state) >= prefetch_min_bytes_;
-    }
-
     void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
-        if (!should_issue_task_prefetch(slot_state)) {
+        prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
+        if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA) {
+            prefetch_skip_not_sdma_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (!aicpu_prefetch_available()) {
+            prefetch_skip_not_available_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (slot_state.payload == nullptr) {
+            prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        if (get_task_prefetch_bytes(slot_state) < prefetch_min_bytes_) {
+            prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
             return;
         }
         const PTO2TaskPayload &payload = *slot_state.payload;
+        const Tensor *best_tensor = nullptr;
         for (int32_t i = 0; i < payload.tensor_count; ++i) {
             const Tensor &tensor = payload.tensors[i];
             if (tensor.buffer.addr == 0 || tensor.buffer.size == 0) {
                 continue;
             }
-            aicpu_prefetch_tensor(reinterpret_cast<void *>(tensor.buffer.addr), static_cast<size_t>(tensor.buffer.size), channel_idx);
+            if (best_tensor == nullptr || tensor.buffer.size > best_tensor->buffer.size) {
+                best_tensor = &tensor;
+            }
         }
+        if (best_tensor == nullptr) {
+            prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            return;
+        }
+        prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
+        prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
+        prefetch_total_bytes_.fetch_add(static_cast<uint64_t>(best_tensor->buffer.size), std::memory_order_relaxed);
+        aicpu_prefetch_tensor(
+            reinterpret_cast<void *>(best_tensor->buffer.addr),
+            static_cast<size_t>(best_tensor->buffer.size),
+            channel_idx
+        );
     }
 
     /**
@@ -1231,8 +1250,18 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     // Clear per-core dispatch payloads
     memset(s_pto2_payload_per_core, 0, sizeof(s_pto2_payload_per_core));
     prefetch_mode_ = runtime->prefetch_mode;
-    prefetch_min_bytes_ = get_prefetch_min_bytes_from_env();
-    aicpu_prefetch_init(runtime->sdma_prefetch_workspace);
+    prefetch_min_bytes_ = static_cast<size_t>(runtime->sdma_prefetch_min_bytes);
+    prefetch_suppress_window_ = runtime->sdma_prefetch_suppress_window;
+    prefetch_considered_count_.store(0, std::memory_order_relaxed);
+    prefetch_task_count_.store(0, std::memory_order_relaxed);
+    prefetch_tensor_count_.store(0, std::memory_order_relaxed);
+    prefetch_total_bytes_.store(0, std::memory_order_relaxed);
+    prefetch_skip_not_sdma_.store(0, std::memory_order_relaxed);
+    prefetch_skip_not_available_.store(0, std::memory_order_relaxed);
+    prefetch_skip_null_payload_.store(0, std::memory_order_relaxed);
+    prefetch_skip_below_min_bytes_.store(0, std::memory_order_relaxed);
+    prefetch_skip_no_valid_tensor_.store(0, std::memory_order_relaxed);
+    aicpu_prefetch_init(runtime->sdma_prefetch_workspace, prefetch_suppress_window_);
     const char *prefetch_mode_name =
         prefetch_mode_ == Runtime::PREFETCH_MODE_BASELINE ? "baseline" :
         prefetch_mode_ == Runtime::PREFETCH_MODE_TWOSLOT ? "twoslot" :
@@ -2439,6 +2468,24 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
 }
 
 void AicpuExecutor::deinit(Runtime *runtime) {
+    if (prefetch_mode_ == Runtime::PREFETCH_MODE_SDMA) {
+        uint64_t considered_count = prefetch_considered_count_.load(std::memory_order_relaxed);
+        uint64_t task_count = prefetch_task_count_.load(std::memory_order_relaxed);
+        uint64_t tensor_count = prefetch_tensor_count_.load(std::memory_order_relaxed);
+        uint64_t total_bytes = prefetch_total_bytes_.load(std::memory_order_relaxed);
+        uint64_t skip_not_sdma = prefetch_skip_not_sdma_.load(std::memory_order_relaxed);
+        uint64_t skip_not_available = prefetch_skip_not_available_.load(std::memory_order_relaxed);
+        uint64_t skip_null_payload = prefetch_skip_null_payload_.load(std::memory_order_relaxed);
+        uint64_t skip_below_min_bytes = prefetch_skip_below_min_bytes_.load(std::memory_order_relaxed);
+        uint64_t skip_no_valid_tensor = prefetch_skip_no_valid_tensor_.load(std::memory_order_relaxed);
+        DEV_ALWAYS(
+            "SDMA prefetch task summary: considered=%" PRIu64 " eligible_tasks=%" PRIu64 " tensors=%" PRIu64
+            " bytes=%" PRIu64 " min_bytes=%zu skip_not_sdma=%" PRIu64 " skip_not_available=%" PRIu64
+            " skip_null_payload=%" PRIu64 " skip_below_min_bytes=%" PRIu64 " skip_no_valid_tensor=%" PRIu64,
+            considered_count, task_count, tensor_count, total_bytes, prefetch_min_bytes_, skip_not_sdma,
+            skip_not_available, skip_null_payload, skip_below_min_bytes, skip_no_valid_tensor
+        );
+    }
     aicpu_prefetch_deinit();
 
     // 1. Invalidate AICPU cache for Runtime address range.
@@ -2486,6 +2533,15 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     orch_func_ = nullptr;
     orch_bind_runtime_ = nullptr;
     orch_args_cached_ = nullptr;
+    prefetch_considered_count_.store(0, std::memory_order_relaxed);
+    prefetch_task_count_.store(0, std::memory_order_relaxed);
+    prefetch_tensor_count_.store(0, std::memory_order_relaxed);
+    prefetch_total_bytes_.store(0, std::memory_order_relaxed);
+    prefetch_skip_not_sdma_.store(0, std::memory_order_relaxed);
+    prefetch_skip_not_available_.store(0, std::memory_order_relaxed);
+    prefetch_skip_null_payload_.store(0, std::memory_order_relaxed);
+    prefetch_skip_below_min_bytes_.store(0, std::memory_order_relaxed);
+    prefetch_skip_no_valid_tensor_.store(0, std::memory_order_relaxed);
     orch_so_handle_ = nullptr;
     orch_so_path_[0] = '\0';
 

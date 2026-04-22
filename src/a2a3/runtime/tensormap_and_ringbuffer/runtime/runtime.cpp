@@ -35,6 +35,8 @@ Runtime::Runtime() {
     sche_cpu_num = 1;
     ready_queue_shards = RUNTIME_DEFAULT_READY_QUEUE_SHARDS;
     prefetch_mode = Runtime::PREFETCH_MODE_TWOSLOT;
+    sdma_prefetch_min_bytes = 256 * 1024;
+    sdma_prefetch_suppress_window = 2;
     pto2_task_window_size = 0;
     pto2_heap_size = 0;
     pto2_dep_pool_size = 0;

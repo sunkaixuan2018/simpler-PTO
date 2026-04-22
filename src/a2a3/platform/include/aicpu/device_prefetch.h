@@ -34,8 +34,10 @@
  * @param sdma_workspace  Pointer to STARS channel workspace in device GM
  *                        (set up by host via aclnnShmemSdmaStarsQuery).
  *                        NULL to disable prefetch.
+ * @param suppress_window Number of future eligible attempts to suppress on the
+ *                        same channel after one successful issue.
  */
-void aicpu_prefetch_init(void* sdma_workspace);
+void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window);
 
 /**
  * Shut down SDMA prefetch subsystem.

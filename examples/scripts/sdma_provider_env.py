@@ -34,7 +34,7 @@ def _parse_prefetch_mode() -> Optional[str]:
 
 
 def _is_valid_provider_root(root: Path) -> bool:
-    return (root / "x86_64-linux" / "lib64" / "libopapi.so").exists() and (root / "opp").exists()
+    return (root / "aarch64-linux" / "lib64" / "libopapi.so").exists() and (root / "opp").exists()
 
 
 def discover_provider_root(project_root: Path) -> Optional[Path]:
@@ -44,7 +44,7 @@ def discover_provider_root(project_root: Path) -> Optional[Path]:
         if _is_valid_provider_root(candidate):
             return candidate
         logger.warning("SDMA provider root invalid: %s", candidate)
-    vendored_root = project_root / "_deps" / "sdma_legacy_provider"
+    vendored_root = project_root / "_deps" 
     if _is_valid_provider_root(vendored_root):
         return vendored_root
     return None

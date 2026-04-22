@@ -167,6 +167,8 @@ public:  // NOLINT(whitespace/indent)
     int sche_cpu_num;        // Number of AICPU threads for scheduling
     int ready_queue_shards;  // Number of ready queue shards (1..MAX_AICPU_THREADS, default MAX-1)
     uint32_t prefetch_mode;  // baseline / twoslot / sdma / sdma_fake
+    uint64_t sdma_prefetch_min_bytes;  // Minimum task payload bytes to enable SDMA prefetch
+    uint32_t sdma_prefetch_suppress_window;  // Per-channel suppression window after a successful issue
 
     // Ring buffer size overrides (0 = use compile-time defaults)
     uint64_t pto2_task_window_size;
