@@ -296,6 +296,13 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
 
     since = time.time() - 1.0
     print(f"\n=== strategy={strategy} size={human_bytes(size_bytes)} count={gather_count} ===")
+    print(
+        "env: "
+        f"GATHER_STRATEGY={env['GATHER_STRATEGY']} "
+        f"N_ITER={env['N_ITER']} "
+        f"DUMMY_COMM_BYTES={env['DUMMY_COMM_BYTES']} "
+        f"EXTREME_SERIALIZE_DUMMY={env['EXTREME_SERIALIZE_DUMMY']}"
+    )
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=False)
     perf_files = perf_files_since(since)
 
@@ -380,11 +387,12 @@ def main() -> int:
     parser.add_argument("--devices", default="0,1,2,3", help="Comma-separated device ids")
     parser.add_argument("--strategies", default="mte,sdma,hybrid", help="mte,sdma,hybrid")
     parser.add_argument("--sizes", default="1K,4K,16K,64K,256K,1M", help="Transfer sizes in bytes")
-    parser.add_argument("--n-iter", type=int, default=200)
-    parser.add_argument("--warmup", type=int, default=100)
+    parser.add_argument("--n-iter", type=int, default=1)
+    parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--trim-ratio", type=float, default=0.10)
-    parser.add_argument("--dummy-comm-bytes", default="16M")
-    parser.add_argument("--serialize-dummy", action="store_true")
+    parser.add_argument("--dummy-comm-bytes", default="4")
+    parser.add_argument("--serialize-dummy", dest="serialize_dummy", action="store_true", default=True)
+    parser.add_argument("--no-serialize-dummy", dest="serialize_dummy", action="store_false")
     parser.add_argument("--pto-isa-root", default=None)
     parser.add_argument("--pto-isa-commit", default=None)
     parser.add_argument("--clone-protocol", default="https", choices=["ssh", "https"])
