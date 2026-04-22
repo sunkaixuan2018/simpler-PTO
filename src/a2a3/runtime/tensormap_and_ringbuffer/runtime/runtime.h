@@ -178,6 +178,10 @@ public:
 
     // Profiling support
     bool enable_profiling;  // Enable profiling flag
+    bool sched_loop_trace;
+    uint32_t sched_loop_trace_interval;
+    uint32_t sched_loop_trace_limit;
+    int32_t sched_loop_trace_thread;
 
     // Orchestrator-to-scheduler transition control
     // When true, orchestrator threads convert to scheduler threads after orchestration completes.

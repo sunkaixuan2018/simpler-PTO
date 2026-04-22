@@ -1962,6 +1962,52 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
 
 #if PTO2_PROFILING
     perf.sched_start_ts = get_sys_cnt_aicpu();
+    bool trace_loop =
+        runtime->sched_loop_trace &&
+        (runtime->sched_loop_trace_thread < 0 || runtime->sched_loop_trace_thread == thread_idx);
+    uint32_t trace_loop_interval = runtime->sched_loop_trace_interval == 0 ? 1 : runtime->sched_loop_trace_interval;
+    uint32_t trace_loop_limit = runtime->sched_loop_trace_limit;
+    uint32_t trace_loop_emitted = 0;
+    if (trace_loop) {
+        DEV_ALWAYS(
+            "SCHED_LOOP_TRACE_BEGIN thread=%d interval=%u limit=%u", thread_idx, trace_loop_interval,
+            trace_loop_limit
+        );
+    }
+    auto maybe_log_sched_loop_trace = [&](
+                                          uint64_t loop_begin_ts, uint64_t loop_id, int32_t completed_this_turn,
+                                          uint32_t dispatched_this_turn, int32_t wired_this_turn, bool made_progress,
+                                          bool try_completed, bool try_pushed, int32_t idle_count) {
+        if (!trace_loop) {
+            return;
+        }
+        if (trace_loop_limit != 0 && trace_loop_emitted >= trace_loop_limit) {
+            return;
+        }
+        bool sampled = (loop_id % trace_loop_interval) == 0;
+        bool eventful = completed_this_turn > 0 || dispatched_this_turn > 0 || wired_this_turn > 0;
+        if (!sampled && !eventful) {
+            return;
+        }
+        uint64_t loop_end_ts = get_sys_cnt_aicpu();
+        DEV_ALWAYS(
+            "SCHED_LOOP_TRACE thread=%d loop=%" PRIu64 " begin=%" PRIu64 " end=%" PRIu64
+            " dur=%.3fus complete=%d dispatch=%u wired=%d progress=%d try_complete=%d try_push=%d idle_iters=%d",
+            thread_idx,
+            static_cast<uint64_t>(loop_id),
+            static_cast<uint64_t>(loop_begin_ts),
+            static_cast<uint64_t>(loop_end_ts),
+            cycles_to_us(loop_end_ts - loop_begin_ts),
+            completed_this_turn,
+            dispatched_this_turn,
+            wired_this_turn,
+            made_progress ? 1 : 0,
+            try_completed ? 1 : 0,
+            try_pushed ? 1 : 0,
+            idle_count
+        );
+        trace_loop_emitted++;
+    };
 #endif
 
     while (true) {
@@ -1970,6 +2016,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
         CYCLE_COUNT_START();
         perf.sched_loop_count++;
         uint64_t _t0_phase = _t0;
+        uint64_t loop_trace_begin_ts = _t0;
+        uint32_t loop_dispatch_count_start = perf.phase_dispatch_count;
+        uint32_t dispatched_this_turn = 0;
 #endif
         int32_t task_count = 0;
         if (!tracker.has_any_running_cores()) {
@@ -2045,11 +2094,14 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
         }
 
         // Phase 3: Drain wiring queue — wire fanout edges for newly submitted tasks.
+        int32_t wired_this_turn = 0;
+
         // Only thread 0 does wiring to keep dep_pool single-threaded.
         if (thread_idx == 0) {
             int wired = rt->scheduler.drain_wiring_queue(orchestrator_done_);
             if (wired > 0) {
                 made_progress = true;
+                wired_this_turn = wired;
 #if PTO2_SCHED_PROFILING
                 perf.phase_wiring_count += wired;
 #endif
@@ -2093,6 +2145,7 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
             CYCLE_COUNT_LAP(perf.sched_idle_cycle);
         } else {
             CYCLE_COUNT_LAP(perf.sched_dispatch_cycle);
+            dispatched_this_turn = perf.phase_dispatch_count - loop_dispatch_count_start;
             if (perf.profiling_enabled && perf.phase_dispatch_count > 0) {
                 perf_aicpu_record_phase(
                     thread_idx, AicpuPhaseId::SCHED_DISPATCH, _t0_phase, _t1, perf.sched_loop_count,
@@ -2111,6 +2164,12 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
 
         if (made_progress) {
             idle_iterations = 0;
+#if PTO2_PROFILING
+            maybe_log_sched_loop_trace(
+                loop_trace_begin_ts, perf.sched_loop_count, completed_this_turn, dispatched_this_turn,
+                wired_this_turn, made_progress, try_completed, try_pushed, idle_iterations
+            );
+#endif
         } else {
             // Batch deferred fanin releases during idle.
             // Processing all pending releases at once advances the ring faster,
@@ -2158,6 +2217,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                 );
                 _t0_phase = _t1;
             }
+            maybe_log_sched_loop_trace(
+                loop_trace_begin_ts, perf.sched_loop_count, completed_this_turn, dispatched_this_turn,
+                wired_this_turn, made_progress, try_completed, try_pushed, idle_iterations
+            );
 #endif
         }
     }

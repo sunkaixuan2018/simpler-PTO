@@ -272,6 +272,13 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
     env["N_ITER"] = str(args.n_iter)
     env["DUMMY_COMM_BYTES"] = str(parse_size(args.dummy_comm_bytes))
     env["EXTREME_SERIALIZE_DUMMY"] = "1" if args.serialize_dummy else "0"
+    trace_requested = args.sched_loop_trace or args.sched_loop_trace_thread is not None
+    if trace_requested:
+        env["PTO2_SCHED_LOOP_TRACE"] = "1"
+        env["PTO2_SCHED_LOOP_TRACE_INTERVAL"] = str(args.sched_loop_trace_interval)
+        env["PTO2_SCHED_LOOP_TRACE_LIMIT"] = str(args.sched_loop_trace_limit)
+        if args.sched_loop_trace_thread is not None:
+            env["PTO2_SCHED_LOOP_TRACE_THREAD"] = str(args.sched_loop_trace_thread)
 
     if args.pto_isa_root:
         env["PTO_ISA_ROOT"] = str(Path(args.pto_isa_root).expanduser().resolve())
@@ -303,6 +310,13 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
         f"DUMMY_COMM_BYTES={env['DUMMY_COMM_BYTES']} "
         f"EXTREME_SERIALIZE_DUMMY={env['EXTREME_SERIALIZE_DUMMY']}"
     )
+    if trace_requested:
+        print(
+            "sched-loop-trace: "
+            f"thread={args.sched_loop_trace_thread if args.sched_loop_trace_thread is not None else 'all'} "
+            f"interval={args.sched_loop_trace_interval} "
+            f"limit={args.sched_loop_trace_limit}"
+        )
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=False)
     perf_files = perf_files_since(since)
 
@@ -404,6 +418,10 @@ def main() -> int:
         action="store_false",
         help="Allow dummy traffic to overlap with following gather iterations",
     )
+    parser.add_argument("--sched-loop-trace", action="store_true", help="Enable AICPU scheduler loop trace logs")
+    parser.add_argument("--sched-loop-trace-thread", type=int, default=None, help="Trace one scheduler thread only")
+    parser.add_argument("--sched-loop-trace-interval", type=int, default=1, help="Log every N scheduler loops")
+    parser.add_argument("--sched-loop-trace-limit", type=int, default=128, help="Max trace lines per scheduler thread")
     parser.add_argument("--pto-isa-root", default=None)
     parser.add_argument("--pto-isa-commit", default=None)
     parser.add_argument("--clone-protocol", default="https", choices=["ssh", "https"])
@@ -417,6 +435,12 @@ def main() -> int:
         if strategy not in STRATEGIES:
             raise ValueError(f"Unsupported strategy {strategy!r}; choose from {sorted(STRATEGIES)}")
     sizes = [parse_size(x) for x in parse_csv_list(args.sizes)]
+    if args.sched_loop_trace_interval <= 0:
+        raise ValueError("--sched-loop-trace-interval must be positive")
+    if args.sched_loop_trace_limit < 0:
+        raise ValueError("--sched-loop-trace-limit must be non-negative")
+    if args.sched_loop_trace_thread is not None and args.sched_loop_trace_thread < -1:
+        raise ValueError("--sched-loop-trace-thread must be -1 or non-negative")
 
     rows = []
     for strategy in strategies:

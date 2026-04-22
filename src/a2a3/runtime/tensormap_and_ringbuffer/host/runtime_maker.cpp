@@ -77,6 +77,39 @@ static uint64_t parse_env_uint64(const char *name, uint64_t min_val, bool requir
     return static_cast<uint64_t>(val);
 }
 
+static uint64_t parse_env_uint64_default(
+    const char *name, uint64_t default_val, uint64_t min_val, bool require_power_of_2) {
+    const char *env = std::getenv(name);
+    if (!env) return default_val;
+    char *endptr;
+    errno = 0;
+    uint64_t val = strtoull(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0' || val < min_val) {
+        LOG_WARN("%s=%s invalid (must be a valid integer >= %" PRIu64 "), using %" PRIu64,
+                 name, env, min_val, default_val);
+        return default_val;
+    }
+    if (require_power_of_2 && (val & (val - 1)) != 0) {
+        LOG_WARN("%s=%s invalid (must be a power of 2, >= %" PRIu64 "), using %" PRIu64,
+                 name, env, min_val, default_val);
+        return default_val;
+    }
+    return val;
+}
+
+static int32_t parse_env_int32_default(const char *name, int32_t default_val, int32_t min_val, int32_t max_val) {
+    const char *env = std::getenv(name);
+    if (!env) return default_val;
+    char *endptr;
+    errno = 0;
+    long val = strtol(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0' || val < min_val || val > max_val) {
+        LOG_WARN("%s=%s invalid (must be in [%d,%d]), using %d", name, env, min_val, max_val, default_val);
+        return default_val;
+    }
+    return static_cast<int32_t>(val);
+}
+
 static int32_t pto2_read_runtime_status(Runtime *runtime, PTO2SharedMemoryHeader *host_header) {
     if (runtime == nullptr || host_header == nullptr) {
         return 0;
@@ -246,6 +279,26 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
             runtime->orch_to_sched = true;
         }
         LOG_INFO("Orchestrator-to-scheduler transition: %s", runtime->orch_to_sched ? "enabled" : "disabled");
+    }
+
+    // Optional AICPU scheduler loop trace for latency diagnosis.
+    {
+        const char *env_val = std::getenv("PTO2_SCHED_LOOP_TRACE");
+        if (env_val && (env_val[0] == '1' || env_val[0] == 't' || env_val[0] == 'T')) {
+            runtime->sched_loop_trace = true;
+            runtime->sched_loop_trace_interval = static_cast<uint32_t>(
+                parse_env_uint64_default("PTO2_SCHED_LOOP_TRACE_INTERVAL", 1, 1, false));
+            runtime->sched_loop_trace_limit = static_cast<uint32_t>(
+                parse_env_uint64_default("PTO2_SCHED_LOOP_TRACE_LIMIT", 128, 0, false));
+            runtime->sched_loop_trace_thread = parse_env_int32_default(
+                "PTO2_SCHED_LOOP_TRACE_THREAD", -1, -1, PLATFORM_MAX_AICPU_THREADS - 1);
+            LOG_INFO(
+                "Scheduler loop trace: enabled interval=%u limit=%u thread=%d",
+                runtime->sched_loop_trace_interval,
+                runtime->sched_loop_trace_limit,
+                runtime->sched_loop_trace_thread
+            );
+        }
     }
 
     // Read ring buffer size overrides from environment

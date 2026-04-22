@@ -14,6 +14,52 @@ Each run produces a new log file (or appends to an existing one). Find the most 
 ls -lt $HOME/ascend/log/debug/device-<device_id>/ | head -5
 ```
 
+## Scheduler Loop Trace
+
+For AICPU scheduling latency diagnosis, enable per-loop scheduler trace
+logs:
+
+```bash
+PTO2_SCHED_LOOP_TRACE=1 \
+PTO2_SCHED_LOOP_TRACE_THREAD=0 \
+PTO2_SCHED_LOOP_TRACE_INTERVAL=1 \
+PTO2_SCHED_LOOP_TRACE_LIMIT=128 \
+python3 examples/scripts/run_example.py ...
+```
+
+The fake one-aicore benchmark exposes the same controls:
+
+```bash
+python3 tools/bench_fake_kernel_comm_sched_one_aicore.py \
+  --devices 4,5 \
+  --strategies mte \
+  --sizes 1K,4K,16K \
+  --n-iter 2 \
+  --sched-loop-trace \
+  --sched-loop-trace-thread 0 \
+  --sched-loop-trace-limit 128
+```
+
+Each trace line is emitted to the same device log as `DEV_ALWAYS` output:
+
+```text
+SCHED_LOOP_TRACE thread=0 loop=42 begin=... end=... dur=...
+  complete=1 dispatch=1 wired=0 progress=1 try_complete=1 try_push=1
+```
+
+Compare `begin/end/dur` with the merged swimlane JSON task timestamps:
+
+- `dispatch_time_us` should fall inside or just after a loop whose `dispatch`
+  count is non-zero.
+- `finish_time_us` is recorded when AICPU observes completion, so it should
+  align with a later loop whose `complete` count is non-zero.
+- If kernel `duration_us` is only 1-5us but `finish_time_us -
+  dispatch_time_us` clusters near one scheduler loop period, the delay is in
+  AICPU polling/scheduling rather than kernel execution.
+
+Use `PTO2_SCHED_LOOP_TRACE_LIMIT=0` only for short runs; it disables the
+per-thread trace line cap.
+
 ## Log Structure Overview
 
 A single run produces two profiling blocks in the device log:

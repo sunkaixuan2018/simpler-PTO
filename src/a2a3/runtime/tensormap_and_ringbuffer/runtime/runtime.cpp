@@ -38,6 +38,11 @@ Runtime::Runtime() {
     pto2_heap_size = 0;
     pto2_dep_pool_size = 0;
     orch_to_sched = false;
+    enable_profiling = false;
+    sched_loop_trace = false;
+    sched_loop_trace_interval = 1;
+    sched_loop_trace_limit = 128;
+    sched_loop_trace_thread = -1;
 
     // Initialize tensor pairs
     tensor_pair_count = 0;
