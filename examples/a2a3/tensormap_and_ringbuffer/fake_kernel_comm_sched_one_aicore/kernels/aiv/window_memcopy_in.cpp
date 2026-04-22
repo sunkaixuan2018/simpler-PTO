@@ -13,10 +13,6 @@
 #include "tensor.h"
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
-    if (get_block_idx() != 0) {
-        return;
-    }
-
     __gm__ Tensor* win_dst_t = reinterpret_cast<__gm__ Tensor*>(args[0]);
     __gm__ Tensor* dev_src_t = reinterpret_cast<__gm__ Tensor*>(args[1]);
     (void)reinterpret_cast<__gm__ Tensor*>(args[2]);

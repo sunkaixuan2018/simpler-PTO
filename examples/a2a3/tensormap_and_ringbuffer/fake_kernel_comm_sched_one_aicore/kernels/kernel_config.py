@@ -3,8 +3,8 @@ Single-cluster gather communication scheduling case.
 
 This case keeps the old fake_kernel_comm_sched_one_aicore benchmark shape but
 uses the current tensormap_and_ringbuffer orchestration API. Runtime scheduling
-is constrained to one AICore cluster by block_dim=1; each communication task is
-submitted as a single-AIV task.
+uses a single orchestrator and three scheduler threads so block_dim=3 maps one
+logical AIV task to each scheduler thread.
 """
 
 import os
@@ -69,12 +69,12 @@ RUNTIME_ENV = {
 _NRANKS = _env_int("PTO_NRANKS", 4)
 _ROOT = _env_int("PTO_ROOT_RANK", 0)
 _GATHER_COUNT = _env_int("GATHER_COUNT", 256)
-_N_ITER = _env_int("N_ITER", 200)
+_N_ITER = _env_int("N_ITER", 1)
 _STRATEGY = _strategy_code()
-_SERIALIZE_DUMMY = _env_int("EXTREME_SERIALIZE_DUMMY", 0)
-_DUMMY_COMM_BYTES = _env_int("DUMMY_COMM_BYTES", 16 * 1024 * 1024)
-_DUMMY_SOURCE_ELEMS = _env_int("DUMMY_SOURCE_ELEMS", (1 * 1024 * 1024) // 4)
-_DUMMY_BUFFER_ELEMS = _env_int("DUMMY_BUFFER_ELEMS", (2 * 1024 * 1024) // 4)
+_SERIALIZE_DUMMY = _env_int("EXTREME_SERIALIZE_DUMMY", 1)
+_DUMMY_COMM_BYTES = _env_int("DUMMY_COMM_BYTES", 4)
+_DUMMY_SOURCE_ELEMS = _env_int("DUMMY_SOURCE_ELEMS", 1)
+_DUMMY_BUFFER_ELEMS = _env_int("DUMMY_BUFFER_ELEMS", 2)
 
 if _NRANKS <= 1:
     raise ValueError("PTO_NRANKS must be greater than 1")

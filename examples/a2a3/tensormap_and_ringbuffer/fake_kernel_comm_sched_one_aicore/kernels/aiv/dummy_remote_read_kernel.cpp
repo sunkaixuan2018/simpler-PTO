@@ -106,10 +106,6 @@ __aicore__ __attribute__((always_inline)) inline void CopySpanPingPong(
 }
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t* args) {
-    if (get_block_idx() != 0) {
-        return;
-    }
-
     __gm__ Tensor* dst_t = reinterpret_cast<__gm__ Tensor*>(args[0]);
     __gm__ Tensor* src_t = reinterpret_cast<__gm__ Tensor*>(args[1]);
     (void)reinterpret_cast<__gm__ Tensor*>(args[2]);

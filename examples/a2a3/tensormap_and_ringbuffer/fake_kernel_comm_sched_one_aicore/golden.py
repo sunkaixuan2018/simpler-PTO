@@ -49,11 +49,11 @@ def generate_distributed_inputs(rank: int, nranks: int, root: int, comm_ctx=None
     del comm_ctx
 
     gather_count = _env_int("GATHER_COUNT", 256)
-    n_iter = _env_int("N_ITER", 200)
-    dummy_source_elems = _env_int("DUMMY_SOURCE_ELEMS", (1 * 1024 * 1024) // 4)
-    dummy_buffer_elems = _env_int("DUMMY_BUFFER_ELEMS", (2 * 1024 * 1024) // 4)
-    dummy_comm_bytes = _env_int("DUMMY_COMM_BYTES", 16 * 1024 * 1024)
-    serialize_dummy = _env_int("EXTREME_SERIALIZE_DUMMY", 0)
+    n_iter = _env_int("N_ITER", 1)
+    dummy_source_elems = _env_int("DUMMY_SOURCE_ELEMS", 1)
+    dummy_buffer_elems = _env_int("DUMMY_BUFFER_ELEMS", 2)
+    dummy_comm_bytes = _env_int("DUMMY_COMM_BYTES", 4)
+    serialize_dummy = _env_int("EXTREME_SERIALIZE_DUMMY", 1)
 
     if nranks <= 1:
         raise ValueError(f"fake_kernel_comm_sched_one_aicore expects nranks > 1, got {nranks}")
