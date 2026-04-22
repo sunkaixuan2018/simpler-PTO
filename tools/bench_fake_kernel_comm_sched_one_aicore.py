@@ -27,7 +27,9 @@ CASE_ROOT = PROJECT_ROOT / "examples" / "a2a3" / "tensormap_and_ringbuffer" / "f
 KERNELS_DIR = CASE_ROOT / "kernels"
 GOLDEN = CASE_ROOT / "golden.py"
 RUN_EXAMPLE = PROJECT_ROOT / "examples" / "scripts" / "run_example.py"
+SWIMLANE_CONVERTER = PROJECT_ROOT / "tools" / "swimlane_converter.py"
 ARTIFACT_DIR = PROJECT_ROOT / "build" / "distributed" / "artifacts"
+KERNEL_CONFIG = KERNELS_DIR / "kernel_config.py"
 
 STRATEGIES = {
     "hybrid": 0,
@@ -126,6 +128,81 @@ def perf_files_since(since: float) -> list[Path]:
     candidates = list(ARTIFACT_DIR.glob("rank_*/perf_swimlane_*.json"))
     candidates += list((PROJECT_ROOT / "outputs").glob("perf_swimlane_*.json"))
     return sorted(p for p in candidates if p.stat().st_mtime >= since)
+
+
+def rank_from_perf_path(path: Path) -> int | None:
+    parent = path.parent.name
+    if not parent.startswith("rank_"):
+        return None
+    try:
+        return int(parent.split("_", 1)[1])
+    except ValueError:
+        return None
+
+
+def merged_swimlane_path(perf_path: Path, strategy: str, size_bytes: int) -> Path:
+    stem = perf_path.stem
+    timestamp = stem[len("perf_swimlane_"):] if stem.startswith("perf_swimlane_") else str(int(time.time()))
+    rank = perf_path.parent.name if perf_path.parent.name.startswith("rank_") else "rank_unknown"
+    return (
+        PROJECT_ROOT
+        / "outputs"
+        / f"merged_swimlane_one_aicore_{strategy}_{size_bytes}B_{rank}_{timestamp}.json"
+    )
+
+
+def convert_perf_files(perf_files: list[Path], args, strategy: str, size_bytes: int) -> dict:
+    if not perf_files:
+        return {"merged_swimlane_files": [], "merged_swimlane_failures": []}
+
+    devices = parse_devices(args.devices)
+    merged_files: list[str] = []
+    failures: list[dict[str, str]] = []
+
+    for perf_path in perf_files:
+        output_path = merged_swimlane_path(perf_path, strategy, size_bytes)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            sys.executable,
+            str(SWIMLANE_CONVERTER),
+            str(perf_path),
+            "-o",
+            str(output_path),
+            "-k",
+            str(KERNEL_CONFIG),
+        ]
+
+        rank = rank_from_perf_path(perf_path)
+        if rank is not None and 0 <= rank < len(devices):
+            cmd += ["-d", str(devices[rank])]
+
+        proc = subprocess.run(
+            cmd,
+            cwd=PROJECT_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if proc.returncode == 0 and output_path.exists():
+            merged_files.append(str(output_path))
+            print(f"  merged swimlane: {output_path}")
+            continue
+
+        message = (proc.stderr or proc.stdout or "").strip()
+        failures.append({
+            "perf_file": str(perf_path),
+            "output_file": str(output_path),
+            "returncode": str(proc.returncode),
+            "message": message[-2000:],
+        })
+        print(f"  warning: swimlane_converter failed for {perf_path} (rc={proc.returncode})")
+        if message:
+            print(message[-1000:])
+
+    return {
+        "merged_swimlane_files": merged_files,
+        "merged_swimlane_failures": failures,
+    }
 
 
 def load_perf_tasks(perf_files: list[Path], func_ids: set[int], warmup: int) -> tuple[list[dict], Counter]:
@@ -233,6 +310,7 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
         "run_ok": proc.returncode == 0,
     }
     result.update(analyze_perf(perf_files, args.warmup, args.trim_ratio) if perf_files else {})
+    result.update(convert_perf_files(perf_files, args, strategy, size_bytes))
     result.update(analyze_debug_counts())
     return result
 
@@ -252,6 +330,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         "dummy_exec_avg_us",
         "debug_success_ratio",
         "perf_files",
+        "merged_swimlane_files",
     ]
     with path.open("w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fields)
@@ -270,6 +349,7 @@ def write_csv(path: Path, rows: list[dict]) -> None:
                 "dummy_exec_avg_us": (row.get("dummy_exec") or {}).get("avg"),
                 "debug_success_ratio": row.get("debug_success_ratio"),
                 "perf_files": ";".join(row.get("perf_files", [])),
+                "merged_swimlane_files": ";".join(row.get("merged_swimlane_files", [])),
             })
 
 
