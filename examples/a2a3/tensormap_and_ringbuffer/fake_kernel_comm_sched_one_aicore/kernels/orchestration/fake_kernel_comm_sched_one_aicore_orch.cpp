@@ -51,14 +51,14 @@ __attribute__((visibility("default")))
 PTO2OrchestrationConfig aicpu_orchestration_config(const ChipStorageTaskArgs& orch_args) {
     (void)orch_args;
     return PTO2OrchestrationConfig{
-        .expected_arg_count = 9,
+        .expected_arg_count = 10,
     };
 }
 
 __attribute__((visibility("default")))
 void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
-    if (orch_args.scalar_count() < 9) {
-        LOG_ERROR("fake_kernel_comm_sched_one_aicore expects 9 scalar args, got %d", orch_args.scalar_count());
+    if (orch_args.scalar_count() < 10) {
+        LOG_ERROR("fake_kernel_comm_sched_one_aicore expects 10 scalar args, got %d", orch_args.scalar_count());
         return;
     }
 
@@ -68,10 +68,11 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     void* win_src_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[2]));
     void* win_dst_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[3]));
     void* dummy_src_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[4]));
-    void* debug_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[5]));
-    void* barrier_base_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[6]));
-    int64_t* config = reinterpret_cast<int64_t*>(static_cast<uintptr_t>(args[7]));
-    auto* comm_ctx = reinterpret_cast<CommDeviceContext*>(static_cast<uintptr_t>(args[8]));
+    void* dummy_dst_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[5]));
+    void* debug_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[6]));
+    void* barrier_base_ptr = reinterpret_cast<void*>(static_cast<uintptr_t>(args[7]));
+    int64_t* config = reinterpret_cast<int64_t*>(static_cast<uintptr_t>(args[8]));
+    auto* comm_ctx = reinterpret_cast<CommDeviceContext*>(static_cast<uintptr_t>(args[9]));
 
     if (comm_ctx == nullptr || comm_ctx->rankNum <= 1) {
         LOG_ERROR(
@@ -115,6 +116,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     Tensor win_src = make_tensor_external(win_src_ptr, src_shape, 1, DataType::FLOAT32);
     Tensor win_dst = make_tensor_external(win_dst_ptr, dst_shape, 1, DataType::FLOAT32);
     Tensor dummy_src = make_tensor_external(dummy_src_ptr, dummy_src_shape, 1, DataType::FLOAT32);
+    Tensor dummy_dst = make_tensor_external(dummy_dst_ptr, dummy_dst_shape, 1, DataType::FLOAT32);
 
     LOG_INFO(
         "one_aicore: rank=%u/%u strategy=%d gather_count=%lu n_iter=%d dummy_comm_bytes=%lu",
@@ -132,21 +134,18 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     Tensor start_sync = submit_barrier(barrier0, barrier0, comm_ctx, n_ranks, root);
 
     Arg copy_in_params;
-    copy_in_params.add_output(win_src);
+    copy_in_params.add_inout(win_src);
     copy_in_params.add_input(src);
     copy_in_params.add_input(start_sync);
     copy_in_params.add_scalar(gather_count);
     pto2_rt_submit_aiv_task(FUNC_WIN_MEMCOPY_IN, copy_in_params);
 
-    Arg dummy_fill_params;
-    dummy_fill_params.add_output(dummy_src);
-    dummy_fill_params.add_input(src);
-    dummy_fill_params.add_input(start_sync);
-    dummy_fill_params.add_scalar(dummy_source_elems);
-    pto2_rt_submit_aiv_task(FUNC_DUMMY_WINDOW_FILL, dummy_fill_params);
+    uintptr_t copy_sync_ptr = barrier_base + (uint64_t)n_ranks * sizeof(int32_t);
+    Tensor copy_sync_barrier = make_i32_tensor(reinterpret_cast<void*>(copy_sync_ptr), (uint32_t)n_ranks);
+    Tensor copy_sync = submit_barrier(copy_sync_barrier, win_src, comm_ctx, n_ranks, root);
 
-    Tensor prev_gather_sync = start_sync;
-    Tensor prev_dummy_sync = dummy_src;
+    Tensor prev_gather_sync = copy_sync;
+    Tensor prev_dummy_sync = copy_sync;
 
     for (int iter = 0; iter < n_iter; ++iter) {
         uintptr_t debug_row_ptr = debug_base + (uint64_t)iter * (uint64_t)n_ranks * sizeof(int32_t);
@@ -157,50 +156,34 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         int gather_func = select_comm_kernel(
             strategy, gather_count * sizeof(float), FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC);
 
-        if (is_final_iter) {
-            Arg gather_params;
-            gather_params.add_output(win_dst);
-            gather_params.add_input(win_src);
-            gather_params.add_input(prev_gather_sync);
-            gather_params.add_output(debug_row);
-            gather_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
-            gather_params.add_scalar((uint64_t)n_ranks);
-            gather_params.add_scalar((uint64_t)root);
-            gather_params.add_scalar((uint64_t)comm_ctx->workSpace);
-            pto2_rt_submit_aiv_task(gather_func, gather_params);
-            gather_result = win_dst;
-        } else {
-            TensorCreateInfo gather_ci(dst_shape, 1, DataType::FLOAT32);
-            Arg gather_params;
-            gather_params.add_output(gather_ci);
-            gather_params.add_input(win_src);
-            gather_params.add_input(prev_gather_sync);
-            gather_params.add_output(debug_row);
-            gather_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
-            gather_params.add_scalar((uint64_t)n_ranks);
-            gather_params.add_scalar((uint64_t)root);
-            gather_params.add_scalar((uint64_t)comm_ctx->workSpace);
-            TaskOutputTensors gather_outs = pto2_rt_submit_aiv_task(gather_func, gather_params);
-            gather_result = gather_outs.get_ref(0);
-        }
+        Arg gather_params;
+        gather_params.add_inout(win_dst);
+        gather_params.add_input(win_src);
+        gather_params.add_input(prev_gather_sync);
+        gather_params.add_output(debug_row);
+        gather_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
+        gather_params.add_scalar((uint64_t)n_ranks);
+        gather_params.add_scalar((uint64_t)root);
+        gather_params.add_scalar((uint64_t)comm_ctx->workSpace);
+        pto2_rt_submit_aiv_task(gather_func, gather_params);
+        gather_result = win_dst;
 
         if (!is_final_iter) {
             uintptr_t barrier_ptr =
-                barrier_base + (uint64_t)(iter + 1) * (uint64_t)n_ranks * sizeof(int32_t);
+                barrier_base + (uint64_t)(iter + 2) * (uint64_t)n_ranks * sizeof(int32_t);
             Tensor barrier = make_i32_tensor(reinterpret_cast<void*>(barrier_ptr), (uint32_t)n_ranks);
             prev_gather_sync = submit_barrier(barrier, gather_result, comm_ctx, n_ranks, root);
         } else {
             prev_gather_sync = gather_result;
         }
 
-        TensorCreateInfo dummy_ci(dummy_dst_shape, 1, DataType::FLOAT32);
         TensorCreateInfo dummy_debug_ci(debug_row_shape, 1, DataType::INT32);
         const Tensor& dummy_dep = (serialize_dummy != 0) ? prev_gather_sync : prev_dummy_sync;
         int dummy_func = select_comm_kernel(
             strategy, dummy_comm_bytes, FUNC_DUMMY_COMM_SYNC, FUNC_DUMMY_COMM_ASYNC);
 
         Arg dummy_params;
-        dummy_params.add_output(dummy_ci);
+        dummy_params.add_inout(dummy_dst);
         dummy_params.add_input(dummy_src);
         dummy_params.add_input(dummy_dep);
         dummy_params.add_output(dummy_debug_ci);
@@ -208,8 +191,8 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         dummy_params.add_scalar((uint64_t)n_ranks);
         dummy_params.add_scalar((uint64_t)root);
         dummy_params.add_scalar(dummy_comm_bytes);
-        TaskOutputTensors dummy_outs = pto2_rt_submit_aiv_task(dummy_func, dummy_params);
-        prev_dummy_sync = dummy_outs.get_ref(0);
+        pto2_rt_submit_aiv_task(dummy_func, dummy_params);
+        prev_dummy_sync = dummy_dst;
     }
 
     Arg copy_out_params;
