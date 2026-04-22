@@ -12,8 +12,10 @@ Spawned by DistributedCodeRunner — not intended for direct invocation.
 
 import argparse
 import ctypes
+import os
 import struct
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 script_dir = Path(__file__).parent.resolve()
@@ -317,6 +319,33 @@ def parse_kernel_spec(spec):
     return {"func_id": int(spec[:p]), "filename": spec[p + 1:]}
 
 
+def parse_runtime_env(items):
+    pairs = []
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"Invalid --runtime-env value: {item!r}")
+        pairs.append((key, value))
+    return pairs
+
+
+@contextmanager
+def temporary_env(pairs):
+    old_values = {}
+    for key, value in pairs:
+        if key not in old_values:
+            old_values[key] = os.environ.get(key)
+        os.environ[key] = value
+    try:
+        yield
+    finally:
+        for key, old_value in old_values.items():
+            if old_value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = old_value
+
+
 def main():
     parser = argparse.ArgumentParser(description="Distributed per-rank worker")
     parser.add_argument("--device-id", type=int, required=True)
@@ -333,6 +362,7 @@ def main():
     parser.add_argument("--block-dim", type=int, default=1)
     parser.add_argument("--orch-thread-num", type=int, default=0)
     parser.add_argument("--enable-profiling", action="store_true")
+    parser.add_argument("--runtime-env", action="append", default=[])
     parser.add_argument("--win-buffer", action="append", default=[])
     parser.add_argument("--dev-buffer", action="append", default=[])
     parser.add_argument("--load", action="append", default=[], dest="loads")
@@ -355,6 +385,7 @@ def main():
         buffers.append(b)
 
     kernel_bins = [parse_kernel_spec(s) for s in args.kernel_bin]
+    runtime_env = parse_runtime_env(args.runtime_env)
 
     buf_by_name = {b["name"]: b for b in buffers}
 
@@ -465,18 +496,22 @@ def main():
         f"[rank {args.rank}] Launching kernel: {len(func_args)} args, "
         f"{len(children)} kernels\n"
     )
+    if runtime_env:
+        keys = ", ".join(key for key, _ in runtime_env)
+        sys.stderr.write(f"[rank {args.rank}] Runtime env for launch: {keys}\n")
 
     chip_callable = build_chip_callable(args.orch_func, orch_binary, children, len(func_args))
     chip_args = build_scalar_chip_args(func_args)
 
-    runtime_api.run(
-        chip_callable,
-        chip_args,
-        args.block_dim,
-        args.aicpu_thread_num,
-        args.device_id,
-        enable_profiling=args.enable_profiling,
-    )
+    with temporary_env(runtime_env):
+        runtime_api.run(
+            chip_callable,
+            chip_args,
+            args.block_dim,
+            args.aicpu_thread_num,
+            args.device_id,
+            enable_profiling=args.enable_profiling,
+        )
     sys.stderr.write(f"[rank {args.rank}] Kernel execution complete\n")
 
     # ----------------------------------------------------------------

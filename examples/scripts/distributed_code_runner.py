@@ -315,6 +315,11 @@ class DistributedCodeRunner:
         if self.enable_profiling:
             cmd += ["--enable-profiling"]
 
+        runtime_env = getattr(self.kcfg, "RUNTIME_ENV", None)
+        if isinstance(runtime_env, dict):
+            for key, value in runtime_env.items():
+                cmd += ["--runtime-env", f"{key}={value}"]
+
         win_sync = dist.get("win_sync_prefix", 0)
         if win_sync:
             cmd += ["--win-sync-prefix", str(win_sync)]
@@ -368,9 +373,6 @@ class DistributedCodeRunner:
 
             cmd = self._build_worker_cmd(r)
             env = os.environ.copy()
-            runtime_env = getattr(self.kcfg, "RUNTIME_ENV", None)
-            if isinstance(runtime_env, dict):
-                env.update(runtime_env)
             if self.enable_profiling:
                 perf_dir = self.artifact_dir / f"rank_{r}"
                 perf_dir.mkdir(parents=True, exist_ok=True)
@@ -393,8 +395,8 @@ class DistributedCodeRunner:
         for r in range(self.nranks):
             log_path = self.artifact_dir / f"rank{r}.log"
             lines = log_path.read_text().strip().split("\n")
-            print(f"--- RANK {r} (last 5 lines) ---")
-            for line in lines[-5:]:
+            print(f"--- RANK {r} (last 20 lines) ---")
+            for line in lines[-20:]:
                 print(line)
 
         print()
