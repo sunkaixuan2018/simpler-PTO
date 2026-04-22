@@ -221,29 +221,67 @@ parse_device_e2e_avg() {
     local log_file="$1"
     local e2e_us
     e2e_us=$(awk -v freq="$FREQ" '
-        /sched_start=|orch_start=|sched_end[^=]*=|orch_end=|orch_stage_end=/ {
-            match($0, /([0-9]+)$/, m)
-            val = m[1] + 0
-            if ($0 ~ /sched_start=|orch_start=/) {
-                if (min_start == 0 || val < min_start) min_start = val
-            } else {
-                if (val > max_end) max_end = val
-            }
-            if ($0 ~ /orch_end=|orch_stage_end=/) {
-                if (min_start > 0 && max_end > min_start) {
-                    results[count++] = (max_end - min_start) / freq
-                    min_start = 0
-                    max_end = 0
-                }
-            }
+    function new_round() {
+        flush_round()
+        round++
+        min_start = 0; max_end = 0
+        delete sched_seen
+        delete orch_seen
+    }
+    function flush_round() {
+        if (round >= 0 && max_end > 0 && min_start > 0) {
+            results[round] = (max_end - min_start) / freq
+            count++
         }
-        END {
-            if (count == 0) exit 1
-            sum_v = 0
-            for (i = 0; i < count; i++) sum_v += results[i]
-            printf "%.2f\n", sum_v / count
-        }' "$log_file" 2>/dev/null || true)
-    if [[ -n "$e2e_us" ]]; then echo "$e2e_us"; return 0; fi
+    }
+    BEGIN {
+        round = 0; count = 0
+        min_start = 0; max_end = 0
+    }
+    /sched_start=/ {
+        match($0, /Thread ([0-9]+):/, tm)
+        tid = tm[1] + 0
+        if (tid in sched_seen) new_round()
+        sched_seen[tid] = 1
+        match($0, /sched_start=([0-9]+)/, m)
+        val = m[1] + 0
+        if (min_start == 0 || val < min_start) min_start = val
+    }
+    /orch_start=/ {
+        match($0, /Thread ([0-9]+):/, tm)
+        tid = tm[1] + 0
+        if (tid in orch_seen) new_round()
+        orch_seen[tid] = 1
+        match($0, /orch_start=([0-9]+)/, m)
+        val = m[1] + 0
+        if (min_start == 0 || val < min_start) min_start = val
+    }
+    /sched_end[^=]*=/ {
+        match($0, /sched_end[^=]*=([0-9]+)/, m)
+        val = m[1] + 0
+        if (val > max_end) max_end = val
+    }
+    /orch_end=/ {
+        match($0, /orch_end=([0-9]+)/, m)
+        val = m[1] + 0
+        if (val > max_end) max_end = val
+    }
+    /orch_stage_end=/ {
+        match($0, /orch_stage_end=([0-9]+)/, m)
+        val = m[1] + 0
+        if (val > max_end) max_end = val
+    }
+    END {
+        flush_round()
+        if (count == 0) exit 1
+        sum_v = 0
+        for (i = 0; i < count; i++) sum_v += results[i]
+        printf "%.2f\n", sum_v / count
+    }' "$log_file" 2>/dev/null || true)
+    if [[ -n "$e2e_us" ]]; then
+        echo "$e2e_us"
+        return 0
+    fi
     return 1
 }
 
