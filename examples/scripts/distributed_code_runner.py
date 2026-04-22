@@ -66,6 +66,7 @@ class DistributedCodeRunner:
         orch_func: Optional[str] = None,
         pto_isa_commit: Optional[str] = None,
         clone_protocol: str = "ssh",
+        enable_profiling: bool = False,
     ):
         self.kernels_dir = Path(kernels_dir).resolve()
         self.platform = platform
@@ -75,6 +76,7 @@ class DistributedCodeRunner:
             SIMPLER_ROOT / "build" / "distributed" / "artifacts"
         self.pto_isa_commit = pto_isa_commit
         self.clone_protocol = clone_protocol
+        self.enable_profiling = enable_profiling
 
         self._load_kernel_config()
         dist = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})
@@ -157,9 +159,34 @@ class DistributedCodeRunner:
         from elf_parser import extract_text_section
         from code_runner import _ensure_pto_isa_root
 
-        pto_isa_root = _ensure_pto_isa_root(
-            verbose=True, commit=self.pto_isa_commit,
-            clone_protocol=self.clone_protocol)
+        dist_config = getattr(self.kcfg, "DISTRIBUTED_CONFIG", {})
+        pto_isa_root = None
+        configured_pto_root = dist_config.get("pto_isa_root")
+        env_pto_root = os.environ.get("PTO_ISA_ROOT")
+        env_has_comm_async = False
+        if env_pto_root:
+            env_has_comm_async = (
+                Path(env_pto_root) / "include" / "pto" / "comm" / "async" / "async_types.hpp"
+            ).is_file()
+
+        if configured_pto_root and not env_has_comm_async:
+            p = Path(configured_pto_root)
+            if not p.is_absolute():
+                p = SIMPLER_ROOT / p
+            if (p / "include").is_dir():
+                pto_isa_root = str(p.resolve())
+                logger.info(f"Using DISTRIBUTED_CONFIG pto_isa_root: {pto_isa_root}")
+                if env_pto_root:
+                    logger.info("PTO_ISA_ROOT does not provide comm async headers; using case pto_isa_root")
+                if self.pto_isa_commit:
+                    logger.info("--pto-isa-commit is ignored because this case pins pto_isa_root")
+            else:
+                logger.warning(f"Configured pto_isa_root is missing include/: {p}")
+
+        if pto_isa_root is None:
+            pto_isa_root = _ensure_pto_isa_root(
+                verbose=True, commit=self.pto_isa_commit,
+                clone_protocol=self.clone_protocol)
         if pto_isa_root is None:
             raise EnvironmentError("PTO_ISA_ROOT could not be resolved.")
 
@@ -285,6 +312,8 @@ class DistributedCodeRunner:
         cmd += ["--aicpu-thread-num", str(rt_cfg.get("aicpu_thread_num", 1))]
         cmd += ["--block-dim", str(rt_cfg.get("block_dim", 1))]
         cmd += ["--orch-thread-num", str(rt_cfg.get("orch_thread_num", 0))]
+        if self.enable_profiling:
+            cmd += ["--enable-profiling"]
 
         win_sync = dist.get("win_sync_prefix", 0)
         if win_sync:
@@ -342,6 +371,10 @@ class DistributedCodeRunner:
             runtime_env = getattr(self.kcfg, "RUNTIME_ENV", None)
             if isinstance(runtime_env, dict):
                 env.update(runtime_env)
+            if self.enable_profiling:
+                perf_dir = self.artifact_dir / f"rank_{r}"
+                perf_dir.mkdir(parents=True, exist_ok=True)
+                env["SIMPLER_PERF_OUTPUT_DIR"] = str(perf_dir)
 
             proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, env=env)
             procs.append(proc)

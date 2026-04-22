@@ -260,7 +260,15 @@ class HostRuntimeApi:
         if rc != 0:
             raise RuntimeError(f"comm_destroy failed: {rc}")
 
-    def run(self, callable_blob, args_blob, block_dim, aicpu_thread_num, device_id):
+    def run(
+        self,
+        callable_blob,
+        args_blob,
+        block_dim,
+        aicpu_thread_num,
+        device_id,
+        enable_profiling=False,
+    ):
         runtime = ctypes.create_string_buffer(self.lib.get_runtime_size())
         callable_buf = ctypes.create_string_buffer(callable_blob)
         args_buf = ctypes.create_string_buffer(args_blob)
@@ -280,7 +288,7 @@ class HostRuntimeApi:
             len(self.aicpu_binary),
             aicore_buf,
             len(self.aicore_binary),
-            0,
+            1 if enable_profiling else 0,
             0,
         )
         if rc != 0:
@@ -324,6 +332,7 @@ def main():
     parser.add_argument("--aicpu-thread-num", type=int, default=1)
     parser.add_argument("--block-dim", type=int, default=1)
     parser.add_argument("--orch-thread-num", type=int, default=0)
+    parser.add_argument("--enable-profiling", action="store_true")
     parser.add_argument("--win-buffer", action="append", default=[])
     parser.add_argument("--dev-buffer", action="append", default=[])
     parser.add_argument("--load", action="append", default=[], dest="loads")
@@ -461,7 +470,13 @@ def main():
     chip_args = build_scalar_chip_args(func_args)
 
     runtime_api.run(
-        chip_callable, chip_args, args.block_dim, args.aicpu_thread_num, args.device_id)
+        chip_callable,
+        chip_args,
+        args.block_dim,
+        args.aicpu_thread_num,
+        args.device_id,
+        enable_profiling=args.enable_profiling,
+    )
     sys.stderr.write(f"[rank {args.rank}] Kernel execution complete\n")
 
     # ----------------------------------------------------------------

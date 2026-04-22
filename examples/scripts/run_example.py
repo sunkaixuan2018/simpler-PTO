@@ -357,6 +357,7 @@ Golden.py interface:
                 build_dir=args.savetemp,
                 pto_isa_commit=args.pto_isa_commit,
                 clone_protocol=args.clone_protocol,
+                enable_profiling=args.enable_profiling,
             )
             success = runner.run_all()
             if success:
