@@ -391,8 +391,19 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=0)
     parser.add_argument("--trim-ratio", type=float, default=0.10)
     parser.add_argument("--dummy-comm-bytes", default="4")
-    parser.add_argument("--serialize-dummy", dest="serialize_dummy", action="store_true", default=True)
-    parser.add_argument("--no-serialize-dummy", dest="serialize_dummy", action="store_false")
+    parser.add_argument(
+        "--serialize-dummy",
+        dest="serialize_dummy",
+        action="store_true",
+        default=True,
+        help="Run dummy traffic after each gather and before the next iteration",
+    )
+    parser.add_argument(
+        "--no-serialize-dummy",
+        dest="serialize_dummy",
+        action="store_false",
+        help="Allow dummy traffic to overlap with following gather iterations",
+    )
     parser.add_argument("--pto-isa-root", default=None)
     parser.add_argument("--pto-isa-commit", default=None)
     parser.add_argument("--clone-protocol", default="https", choices=["ssh", "https"])

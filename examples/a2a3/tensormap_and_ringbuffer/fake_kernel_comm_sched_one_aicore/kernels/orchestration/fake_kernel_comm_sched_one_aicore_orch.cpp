@@ -193,6 +193,9 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         dummy_params.add_scalar(dummy_comm_bytes);
         pto2_rt_submit_aiv_task(dummy_func, dummy_params);
         prev_dummy_sync = dummy_dst;
+        if (serialize_dummy != 0) {
+            prev_gather_sync = prev_dummy_sync;
+        }
     }
 
     Arg copy_out_params;
