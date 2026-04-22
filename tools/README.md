@@ -266,23 +266,29 @@ flowchart TD
 
 ## benchmark_rounds.sh
 
-批量运行预定义的 examples，解析 device log 中的 timing 行并报告每轮耗时。
+批量运行预定义的 examples，汇总 profiling JSON 和 device log 中的 timing 指标。
 
 ### 功能概述
 
-`benchmark_rounds.sh` 遍历 `EXAMPLES` 数组中配置的测试用例（位于 `tests/st/tensormap_and_ringbuffer/` 下），依次调用 `run_example.py` 运行每个 example，然后从生成的 device log 中提取 `orch_start` / `orch_end` / `sched_end` 时间戳计算每轮 elapsed 时间。
+`benchmark_rounds.sh` 遍历脚本顶部配置的测试用例，依次调用 `run_example.py` 运行每个 example/case，并输出以下指标：
+
+- `AICore Exec`
+- `AICPU Dispatch->Finish`
+- `Device E2E (profiling)`
+- `Device E2E (device log)`
+
+详细定义、实现和解释见 [benchmark_rounds_metrics.md](benchmark_rounds_metrics.md)。
 
 当前预配置的 examples：
 - `alternating_matmul_add`
 - `benchmark_bgemm`
 - `paged_attention_unroll`
 - `batch_paged_attention`
-- `paged_attention`
 
 ### 基本用法
 
 ```bash
-# 使用默认参数（device 0, 10 rounds）
+# 使用默认参数（device 0, 1 round）
 ./tools/benchmark_rounds.sh
 
 # 指定 device 和 rounds
@@ -297,18 +303,21 @@ flowchart TD
 | 选项 | 简写 | 说明 |
 |------|------|------|
 | `--device` | `-d` | Device ID（默认：0） |
-| `--rounds` | `-n` | 每个 example 的运行轮数（默认：10） |
+| `--rounds` | `-n` | 每个 example 的运行轮数（默认：1） |
 | `--help` | `-h` | 显示帮助信息 |
 
 所有未识别的参数会透传给 `run_example.py`。
 
 ### 输出内容
 
-对每个 example 输出：
-- 每轮的 Elapsed 时间（微秒）
-- 平均耗时和总轮数
+对每个 example/case/mode 输出：
 
-最终输出汇总：passed / failed 数量。
+- `AICore Exec (us)`
+- `AICPU Dispatch->Finish (us)`
+- `Device E2E (device log, us)`
+- `Device E2E (profiling, us)`
+
+末尾输出汇总表和 passed / failed 计数。
 
 ### Device log 解析
 

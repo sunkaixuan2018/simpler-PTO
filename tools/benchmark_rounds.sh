@@ -95,8 +95,9 @@ examples and cases to benchmark.
 
 Output:
   AICore Exec (host profiling derived earliest AICore start to latest AICore end).
-  AICPU Dispatch->Finish (host profiling derived earliest dispatch to latest finish).
+  AICPU Dispatch->Finish (profiling derived earliest dispatch to latest finish).
   Device E2E (device log derived earliest orch/sched start to latest orch/sched end).
+  Device E2E (profiling derived earliest orch/sched/task start to latest orch/sched/task end).
 USAGE
             exit 0
             ;;
@@ -217,6 +218,44 @@ find_new_device_log() {
     return 1
 }
 
+list_perf_jsons() {
+    if [[ ! -d "$OUTPUTS_DIR" ]]; then
+        return 0
+    fi
+    (
+        shopt -s nullglob
+        for _json in "$OUTPUTS_DIR"/perf_swimlane_*.json; do
+            printf '%s\n' "$_json"
+        done
+    )
+}
+
+find_new_perf_json() {
+    local pre_snapshot="$1"
+    local timeout_s=5
+    local elapsed=0
+    while (( elapsed < timeout_s )); do
+        local newest=""
+        local current_jsons
+        current_jsons=$(list_perf_jsons)
+        while IFS= read -r _json; do
+            [[ -z "$_json" ]] && continue
+            if ! grep -Fxq "$_json" <<<"$pre_snapshot"; then
+                if [[ -z "$newest" || "$_json" -nt "$newest" ]]; then
+                    newest="$_json"
+                fi
+            fi
+        done <<<"$current_jsons"
+        if [[ -n "$newest" ]]; then
+            printf '%s\n' "$newest"
+            return 0
+        fi
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 1
+}
+
 parse_device_e2e_avg() {
     local log_file="$1"
     local e2e_us
@@ -285,7 +324,112 @@ parse_device_e2e_avg() {
     return 1
 }
 
-parse_aicpu_exec() {
+parse_perf_json_metrics() {
+    local perf_json="$1"
+    python3 - "$perf_json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+with open(path, encoding="utf-8") as f:
+    data = json.load(f)
+
+tasks = data.get("tasks") or []
+sched_phases = data.get("aicpu_scheduler_phases") or []
+orch_phases = data.get("aicpu_orchestrator_phases") or []
+orch_summary = data.get("aicpu_orchestrator") or {}
+
+
+def collect_task_window(start_key, end_key):
+    starts = []
+    ends = []
+    for task in tasks:
+        try:
+            start = float(task[start_key])
+            end = float(task[end_key])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end <= start:
+            continue
+        starts.append(start)
+        ends.append(end)
+    return starts, ends
+
+
+def collect_phase_window(groups):
+    starts = []
+    ends = []
+    for group in groups:
+        for record in group or []:
+            try:
+                start = float(record["start_time_us"])
+                end = float(record["end_time_us"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if end <= start:
+                continue
+            starts.append(start)
+            ends.append(end)
+    return starts, ends
+
+
+def collect_summary_window(summary):
+    starts = []
+    ends = []
+    if not summary:
+        return starts, ends
+    try:
+        start = float(summary["start_time_us"])
+        end = float(summary["end_time_us"])
+    except (KeyError, TypeError, ValueError):
+        return starts, ends
+    if end <= start:
+        return starts, ends
+    starts.append(start)
+    ends.append(end)
+    return starts, ends
+
+
+def span(starts, ends):
+    if not starts or not ends:
+        return None
+    return max(ends) - min(starts)
+
+
+task_starts, task_ends = collect_task_window("start_time_us", "end_time_us")
+dispatch_starts, dispatch_ends = collect_task_window("dispatch_time_us", "finish_time_us")
+sched_starts, sched_ends = collect_phase_window(sched_phases)
+orch_phase_starts, orch_phase_ends = collect_phase_window(orch_phases)
+orch_starts, orch_ends = collect_summary_window(orch_summary)
+
+aicore_span = span(task_starts, task_ends)
+dispatch_finish = span(dispatch_starts, dispatch_ends)
+
+full_e2e_starts = []
+full_e2e_ends = []
+for starts in (dispatch_starts, task_starts, sched_starts, orch_phase_starts, orch_starts):
+    if starts:
+        full_e2e_starts.append(min(starts))
+for ends in (dispatch_ends, task_ends, sched_ends, orch_phase_ends, orch_ends):
+    if ends:
+        full_e2e_ends.append(max(ends))
+full_e2e = (max(full_e2e_ends) - min(full_e2e_starts)) if full_e2e_starts and full_e2e_ends else None
+
+
+def emit(key, value):
+    if value is None:
+        print(f"{key}=-")
+    else:
+        print(f"{key}={value:.2f}")
+
+
+emit("AICORE_SPAN", aicore_span)
+emit("DISPATCH_FINISH", dispatch_finish)
+emit("FULL_E2E", full_e2e)
+PY
+}
+
+parse_dispatch_finish_fallback() {
     local run_output="$1"
     local exec_us
     exec_us=$(printf "%s\n" "$run_output" | awk '
@@ -295,17 +439,7 @@ parse_aicpu_exec() {
     return 1
 }
 
-parse_profile_e2e() {
-    local run_output="$1"
-    local e2e_us
-    e2e_us=$(printf "%s\n" "$run_output" | awk '
-        match($0, /Total Test Time: ([0-9.]+) us/, m) { print m[1]; found = 1; exit }
-        END { if (!found) exit 1 }' 2>/dev/null || true)
-    if [[ -n "$e2e_us" ]]; then echo "$e2e_us"; return 0; fi
-    return 1
-}
-
-parse_aicore_exec() {
+parse_aicore_exec_fallback() {
     local run_output="$1"
     local exec_us
     exec_us=$(printf "%s\n" "$run_output" | awk '
@@ -333,19 +467,39 @@ run_profile_once() {
     fi
     profile_cmd+=("${EXTRA_ARGS[@]}")
 
-    local pre_run_logs profile_tmp profile_output profile_rc=0
+    local pre_run_logs pre_run_perf_jsons profile_tmp profile_output profile_rc=0
     pre_run_logs=$(list_device_logs)
+    pre_run_perf_jsons=$(list_perf_jsons)
     profile_tmp=$(mktemp)
     "${profile_cmd[@]}" >"$profile_tmp" 2>&1 || profile_rc=$?
     profile_output=$(<"$profile_tmp")
     rm -f "$profile_tmp"
     PROFILE_AICORE_EXEC="-"; PROFILE_AICPU_EXEC="-"; PROFILE_DEVICE_E2E_LOG="-"; PROFILE_DEVICE_E2E_PROF="-"
     if [[ $profile_rc -ne 0 ]]; then return 1; fi
-    parse_aicore_exec "$profile_output" >/dev/null && PROFILE_AICORE_EXEC=$(parse_aicore_exec "$profile_output")
-    parse_aicpu_exec "$profile_output" >/dev/null && PROFILE_AICPU_EXEC=$(parse_aicpu_exec "$profile_output")
-    parse_profile_e2e "$profile_output" >/dev/null && PROFILE_DEVICE_E2E_PROF=$(parse_profile_e2e "$profile_output")
+    local perf_json perf_metrics
+    if perf_json=$(find_new_perf_json "$pre_run_perf_jsons"); then
+        vlog "Resolved perf JSON: $perf_json"
+        perf_metrics=$(parse_perf_json_metrics "$perf_json" 2>/dev/null || true)
+        while IFS='=' read -r metric_name metric_value; do
+            [[ -z "${metric_name:-}" ]] && continue
+            case "$metric_name" in
+                AICORE_SPAN) PROFILE_AICORE_EXEC="$metric_value" ;;
+                DISPATCH_FINISH) PROFILE_AICPU_EXEC="$metric_value" ;;
+                FULL_E2E) PROFILE_DEVICE_E2E_PROF="$metric_value" ;;
+            esac
+        done <<<"$perf_metrics"
+    fi
+    if [[ "$PROFILE_AICORE_EXEC" == "-" ]]; then
+        parse_aicore_exec_fallback "$profile_output" >/dev/null \
+            && PROFILE_AICORE_EXEC=$(parse_aicore_exec_fallback "$profile_output")
+    fi
+    if [[ "$PROFILE_AICPU_EXEC" == "-" ]]; then
+        parse_dispatch_finish_fallback "$profile_output" >/dev/null \
+            && PROFILE_AICPU_EXEC=$(parse_dispatch_finish_fallback "$profile_output")
+    fi
     local device_log
     if device_log=$(find_new_device_log "$pre_run_logs"); then
+        vlog "Resolved device log: $device_log"
         parse_device_e2e_avg "$device_log" >/dev/null && PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log")
     fi
     [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
@@ -370,6 +524,9 @@ echo ""
 echo "Runtime: $RUNTIME"
 echo "Tests dir: $EXAMPLES_DIR"
 echo "Prefetch modes: ${RUN_MODES[*]}"
+if (( ROUNDS > 1 )); then
+    echo "Note: profiling-derived metrics reflect the first profiled round; device-log E2E is averaged across all rounds."
+fi
 
 for example in "${EXAMPLE_ORDER[@]}"; do
     case_list="${EXAMPLE_CASES[$example]:-}"
