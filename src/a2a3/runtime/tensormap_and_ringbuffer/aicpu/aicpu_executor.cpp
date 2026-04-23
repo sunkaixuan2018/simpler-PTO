@@ -1968,11 +1968,18 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
     uint32_t trace_loop_interval = runtime->sched_loop_trace_interval == 0 ? 1 : runtime->sched_loop_trace_interval;
     uint32_t trace_loop_limit = runtime->sched_loop_trace_limit;
     uint32_t trace_loop_emitted = 0;
+    uint64_t trace_last_log_loop_id = 0;
+    uint64_t trace_last_log_begin_ts = 0;
+    uint64_t trace_last_log_end_ts = 0;
     if (trace_loop) {
+        uint64_t trace_log_begin_ts = get_sys_cnt_aicpu();
         DEV_ALWAYS(
             "SCHED_LOOP_TRACE_BEGIN thread=%d interval=%u limit=%u", thread_idx, trace_loop_interval,
             trace_loop_limit
         );
+        uint64_t trace_log_end_ts = get_sys_cnt_aicpu();
+        trace_last_log_begin_ts = trace_log_begin_ts;
+        trace_last_log_end_ts = trace_log_end_ts;
     }
     auto maybe_log_sched_loop_trace = [&](
                                           uint64_t loop_begin_ts, uint64_t loop_id, int32_t completed_this_turn,
@@ -1990,9 +1997,17 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
             return;
         }
         uint64_t loop_end_ts = get_sys_cnt_aicpu();
+        uint64_t last_log_begin_ts = trace_last_log_begin_ts;
+        uint64_t last_log_end_ts = trace_last_log_end_ts;
+        uint64_t last_log_dur = last_log_end_ts >= last_log_begin_ts ? last_log_end_ts - last_log_begin_ts : 0;
+        uint64_t last_log_to_begin =
+            loop_begin_ts >= last_log_end_ts && last_log_end_ts != 0 ? loop_begin_ts - last_log_end_ts : 0;
+        uint64_t trace_log_begin_ts = get_sys_cnt_aicpu();
         DEV_ALWAYS(
             "SCHED_LOOP_TRACE thread=%d loop=%" PRIu64 " begin=%" PRIu64 " end=%" PRIu64
-            " dur=%.3fus complete=%d dispatch=%u wired=%d progress=%d try_complete=%d try_push=%d idle_iters=%d",
+            " dur=%.3fus complete=%d dispatch=%u wired=%d progress=%d try_complete=%d try_push=%d idle_iters=%d"
+            " last_dev_always_loop=%" PRIu64 " last_dev_always_begin=%" PRIu64
+            " last_dev_always_end=%" PRIu64 " last_dev_always_dur=%.3fus last_dev_always_to_begin=%.3fus",
             thread_idx,
             static_cast<uint64_t>(loop_id),
             static_cast<uint64_t>(loop_begin_ts),
@@ -2004,8 +2019,17 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
             made_progress ? 1 : 0,
             try_completed ? 1 : 0,
             try_pushed ? 1 : 0,
-            idle_count
+            idle_count,
+            static_cast<uint64_t>(trace_last_log_loop_id),
+            static_cast<uint64_t>(last_log_begin_ts),
+            static_cast<uint64_t>(last_log_end_ts),
+            cycles_to_us(last_log_dur),
+            cycles_to_us(last_log_to_begin)
         );
+        uint64_t trace_log_end_ts = get_sys_cnt_aicpu();
+        trace_last_log_loop_id = loop_id;
+        trace_last_log_begin_ts = trace_log_begin_ts;
+        trace_last_log_end_ts = trace_log_end_ts;
         trace_loop_emitted++;
     };
 #endif

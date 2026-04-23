@@ -45,7 +45,16 @@ Each trace line is emitted to the same device log as `DEV_ALWAYS` output:
 ```text
 SCHED_LOOP_TRACE thread=0 loop=42 begin=... end=... dur=...
   complete=1 dispatch=1 wired=0 progress=1 try_complete=1 try_push=1
+  last_dev_always_loop=41 last_dev_always_begin=... last_dev_always_end=...
+  last_dev_always_dur=... last_dev_always_to_begin=...
 ```
+
+`last_dev_always_*` measures the previous `SCHED_LOOP_TRACE` or
+`SCHED_LOOP_TRACE_BEGIN` `DEV_ALWAYS` call. The current line cannot include its
+own post-log timestamp, so the next emitted trace line reports this line's
+logging cost. With interval `1`, compare `last_dev_always_dur` and
+`last_dev_always_to_begin` against `dur` to separate scheduler work from device
+log overhead.
 
 Compare `begin/end/dur` with the merged swimlane JSON task timestamps:
 
