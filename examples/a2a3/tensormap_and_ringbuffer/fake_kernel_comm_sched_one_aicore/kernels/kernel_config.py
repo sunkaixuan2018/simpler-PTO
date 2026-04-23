@@ -112,7 +112,7 @@ DISTRIBUTED_CONFIG = {
         {"name": "dummy_dst", "dtype": "float32", "count": _DUMMY_BUFFER_ELEMS, "placement": "device"},
         {"name": "debug_poll_counts", "dtype": "int32", "count": _N_ITER * _NRANKS, "placement": "device"},
         {"name": "config", "dtype": "int64", "count": 16, "placement": "device"},
-        {"name": "comm_barrier", "dtype": "int32", "count": _NRANKS * (_N_ITER + 1), "placement": "window"},
+        {"name": "comm_barrier", "dtype": "int32", "count": _NRANKS * 2, "placement": "window"},
     ],
     "inputs": [
         "src",

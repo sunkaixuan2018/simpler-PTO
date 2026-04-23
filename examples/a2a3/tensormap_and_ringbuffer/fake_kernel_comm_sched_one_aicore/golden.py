@@ -98,7 +98,7 @@ def generate_distributed_inputs(rank: int, nranks: int, root: int, comm_ctx=None
         ("dummy_dst", [0.0] * dummy_buffer_elems),
         ("debug_poll_counts", debug),
         ("config", config),
-        ("comm_barrier", [0] * (nranks * (n_iter + 1))),
+        ("comm_barrier", [0] * (nranks * 2)),
     ]
 
 

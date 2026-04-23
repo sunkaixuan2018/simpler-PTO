@@ -161,8 +161,6 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         uintptr_t debug_row_ptr = debug_base + (uint64_t)iter * (uint64_t)n_ranks * sizeof(int32_t);
         Tensor debug_row = make_i32_tensor(reinterpret_cast<void*>(debug_row_ptr), (uint32_t)n_ranks);
 
-        bool is_final_iter = (iter == n_iter - 1);
-        Tensor gather_result = win_dst;
         int gather_func = select_comm_kernel(
             strategy, gather_count * sizeof(float), FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC);
 
@@ -176,16 +174,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         gather_params.add_scalar((uint64_t)root);
         gather_params.add_scalar((uint64_t)comm_ctx->workSpace);
         pto2_rt_submit_aiv_task(gather_func, gather_params);
-        gather_result = win_dst;
-
-        if (!is_final_iter) {
-            uintptr_t barrier_ptr =
-                barrier_base + (uint64_t)(iter + 2) * (uint64_t)n_ranks * sizeof(int32_t);
-            Tensor barrier = make_i32_tensor(reinterpret_cast<void*>(barrier_ptr), (uint32_t)n_ranks);
-            prev_gather_sync = submit_barrier(barrier, gather_result, comm_ctx, n_ranks, root);
-        } else {
-            prev_gather_sync = gather_result;
-        }
+        prev_gather_sync = win_dst;
 
         if (enable_background) {
             TensorCreateInfo dummy_debug_ci(debug_row_shape, 1, DataType::INT32);
