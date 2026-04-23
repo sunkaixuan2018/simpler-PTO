@@ -53,6 +53,7 @@ Runtime::Runtime() {
     pto2_gm_heap_ptr_ = nullptr;
     pto2_slot_states_ptr_ = nullptr;
     orch_args_storage_.clear();
+    memset(async_context_addr_, 0, sizeof(async_context_addr_));
 
     // Initialize device orchestration SO binary
     device_orch_so_size_ = 0;
@@ -103,6 +104,16 @@ void Runtime::set_pto2_gm_sm_ptr(void *p) { pto2_gm_sm_ptr_ = p; }
 void Runtime::set_pto2_gm_heap(void *p) { pto2_gm_heap_ptr_ = p; }
 void Runtime::set_pto2_slot_states_ptr(void *p) { pto2_slot_states_ptr_ = p; }
 void Runtime::set_orch_args(const ChipStorageTaskArgs &args) { orch_args_storage_ = args; }
+
+void Runtime::set_async_context_addr(uint32_t engine, uint64_t addr) {
+    if (engine < PTO2_ASYNC_ENGINE_COUNT) {
+        async_context_addr_[engine] = addr;
+    }
+}
+
+uint64_t Runtime::get_async_context_addr(uint32_t engine) const {
+    return (engine < PTO2_ASYNC_ENGINE_COUNT) ? async_context_addr_[engine] : 0;
+}
 
 // Device orchestration SO binary (for dlopen on AICPU thread 3)
 // Copies data to internal storage to avoid lifetime issues with Python ctypes arrays

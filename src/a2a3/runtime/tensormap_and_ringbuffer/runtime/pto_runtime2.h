@@ -37,6 +37,7 @@
 
 #include "pto_runtime2_types.h"
 #include "pto_submit_types.h"
+#include "pto_async_context.h"
 #include "pto_shared_memory.h"
 #include "pto_ring_buffer.h"
 #include "pto_tensormap.h"
@@ -87,6 +88,7 @@ struct PTO2RuntimeOps {
         PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
     );
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const Arg &args);
+    uint64_t (*get_async_context_addr)(PTO2Runtime *rt, uint32_t engine);
 };
 
 /**
@@ -114,6 +116,8 @@ struct PTO2Runtime {
 
     // Statistics
     int64_t total_cycles;
+
+    uint64_t async_context_addr[PTO2_ASYNC_ENGINE_COUNT];
 };
 
 // =============================================================================
@@ -165,6 +169,8 @@ void pto2_runtime_destroy(PTO2Runtime *rt);
  * Set execution mode
  */
 void pto2_runtime_set_mode(PTO2Runtime *rt, PTO2RuntimeMode mode);
+void pto2_runtime_set_async_context_addr(PTO2Runtime *rt, uint32_t engine, uint64_t addr);
+uint64_t pto2_rt_get_async_context_addr(PTO2Runtime *rt, uint32_t engine);
 
 // =============================================================================
 // Orchestration API (called by orchestration function)

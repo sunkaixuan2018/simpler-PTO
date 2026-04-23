@@ -24,7 +24,7 @@
 // Kernel sources should define them (or include PTO-ISA headers) first.
 
 // Unified engine constants — shared by RQ and CQ APIs.
-// Must match PTO2AsyncEngine in pto_types.h.
+// Must match PTO2AsyncEngine in pto_async_context.h.
 #define PTO2_ENGINE_SDMA  0
 #define PTO2_ENGINE_ROCE  1
 #define PTO2_ENGINE_URMA  2

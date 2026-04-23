@@ -37,6 +37,7 @@
 #include "common/core_type.h"
 #include "common/perf_profiling.h"
 #include "common/platform_config.h"
+#include "pto_async_context.h"
 #include "pto2_dispatch_payload.h"
 #include "task_args.h"
 
@@ -205,6 +206,7 @@ private:
     void *pto2_gm_heap_ptr_;                 // GM heap for orchestrator output buffers (device)
     void *pto2_slot_states_ptr_;             // Pointer to PTO2TaskSlotState array (scheduler-private, for profiling)
     ChipStorageTaskArgs orch_args_storage_;  // Copy of args for device
+    uint64_t async_context_addr_[PTO2_ASYNC_ENGINE_COUNT];
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
     // Stored as a copy to avoid lifetime issues with Python ctypes arrays
@@ -260,6 +262,8 @@ public:
     void set_pto2_gm_heap(void *p);
     void set_pto2_slot_states_ptr(void *p);
     void set_orch_args(const ChipStorageTaskArgs &args);
+    void set_async_context_addr(uint32_t engine, uint64_t addr);
+    uint64_t get_async_context_addr(uint32_t engine) const;
 
     // Device orchestration SO binary (for dlopen on AICPU thread 3)
     void set_device_orch_so(const void *data, size_t size);

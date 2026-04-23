@@ -17,7 +17,7 @@
  * The scheduler reads these after the worker returns.
  */
 struct PTO2CQEntry {
-    uint32_t engine;            // PTO2AsyncEngine value
+    uint32_t engine;            // PTO2AsyncEngine value from pto_async_context.h
     int32_t  completion_type;   // PTO2CompletionType value
     uint64_t addr;              // completion token (flag/handle/counter GM address)
     uint32_t expected_value;    // for COUNTER completions

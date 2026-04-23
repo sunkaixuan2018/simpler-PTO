@@ -362,6 +362,14 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
             }
         }
     }
+#else
+    {
+        const char* env_sdma = std::getenv("PTO2_ENABLE_SDMA");
+        if (env_sdma && env_sdma[0] == '1' && env_sdma[1] == '\0') {
+            LOG_ERROR("PTO2_ENABLE_SDMA=1 but SDMA workspace manager headers are unavailable");
+            return -1;
+        }
+    }
 #endif
 
     // Set up device orchestration state

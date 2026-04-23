@@ -2456,6 +2456,9 @@ int32_t AicpuExecutor::run(Runtime *runtime) {
                 unlink(so_path);
                 return -1;
             }
+            for (uint32_t engine = 0; engine < PTO2_ASYNC_ENGINE_COUNT; ++engine) {
+                pto2_runtime_set_async_context_addr(rt, engine, runtime->get_async_context_addr(engine));
+            }
 
 #if PTO2_PROFILING
             rt->orchestrator.enable_profiling = runtime->enable_profiling;

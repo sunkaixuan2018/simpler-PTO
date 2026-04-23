@@ -94,6 +94,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     int n_ranks = static_cast<int>(comm_ctx->rankNum);
     int serialize_background = static_cast<int>(config[10]);
     bool enable_background = (workload == kWorkloadDualAiv) && background_comm_bytes > 0;
+    uint64_t sdma_workspace = pto2_rt_get_async_context_addr(PTO2_ASYNC_ENGINE_SDMA);
 
     if (gather_count == 0 || n_iter <= 0) {
         LOG_ERROR(
@@ -163,6 +164,10 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
 
         int gather_func = select_comm_kernel(
             strategy, gather_count * sizeof(float), FUNC_GATHER_SYNC, FUNC_GATHER_ASYNC);
+        if (gather_func == FUNC_GATHER_ASYNC && sdma_workspace == 0) {
+            pto2_rt_report_fatal(PTO2_ERROR_INVALID_ARGS, "SDMA gather selected but SDMA workspace is unavailable");
+            return;
+        }
 
         Arg gather_params;
         gather_params.add_inout(win_dst);
@@ -172,7 +177,7 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
         gather_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
         gather_params.add_scalar((uint64_t)n_ranks);
         gather_params.add_scalar((uint64_t)root);
-        gather_params.add_scalar((uint64_t)comm_ctx->workSpace);
+        gather_params.add_scalar(gather_func == FUNC_GATHER_ASYNC ? sdma_workspace : 0);
         pto2_rt_submit_aiv_task(gather_func, gather_params);
         prev_gather_sync = win_dst;
 

@@ -114,6 +114,7 @@ target_link_libraries(host_runtime
     PRIVATE
         runtime
         ascendcl
+        nnopbase
         ${HCCL_LINK_TARGETS}
         dl
 )

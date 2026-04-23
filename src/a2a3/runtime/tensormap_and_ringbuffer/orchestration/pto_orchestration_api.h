@@ -36,6 +36,7 @@
 // Type headers needed by orchestration
 #include "pto_runtime2_types.h"  // PTO2_ERROR_*
 #include "pto_submit_types.h"    // MixedKernels, INVALID_KERNEL_ID, subtask slots
+#include "pto_async_context.h"
 #include "pto_types.h"           // Arg, TaskOutputTensors, TensorArgType
 #include "task_args.h"           // ChipStorageTaskArgs, ContinuousTensor
 #include "tensor.h"              // Tensor, TensorCreateInfo
@@ -136,6 +137,7 @@ typedef struct PTO2RuntimeOps {
         PTO2Runtime *rt, const Tensor &tensor, uint32_t ndims, const uint32_t indices[], uint64_t value
     );
     TaskOutputTensors (*alloc_tensors)(PTO2Runtime *rt, const Arg &args);
+    uint64_t (*get_async_context_addr)(PTO2Runtime *rt, uint32_t engine);
 } PTO2RuntimeOps;
 
 /**
@@ -258,6 +260,11 @@ static inline void pto2_rt_scope_end() {
 static inline void pto2_rt_orchestration_done() {
     PTO2Runtime *rt = pto2_current_runtime();
     rt->ops->orchestration_done(rt);
+}
+
+static inline uint64_t pto2_rt_get_async_context_addr(uint32_t engine) {
+    PTO2Runtime *rt = pto2_current_runtime();
+    return rt->ops->get_async_context_addr(rt, engine);
 }
 
 static inline bool pto2_rt_is_fatal() {

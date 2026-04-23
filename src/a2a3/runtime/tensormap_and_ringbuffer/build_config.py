@@ -21,6 +21,13 @@
 BUILD_CONFIG = {
     "aicore": {"include_dirs": ["runtime", "common"], "source_dirs": ["aicore", "orchestration"]},
     "aicpu": {"include_dirs": ["runtime", "common"], "source_dirs": ["aicpu", "runtime", "orchestration"]},
-    "host": {"include_dirs": ["runtime", "common"], "source_dirs": ["host", "runtime", "orchestration"]},
+    "host": {
+        "include_dirs": [
+            "runtime",
+            "common",
+            "../../../../examples/scripts/_deps/pto-comm-isa/include",
+        ],
+        "source_dirs": ["host", "runtime", "orchestration"],
+    },
     "orchestration": {"include_dirs": ["runtime", "orchestration", "common"], "source_dirs": ["orchestration"]},
 }

@@ -54,6 +54,19 @@ void pto2_rt_orchestration_done(PTO2Runtime *rt) { pto2_orchestrator_done(&rt->o
 
 static bool is_fatal_impl(PTO2Runtime *rt) { return rt->orchestrator.fatal; }
 
+uint64_t pto2_rt_get_async_context_addr(PTO2Runtime *rt, uint32_t engine) {
+    if (rt == nullptr || engine >= PTO2_ASYNC_ENGINE_COUNT) {
+        return 0;
+    }
+    return rt->async_context_addr[engine];
+}
+
+void pto2_runtime_set_async_context_addr(PTO2Runtime *rt, uint32_t engine, uint64_t addr) {
+    if (rt != nullptr && engine < PTO2_ASYNC_ENGINE_COUNT) {
+        rt->async_context_addr[engine] = addr;
+    }
+}
+
 void pto2_rt_report_fatal(PTO2Runtime *rt, int32_t error_code, const char *func, const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -224,6 +237,7 @@ static const PTO2RuntimeOps s_runtime_ops = {
     .get_tensor_data = pto2_get_tensor_data,
     .set_tensor_data = pto2_set_tensor_data,
     .alloc_tensors = alloc_tensors_impl,
+    .get_async_context_addr = pto2_rt_get_async_context_addr,
 };
 
 // =============================================================================
