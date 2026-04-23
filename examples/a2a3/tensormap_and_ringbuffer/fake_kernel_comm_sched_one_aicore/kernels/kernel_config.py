@@ -1,10 +1,11 @@
 """
 Single-cluster gather communication scheduling case.
 
-This case keeps the old fake_kernel_comm_sched_one_aicore benchmark shape but
-uses the current tensormap_and_ringbuffer orchestration API. Runtime scheduling
-uses a single orchestrator and three scheduler threads so block_dim=3 maps one
-logical AIV task to each scheduler thread.
+The benchmark has two workloads:
+
+- baseline: one scheduler/AIV lane runs foreground gather only.
+- dual-aiv: one cluster exposes the foreground gather lane plus a background
+  AIV traffic lane.
 """
 
 import os
@@ -38,6 +39,15 @@ def _strategy_code() -> int:
     raise ValueError(f"Unsupported GATHER_STRATEGY={value!r}")
 
 
+def _workload_code() -> int:
+    value = os.environ.get("ONE_AICORE_WORKLOAD", "baseline").strip().lower().replace("_", "-")
+    if value in ("baseline", "base", "single-aiv", "single"):
+        return 0
+    if value in ("dual-aiv", "background", "with-background", "dual"):
+        return 1
+    raise ValueError(f"Unsupported ONE_AICORE_WORKLOAD={value!r}")
+
+
 ORCHESTRATION = {
     "source": str(_KERNELS_ROOT / "orchestration" / "fake_kernel_comm_sched_one_aicore_orch.cpp"),
     "function_name": "aicpu_orchestration_entry",
@@ -54,11 +64,14 @@ KERNELS = [
     {"func_id": 7, "name": "DummyWindowFill", "source": str(_KERNELS_ROOT / "aiv" / "dummy_window_fill_kernel.cpp"), "core_type": "aiv"},
 ]
 
+_WORKLOAD = _workload_code()
+_SCHEDULER_THREADS = 1 if _WORKLOAD == 0 else 3
+
 RUNTIME_CONFIG = {
     "runtime": "tensormap_and_ringbuffer",
-    "aicpu_thread_num": 4,
+    "aicpu_thread_num": 1 + _SCHEDULER_THREADS,
     "orch_thread_num": 1,
-    "block_dim": 3,
+    "block_dim": _SCHEDULER_THREADS,
     "rounds": 1,
 }
 
@@ -69,10 +82,10 @@ RUNTIME_ENV = {
 _NRANKS = _env_int("PTO_NRANKS", 4)
 _ROOT = _env_int("PTO_ROOT_RANK", 0)
 _GATHER_COUNT = _env_int("GATHER_COUNT", 256)
-_N_ITER = _env_int("N_ITER", 1)
+_N_ITER = _env_int("N_ITER", 200)
 _STRATEGY = _strategy_code()
-_SERIALIZE_DUMMY = _env_int("EXTREME_SERIALIZE_DUMMY", 1)
-_DUMMY_COMM_BYTES = _env_int("DUMMY_COMM_BYTES", 4)
+_SERIALIZE_BACKGROUND = _env_int("ONE_AICORE_SERIALIZE_BACKGROUND", 0)
+_DUMMY_COMM_BYTES = _env_int("BACKGROUND_COMM_BYTES", _env_int("DUMMY_COMM_BYTES", 16 * 1024 * 1024))
 _DUMMY_SOURCE_ELEMS = _env_int("DUMMY_SOURCE_ELEMS", 1)
 _DUMMY_BUFFER_ELEMS = _env_int("DUMMY_BUFFER_ELEMS", 2)
 

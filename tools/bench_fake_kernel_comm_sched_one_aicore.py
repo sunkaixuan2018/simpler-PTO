@@ -2,10 +2,11 @@
 """
 Run and analyze fake_kernel_comm_sched_one_aicore.
 
-The script mirrors the old bench_gather_comm_sched.py flow at a smaller scope:
-run the distributed example for size/strategy combinations, verify correctness,
-enable runtime profiling, then summarize foreground gather latency and debug
-wait status.
+Two workloads are measured by default:
+
+- baseline: no background traffic; one AIV lane runs foreground gather.
+- dual-aiv: one AIV lane runs foreground gather while another runs background
+  remote-read traffic.
 """
 
 from __future__ import annotations
@@ -31,12 +32,33 @@ SWIMLANE_CONVERTER = PROJECT_ROOT / "tools" / "swimlane_converter.py"
 ARTIFACT_DIR = PROJECT_ROOT / "build" / "distributed" / "artifacts"
 KERNEL_CONFIG = KERNELS_DIR / "kernel_config.py"
 
+WORKLOADS = {
+    "baseline": "baseline",
+    "base": "baseline",
+    "single-aiv": "baseline",
+    "single": "baseline",
+    "dual-aiv": "dual-aiv",
+    "dual_aiv": "dual-aiv",
+    "background": "dual-aiv",
+    "with-background": "dual-aiv",
+    "dual": "dual-aiv",
+}
+
 STRATEGIES = {
+    "hybrid": "hybrid",
+    "auto": "hybrid",
+    "mte": "mte",
+    "sync": "mte",
+    "tgather": "mte",
+    "sdma": "sdma",
+    "async": "sdma",
+    "tget": "sdma",
+}
+
+STRATEGY_CODES = {
     "hybrid": 0,
     "mte": 1,
-    "sync": 1,
     "sdma": 2,
-    "async": 2,
 }
 
 FUNC_GATHER_SYNC = 1
@@ -92,6 +114,20 @@ def parse_devices(value: str) -> list[int]:
     return devices
 
 
+def canonical_workload(value: str) -> str:
+    key = value.strip().lower().replace("_", "-")
+    if key not in WORKLOADS:
+        raise ValueError(f"Unsupported workload {value!r}; choose baseline or dual-aiv")
+    return WORKLOADS[key]
+
+
+def canonical_strategy(value: str) -> str:
+    key = value.strip().lower()
+    if key not in STRATEGIES:
+        raise ValueError(f"Unsupported strategy {value!r}; choose mte, sdma, or hybrid")
+    return STRATEGIES[key]
+
+
 def percentile(values: list[float], pct: float) -> float | None:
     if not values:
         return None
@@ -124,6 +160,18 @@ def summarize(values: list[float], trim_ratio: float) -> dict[str, float | int |
     }
 
 
+def measurement_warmup(args: argparse.Namespace) -> int:
+    if args.warmup is not None:
+        warmup = args.warmup
+    else:
+        warmup = args.n_iter - args.measure_iters
+    if warmup < 0:
+        raise ValueError("warmup must be non-negative; reduce --measure-iters or increase --n-iter")
+    if warmup >= args.n_iter:
+        raise ValueError("--warmup must be smaller than --n-iter")
+    return warmup
+
+
 def perf_files_since(since: float) -> list[Path]:
     candidates = list(ARTIFACT_DIR.glob("rank_*/perf_swimlane_*.json"))
     candidates += list((PROJECT_ROOT / "outputs").glob("perf_swimlane_*.json"))
@@ -140,18 +188,18 @@ def rank_from_perf_path(path: Path) -> int | None:
         return None
 
 
-def merged_swimlane_path(perf_path: Path, strategy: str, size_bytes: int) -> Path:
+def merged_swimlane_path(perf_path: Path, workload: str, strategy: str, size_bytes: int) -> Path:
     stem = perf_path.stem
     timestamp = stem[len("perf_swimlane_"):] if stem.startswith("perf_swimlane_") else str(int(time.time()))
     rank = perf_path.parent.name if perf_path.parent.name.startswith("rank_") else "rank_unknown"
     return (
         PROJECT_ROOT
         / "outputs"
-        / f"merged_swimlane_one_aicore_{strategy}_{size_bytes}B_{rank}_{timestamp}.json"
+        / f"merged_swimlane_one_aicore_{workload}_{strategy}_{size_bytes}B_{rank}_{timestamp}.json"
     )
 
 
-def convert_perf_files(perf_files: list[Path], args, strategy: str, size_bytes: int) -> dict:
+def convert_perf_files(perf_files: list[Path], args, workload: str, strategy: str, size_bytes: int) -> dict:
     if not perf_files:
         return {"merged_swimlane_files": [], "merged_swimlane_failures": []}
 
@@ -160,7 +208,7 @@ def convert_perf_files(perf_files: list[Path], args, strategy: str, size_bytes: 
     failures: list[dict[str, str]] = []
 
     for perf_path in perf_files:
-        output_path = merged_swimlane_path(perf_path, strategy, size_bytes)
+        output_path = merged_swimlane_path(perf_path, workload, strategy, size_bytes)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         cmd = [
             sys.executable,
@@ -212,8 +260,7 @@ def load_perf_tasks(perf_files: list[Path], func_ids: set[int], warmup: int) -> 
         data = json.loads(path.read_text())
         tasks = [t for t in data.get("tasks", []) if int(t.get("func_id", -1)) in func_ids]
         tasks.sort(key=lambda t: (t.get("dispatch_time_us", t.get("start_time_us", 0.0)), t.get("task_id", 0)))
-        if len(tasks) > warmup:
-            tasks = tasks[warmup:]
+        tasks = tasks[warmup:]
         for task in tasks:
             func_counter[int(task.get("func_id", -1))] += 1
         measured.extend(tasks)
@@ -247,6 +294,7 @@ def analyze_perf(perf_files: list[Path], warmup: int, trim_ratio: float) -> dict
         "barrier_exec": summarize(exec_values(barrier_tasks), trim_ratio),
         "dummy_func_id": dummy_counter.most_common(1)[0][0] if dummy_counter else None,
         "dummy_exec": summarize(exec_values(dummy_tasks), trim_ratio),
+        "dummy_latency": summarize(latency_values(dummy_tasks), trim_ratio),
     }
 
 
@@ -262,16 +310,32 @@ def analyze_debug_counts() -> dict:
     return {"debug_count": len(values), "debug_success_ratio": ok / len(values)}
 
 
-def run_case(args, strategy: str, size_bytes: int) -> dict:
+def background_buffer_elems(workload: str, args: argparse.Namespace) -> tuple[int, int]:
+    if workload != "dual-aiv":
+        return 1, 2
+    window_bytes = max(parse_size(args.background_window_bytes), 4)
+    source_elems = max(1, (window_bytes + 3) // 4)
+    return source_elems, source_elems * 2
+
+
+def run_case(args, workload: str, strategy: str, size_bytes: int, warmup: int) -> dict:
     gather_count = max(1, (size_bytes + 3) // 4)
+    background_bytes = parse_size(args.background_bytes) if workload == "dual-aiv" else 0
+    dummy_source_elems, dummy_buffer_elems = background_buffer_elems(workload, args)
+
     env = os.environ.copy()
     env["PTO_PLATFORM"] = "a2a3"
     env["PTO_NRANKS"] = str(len(parse_devices(args.devices)))
+    env["ONE_AICORE_WORKLOAD"] = workload
     env["GATHER_COUNT"] = str(gather_count)
     env["GATHER_STRATEGY"] = strategy
     env["N_ITER"] = str(args.n_iter)
-    env["DUMMY_COMM_BYTES"] = str(parse_size(args.dummy_comm_bytes))
-    env["EXTREME_SERIALIZE_DUMMY"] = "1" if args.serialize_dummy else "0"
+    env["BACKGROUND_COMM_BYTES"] = str(background_bytes)
+    env["DUMMY_COMM_BYTES"] = str(background_bytes)
+    env["DUMMY_SOURCE_ELEMS"] = str(dummy_source_elems)
+    env["DUMMY_BUFFER_ELEMS"] = str(dummy_buffer_elems)
+    env["ONE_AICORE_SERIALIZE_BACKGROUND"] = "1" if args.serialize_background else "0"
+
     trace_requested = args.sched_loop_trace or args.sched_loop_trace_thread is not None
     if trace_requested:
         env["PTO2_SCHED_LOOP_TRACE"] = "1"
@@ -302,13 +366,19 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
         cmd += ["--pto-isa-commit", args.pto_isa_commit]
 
     since = time.time() - 1.0
-    print(f"\n=== strategy={strategy} size={human_bytes(size_bytes)} count={gather_count} ===")
+    print(
+        f"\n=== workload={workload} strategy={strategy} "
+        f"size={human_bytes(size_bytes)} count={gather_count} ==="
+    )
     print(
         "env: "
-        f"GATHER_STRATEGY={env['GATHER_STRATEGY']} "
-        f"N_ITER={env['N_ITER']} "
-        f"DUMMY_COMM_BYTES={env['DUMMY_COMM_BYTES']} "
-        f"EXTREME_SERIALIZE_DUMMY={env['EXTREME_SERIALIZE_DUMMY']}"
+        f"N_ITER={args.n_iter} "
+        f"warmup={warmup} "
+        f"measured={args.n_iter - warmup} "
+        f"BACKGROUND_COMM_BYTES={background_bytes} "
+        f"DUMMY_SOURCE_ELEMS={dummy_source_elems} "
+        f"DUMMY_BUFFER_ELEMS={dummy_buffer_elems} "
+        f"SERIALIZE_BACKGROUND={env['ONE_AICORE_SERIALIZE_BACKGROUND']}"
     )
     if trace_requested:
         print(
@@ -317,21 +387,27 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
             f"interval={args.sched_loop_trace_interval} "
             f"limit={args.sched_loop_trace_limit}"
         )
+
     proc = subprocess.run(cmd, cwd=PROJECT_ROOT, env=env, check=False)
     perf_files = perf_files_since(since)
 
     result = {
+        "workload": workload,
         "strategy": strategy,
-        "strategy_code": STRATEGIES[strategy],
+        "strategy_code": STRATEGY_CODES[strategy],
         "size_bytes": size_bytes,
         "gather_count": gather_count,
         "n_iter": args.n_iter,
-        "warmup": args.warmup,
+        "warmup": warmup,
+        "measure_iters": args.n_iter - warmup,
+        "background_bytes": background_bytes,
+        "background_window_bytes": parse_size(args.background_window_bytes) if workload == "dual-aiv" else 0,
+        "serialize_background": args.serialize_background,
         "returncode": proc.returncode,
         "run_ok": proc.returncode == 0,
     }
-    result.update(analyze_perf(perf_files, args.warmup, args.trim_ratio) if perf_files else {})
-    result.update(convert_perf_files(perf_files, args, strategy, size_bytes))
+    result.update(analyze_perf(perf_files, warmup, args.trim_ratio) if perf_files else {})
+    result.update(convert_perf_files(perf_files, args, workload, strategy, size_bytes))
     result.update(analyze_debug_counts())
     return result
 
@@ -339,16 +415,26 @@ def run_case(args, strategy: str, size_bytes: int) -> dict:
 def write_csv(path: Path, rows: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fields = [
+        "workload",
         "strategy",
         "size_bytes",
         "gather_count",
+        "n_iter",
+        "warmup",
+        "measure_iters",
+        "background_bytes",
+        "background_window_bytes",
+        "serialize_background",
         "run_ok",
         "gather_func_id",
+        "gather_samples",
         "gather_exec_avg_us",
         "gather_latency_avg_us",
         "barrier_exec_avg_us",
         "dummy_func_id",
+        "dummy_samples",
         "dummy_exec_avg_us",
+        "dummy_latency_avg_us",
         "debug_success_ratio",
         "perf_files",
         "merged_swimlane_files",
@@ -357,17 +443,31 @@ def write_csv(path: Path, rows: list[dict]) -> None:
         writer = csv.DictWriter(f, fieldnames=fields)
         writer.writeheader()
         for row in rows:
+            gather_exec = row.get("gather_exec") or {}
+            gather_latency = row.get("gather_latency") or {}
+            dummy_exec = row.get("dummy_exec") or {}
+            dummy_latency = row.get("dummy_latency") or {}
             writer.writerow({
+                "workload": row.get("workload"),
                 "strategy": row.get("strategy"),
                 "size_bytes": row.get("size_bytes"),
                 "gather_count": row.get("gather_count"),
+                "n_iter": row.get("n_iter"),
+                "warmup": row.get("warmup"),
+                "measure_iters": row.get("measure_iters"),
+                "background_bytes": row.get("background_bytes"),
+                "background_window_bytes": row.get("background_window_bytes"),
+                "serialize_background": row.get("serialize_background"),
                 "run_ok": row.get("run_ok"),
                 "gather_func_id": row.get("gather_func_id"),
-                "gather_exec_avg_us": (row.get("gather_exec") or {}).get("avg"),
-                "gather_latency_avg_us": (row.get("gather_latency") or {}).get("avg"),
+                "gather_samples": gather_exec.get("count"),
+                "gather_exec_avg_us": gather_exec.get("avg"),
+                "gather_latency_avg_us": gather_latency.get("avg"),
                 "barrier_exec_avg_us": (row.get("barrier_exec") or {}).get("avg"),
                 "dummy_func_id": row.get("dummy_func_id"),
-                "dummy_exec_avg_us": (row.get("dummy_exec") or {}).get("avg"),
+                "dummy_samples": dummy_exec.get("count"),
+                "dummy_exec_avg_us": dummy_exec.get("avg"),
+                "dummy_latency_avg_us": dummy_latency.get("avg"),
                 "debug_success_ratio": row.get("debug_success_ratio"),
                 "perf_files": ";".join(row.get("perf_files", [])),
                 "merged_swimlane_files": ";".join(row.get("merged_swimlane_files", [])),
@@ -382,16 +482,23 @@ def print_summary(rows: list[dict]) -> None:
         return f"{value:.3f}" if value is not None else "N/A"
 
     print("\nSummary")
-    print(f"{'strategy':<8} {'size':>8} {'ok':>3} {'func':>4} {'exec_us':>10} {'lat_us':>10} {'debug':>8}")
+    print(
+        f"{'workload':<10} {'strategy':<8} {'size':>8} {'ok':>3} "
+        f"{'func':>4} {'samples':>7} {'exec_us':>10} {'lat_us':>10} "
+        f"{'dummy_us':>10} {'debug':>8}"
+    )
     for row in rows:
-        exec_avg = (row.get("gather_exec") or {}).get("avg")
-        lat_avg = (row.get("gather_latency") or {}).get("avg")
+        gather_exec = row.get("gather_exec") or {}
+        gather_latency = row.get("gather_latency") or {}
+        dummy_exec = row.get("dummy_exec") or {}
         debug_ratio = row.get("debug_success_ratio")
         print(
-            f"{row['strategy']:<8} {human_bytes(row['size_bytes']):>8} "
+            f"{row['workload']:<10} {row['strategy']:<8} {human_bytes(row['size_bytes']):>8} "
             f"{str(row['run_ok']):>3} {str(row.get('gather_func_id')):>4} "
-            f"{fmt_us(exec_avg):>10} "
-            f"{fmt_us(lat_avg):>10} "
+            f"{str(gather_exec.get('count')):>7} "
+            f"{fmt_us(gather_exec.get('avg')):>10} "
+            f"{fmt_us(gather_latency.get('avg')):>10} "
+            f"{fmt_us(dummy_exec.get('avg')):>10} "
             f"{fmt_ratio(debug_ratio):>8}"
         )
 
@@ -399,25 +506,23 @@ def print_summary(rows: list[dict]) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Benchmark fake_kernel_comm_sched_one_aicore")
     parser.add_argument("--devices", default="0,1,2,3", help="Comma-separated device ids")
+    parser.add_argument("--workloads", "--modes", default="baseline,dual-aiv", help="baseline,dual-aiv")
     parser.add_argument("--strategies", default="mte,sdma,hybrid", help="mte,sdma,hybrid")
     parser.add_argument("--sizes", default="1K,4K,16K,64K,256K,1M", help="Transfer sizes in bytes")
-    parser.add_argument("--n-iter", type=int, default=1)
-    parser.add_argument("--warmup", type=int, default=0)
+    parser.add_argument("--n-iter", type=int, default=200, help="Total foreground gather iterations")
+    parser.add_argument("--measure-iters", type=int, default=100, help="Use the last N iterations for statistics")
+    parser.add_argument("--warmup", type=int, default=None, help="Override warmup iterations")
     parser.add_argument("--trim-ratio", type=float, default=0.10)
-    parser.add_argument("--dummy-comm-bytes", default="4")
+    parser.add_argument("--background-bytes", default="16M", help="Remote-read bytes per background task")
+    parser.add_argument("--dummy-comm-bytes", dest="background_bytes", help=argparse.SUPPRESS)
+    parser.add_argument("--background-window-bytes", default="1M", help="Working-set bytes for background src buffer")
     parser.add_argument(
-        "--serialize-dummy",
-        dest="serialize_dummy",
+        "--serialize-background",
         action="store_true",
-        default=True,
-        help="Run dummy traffic after each gather and before the next iteration",
+        help="Serialize the background lane after gather; default is concurrent background traffic",
     )
-    parser.add_argument(
-        "--no-serialize-dummy",
-        dest="serialize_dummy",
-        action="store_false",
-        help="Allow dummy traffic to overlap with following gather iterations",
-    )
+    parser.add_argument("--serialize-dummy", dest="serialize_background", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--no-serialize-dummy", dest="serialize_background", action="store_false", help=argparse.SUPPRESS)
     parser.add_argument("--sched-loop-trace", action="store_true", help="Enable AICPU scheduler loop trace logs")
     parser.add_argument("--sched-loop-trace-thread", type=int, default=None, help="Trace one scheduler thread only")
     parser.add_argument("--sched-loop-trace-interval", type=int, default=1, help="Log every N scheduler loops")
@@ -428,13 +533,14 @@ def main() -> int:
     parser.add_argument("--keep-going", action="store_true")
     parser.add_argument("--output-csv", default=str(PROJECT_ROOT / "outputs" / "bench_one_aicore.csv"))
     parser.add_argument("--output-json", default=str(PROJECT_ROOT / "outputs" / "bench_one_aicore.json"))
+    parser.set_defaults(serialize_background=False)
     args = parser.parse_args()
 
-    strategies = parse_csv_list(args.strategies)
-    for strategy in strategies:
-        if strategy not in STRATEGIES:
-            raise ValueError(f"Unsupported strategy {strategy!r}; choose from {sorted(STRATEGIES)}")
-    sizes = [parse_size(x) for x in parse_csv_list(args.sizes)]
+    if args.n_iter <= 0:
+        raise ValueError("--n-iter must be positive")
+    if args.measure_iters <= 0:
+        raise ValueError("--measure-iters must be positive")
+    warmup = measurement_warmup(args)
     if args.sched_loop_trace_interval <= 0:
         raise ValueError("--sched-loop-trace-interval must be positive")
     if args.sched_loop_trace_limit < 0:
@@ -442,14 +548,23 @@ def main() -> int:
     if args.sched_loop_trace_thread is not None and args.sched_loop_trace_thread < -1:
         raise ValueError("--sched-loop-trace-thread must be -1 or non-negative")
 
+    workloads = [canonical_workload(x) for x in parse_csv_list(args.workloads)]
+    strategies = [canonical_strategy(x) for x in parse_csv_list(args.strategies)]
+    sizes = [parse_size(x) for x in parse_csv_list(args.sizes)]
+
     rows = []
-    for strategy in strategies:
-        for size_bytes in sizes:
-            row = run_case(args, strategy, size_bytes)
-            rows.append(row)
-            if not row["run_ok"] and not args.keep_going:
+    stop = False
+    for workload in workloads:
+        for strategy in strategies:
+            for size_bytes in sizes:
+                row = run_case(args, workload, strategy, size_bytes, warmup)
+                rows.append(row)
+                if not row["run_ok"] and not args.keep_going:
+                    stop = True
+                    break
+            if stop:
                 break
-        if rows and not rows[-1]["run_ok"] and not args.keep_going:
+        if stop:
             break
 
     write_csv(Path(args.output_csv), rows)

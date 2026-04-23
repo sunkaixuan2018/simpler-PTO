@@ -34,6 +34,15 @@ def _strategy_code() -> int:
     raise ValueError(f"Unsupported GATHER_STRATEGY={value!r}")
 
 
+def _workload_code() -> int:
+    value = os.environ.get("ONE_AICORE_WORKLOAD", "baseline").strip().lower().replace("_", "-")
+    if value in ("baseline", "base", "single-aiv", "single"):
+        return 0
+    if value in ("dual-aiv", "background", "with-background", "dual"):
+        return 1
+    raise ValueError(f"Unsupported ONE_AICORE_WORKLOAD={value!r}")
+
+
 def _rank_src(rank: int, count: int) -> list[float]:
     base = float(rank * 1024)
     return [base + float(i % 1024) / 1024.0 for i in range(count)]
@@ -49,11 +58,11 @@ def generate_distributed_inputs(rank: int, nranks: int, root: int, comm_ctx=None
     del comm_ctx
 
     gather_count = _env_int("GATHER_COUNT", 256)
-    n_iter = _env_int("N_ITER", 1)
+    n_iter = _env_int("N_ITER", 200)
     dummy_source_elems = _env_int("DUMMY_SOURCE_ELEMS", 1)
     dummy_buffer_elems = _env_int("DUMMY_BUFFER_ELEMS", 2)
-    dummy_comm_bytes = _env_int("DUMMY_COMM_BYTES", 4)
-    serialize_dummy = _env_int("EXTREME_SERIALIZE_DUMMY", 1)
+    dummy_comm_bytes = _env_int("BACKGROUND_COMM_BYTES", _env_int("DUMMY_COMM_BYTES", 16 * 1024 * 1024))
+    serialize_background = _env_int("ONE_AICORE_SERIALIZE_BACKGROUND", 0)
 
     if nranks <= 1:
         raise ValueError(f"fake_kernel_comm_sched_one_aicore expects nranks > 1, got {nranks}")
@@ -65,14 +74,14 @@ def generate_distributed_inputs(rank: int, nranks: int, root: int, comm_ctx=None
         gather_count,
         n_iter,
         _strategy_code(),
-        serialize_dummy,
+        _workload_code(),
         dummy_comm_bytes,
         dummy_source_elems,
         dummy_buffer_elems,
         root,
         nranks,
         rank,
-        0,
+        serialize_background,
         0,
         0,
         0,

@@ -13,6 +13,7 @@
 #define FUNC_DUMMY_WINDOW_FILL 7
 
 static constexpr uint64_t kHybridAsyncThresholdBytes = 512 * 1024;
+static constexpr int kWorkloadDualAiv = 1;
 
 static int select_comm_kernel(int strategy, uint64_t bytes, int sync_func, int async_func) {
     if (strategy == 1) {
@@ -85,18 +86,25 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     uint64_t gather_count = static_cast<uint64_t>(config[0]);
     int n_iter = static_cast<int>(config[1]);
     int strategy = static_cast<int>(config[2]);
-    int serialize_dummy = static_cast<int>(config[3]);
-    uint64_t dummy_comm_bytes = static_cast<uint64_t>(config[4]);
+    int workload = static_cast<int>(config[3]);
+    uint64_t background_comm_bytes = static_cast<uint64_t>(config[4]);
     uint64_t dummy_source_elems = static_cast<uint64_t>(config[5]);
     uint64_t dummy_buffer_elems = static_cast<uint64_t>(config[6]);
     int root = static_cast<int>(config[7]);
     int n_ranks = static_cast<int>(comm_ctx->rankNum);
+    int serialize_background = static_cast<int>(config[10]);
+    bool enable_background = (workload == kWorkloadDualAiv) && background_comm_bytes > 0;
 
-    if (gather_count == 0 || n_iter <= 0 || dummy_source_elems == 0 || dummy_buffer_elems == 0) {
+    if (gather_count == 0 || n_iter <= 0) {
         LOG_ERROR(
-            "invalid one_aicore config: gather_count=%lu n_iter=%d dummy_source=%lu dummy_buffer=%lu",
+            "invalid one_aicore config: gather_count=%lu n_iter=%d",
             (unsigned long)gather_count,
-            n_iter,
+            n_iter);
+        return;
+    }
+    if (enable_background && (dummy_source_elems == 0 || dummy_buffer_elems == 0)) {
+        LOG_ERROR(
+            "invalid one_aicore background buffers: dummy_source=%lu dummy_buffer=%lu",
             (unsigned long)dummy_source_elems,
             (unsigned long)dummy_buffer_elems);
         return;
@@ -119,13 +127,15 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
     Tensor dummy_dst = make_tensor_external(dummy_dst_ptr, dummy_dst_shape, 1, DataType::FLOAT32);
 
     LOG_INFO(
-        "one_aicore: rank=%u/%u strategy=%d gather_count=%lu n_iter=%d dummy_comm_bytes=%lu",
+        "one_aicore: rank=%u/%u workload=%d strategy=%d gather_count=%lu n_iter=%d background=%d bytes=%lu",
         (unsigned)comm_ctx->rankId,
         (unsigned)comm_ctx->rankNum,
+        workload,
         strategy,
         (unsigned long)gather_count,
         n_iter,
-        (unsigned long)dummy_comm_bytes);
+        enable_background ? 1 : 0,
+        (unsigned long)background_comm_bytes);
 
     uintptr_t barrier_base = reinterpret_cast<uintptr_t>(barrier_base_ptr);
     uintptr_t debug_base = reinterpret_cast<uintptr_t>(debug_ptr);
@@ -177,24 +187,26 @@ void aicpu_orchestration_entry(const ChipStorageTaskArgs& orch_args) {
             prev_gather_sync = gather_result;
         }
 
-        TensorCreateInfo dummy_debug_ci(debug_row_shape, 1, DataType::INT32);
-        const Tensor& dummy_dep = (serialize_dummy != 0) ? prev_gather_sync : prev_dummy_sync;
-        int dummy_func = select_comm_kernel(
-            strategy, dummy_comm_bytes, FUNC_DUMMY_COMM_SYNC, FUNC_DUMMY_COMM_ASYNC);
+        if (enable_background) {
+            TensorCreateInfo dummy_debug_ci(debug_row_shape, 1, DataType::INT32);
+            const Tensor& dummy_dep = (serialize_background != 0) ? prev_gather_sync : prev_dummy_sync;
+            int dummy_func = select_comm_kernel(
+                strategy, background_comm_bytes, FUNC_DUMMY_COMM_SYNC, FUNC_DUMMY_COMM_ASYNC);
 
-        Arg dummy_params;
-        dummy_params.add_inout(dummy_dst);
-        dummy_params.add_input(dummy_src);
-        dummy_params.add_input(dummy_dep);
-        dummy_params.add_output(dummy_debug_ci);
-        dummy_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
-        dummy_params.add_scalar((uint64_t)n_ranks);
-        dummy_params.add_scalar((uint64_t)root);
-        dummy_params.add_scalar(dummy_comm_bytes);
-        pto2_rt_submit_aiv_task(dummy_func, dummy_params);
-        prev_dummy_sync = dummy_dst;
-        if (serialize_dummy != 0) {
-            prev_gather_sync = prev_dummy_sync;
+            Arg dummy_params;
+            dummy_params.add_inout(dummy_dst);
+            dummy_params.add_input(dummy_src);
+            dummy_params.add_input(dummy_dep);
+            dummy_params.add_output(dummy_debug_ci);
+            dummy_params.add_scalar((uint64_t)(uintptr_t)comm_ctx);
+            dummy_params.add_scalar((uint64_t)n_ranks);
+            dummy_params.add_scalar((uint64_t)root);
+            dummy_params.add_scalar(background_comm_bytes);
+            pto2_rt_submit_aiv_task(dummy_func, dummy_params);
+            prev_dummy_sync = dummy_dst;
+            if (serialize_background != 0) {
+                prev_gather_sync = prev_dummy_sync;
+            }
         }
     }
 
