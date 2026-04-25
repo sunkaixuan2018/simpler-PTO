@@ -289,6 +289,23 @@ parse_avg_aicore_exec_fallback() {
     return 1
 }
 
+parse_host_prefetch_setup_outcome() {
+    local run_output="$1"
+    local outcome
+    outcome=$(printf "%s\n" "$run_output" | awk '
+        match($0, /host_prefetch_setup outcome=([^ ]+) channels=/, m) {
+            print m[1]
+            found = 1
+            exit
+        }
+        END { if (!found) exit 1 }' 2>/dev/null || true)
+    if [[ -n "$outcome" ]]; then
+        echo "$outcome"
+        return 0
+    fi
+    return 1
+}
+
 parse_prefetch_ctrl_total_us() {
     local log_file="$1"
     local total_us
@@ -374,6 +391,7 @@ PY
 }
 
 PROFILE_AVG_AICORE_EXEC="-"
+PROFILE_PREFETCH_SETUP_OUTCOME="-"
 PROFILE_PREFETCH_CTRL_US="-"
 PROFILE_PREFETCH_ISSUE_US="-"
 PROFILE_PREFETCH_CTRL_CONSIDERED="-"
@@ -410,6 +428,7 @@ run_profile_once() {
     rm -f "$profile_tmp"
 
     PROFILE_AVG_AICORE_EXEC="-"
+    PROFILE_PREFETCH_SETUP_OUTCOME="-"
     PROFILE_PREFETCH_CTRL_US="-"
     PROFILE_PREFETCH_ISSUE_US="-"
     PROFILE_PREFETCH_CTRL_CONSIDERED="-"
@@ -437,6 +456,10 @@ run_profile_once() {
     if [[ "$PROFILE_AVG_AICORE_EXEC" == "-" ]]; then
         parse_avg_aicore_exec_fallback "$profile_output" >/dev/null \
             && PROFILE_AVG_AICORE_EXEC=$(parse_avg_aicore_exec_fallback "$profile_output")
+    fi
+    if [[ "$PROFILE_PREFETCH_SETUP_OUTCOME" == "-" ]]; then
+        parse_host_prefetch_setup_outcome "$profile_output" >/dev/null \
+            && PROFILE_PREFETCH_SETUP_OUTCOME=$(parse_host_prefetch_setup_outcome "$profile_output")
     fi
     local device_log
     if device_log=$(find_new_device_log "$pre_run_logs"); then
@@ -478,6 +501,7 @@ FAIL=0
 SUMMARY_NAMES=()
 declare -A SUMMARY_LABELS_SEEN=()
 declare -A SUMMARY_AVG_AICORE_EXEC=()
+declare -A SUMMARY_PREFETCH_SETUP_OUTCOME=()
 declare -A SUMMARY_PREFETCH_CTRL_US=()
 declare -A SUMMARY_PREFETCH_ISSUE_US=()
 declare -A SUMMARY_PREFETCH_CTRL_CONSIDERED=()
@@ -532,6 +556,7 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             fi
             [[ -z "${SUMMARY_LABELS_SEEN[$_label]+x}" ]] && SUMMARY_NAMES+=("$_label") && SUMMARY_LABELS_SEEN["$_label"]=1
             SUMMARY_AVG_AICORE_EXEC["$mode|$_label"]="$PROFILE_AVG_AICORE_EXEC"
+            SUMMARY_PREFETCH_SETUP_OUTCOME["$mode|$_label"]="$PROFILE_PREFETCH_SETUP_OUTCOME"
             SUMMARY_PREFETCH_CTRL_US["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_US"
             SUMMARY_PREFETCH_ISSUE_US["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_US"
             SUMMARY_PREFETCH_CTRL_CONSIDERED["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_CONSIDERED"
@@ -546,6 +571,7 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             SUMMARY_PREFETCH_ISSUE_SUPPRESSED["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_SUPPRESSED"
             SUMMARY_PREFETCH_ISSUE_QUEUE_FULL["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
             echo "  Avg AICore Task Exec (us): $PROFILE_AVG_AICORE_EXEC"
+            echo "  Prefetch Setup Outcome: $PROFILE_PREFETCH_SETUP_OUTCOME"
             echo "  Prefetch Ctrl Path Total (us): $PROFILE_PREFETCH_CTRL_US"
             echo "  Prefetch SQE Issue Total (us): $PROFILE_PREFETCH_ISSUE_US"
             echo "  Prefetch Ctrl Counts: considered=$PROFILE_PREFETCH_CTRL_CONSIDERED eligible=$PROFILE_PREFETCH_CTRL_ELIGIBLE skip_not_sdma=$PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA skip_not_available=$PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE skip_null_payload=$PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD skip_below_min_bytes=$PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES skip_no_valid_tensor=$PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR"
@@ -574,23 +600,23 @@ if [[ ${#SUMMARY_NAMES[@]} -gt 0 ]]; then
     echo ""
 
     if [[ "$PREFETCH_MODE" == "compare" ]]; then
-        _hdr=$(printf "  %-40s  %24s  %24s" "Example" "Baseline Avg Exec (us)" "SDMA Avg Exec (us)")
-        _sep=$(printf "  %-40s  %24s  %24s" "----------------------------------------" "------------------------" "------------------------")
+        _hdr=$(printf "  %-40s  %20s  %24s  %24s" "Example" "Setup Outcome" "Baseline Avg Exec (us)" "SDMA Avg Exec (us)")
+        _sep=$(printf "  %-40s  %20s  %24s  %24s" "----------------------------------------" "--------------------" "------------------------" "------------------------")
         echo "$_hdr"; echo "$_sep"
         for _i in "${!SUMMARY_NAMES[@]}"; do
             _label="${SUMMARY_NAMES[$_i]}"
-            _row=$(printf "  %-40s  %24s  %24s" "$_label" "${SUMMARY_AVG_AICORE_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AVG_AICORE_EXEC["sdma|$_label"]:-"-"}")
+            _row=$(printf "  %-40s  %20s  %24s  %24s" "$_label" "${SUMMARY_PREFETCH_SETUP_OUTCOME["sdma|$_label"]:-"-"}" "${SUMMARY_AVG_AICORE_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AVG_AICORE_EXEC["sdma|$_label"]:-"-"}")
             echo "$_row"
         done
     else
         _mode_name="${RUN_MODES[0]}"
         _mode_title=$(printf "%s" "$_mode_name" | tr '[:lower:]' '[:upper:]')
-        _hdr=$(printf "  %-40s  %24s" "Example" "${_mode_title} Avg Exec (us)")
-        _sep=$(printf "  %-40s  %24s" "----------------------------------------" "------------------------")
+        _hdr=$(printf "  %-40s  %20s  %24s" "Example" "Setup Outcome" "${_mode_title} Avg Exec (us)")
+        _sep=$(printf "  %-40s  %20s  %24s" "----------------------------------------" "--------------------" "------------------------")
         echo "$_hdr"; echo "$_sep"
         for _i in "${!SUMMARY_NAMES[@]}"; do
             _label="${SUMMARY_NAMES[$_i]}"
-            _row=$(printf "  %-40s  %24s" "$_label" "${SUMMARY_AVG_AICORE_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}")
+            _row=$(printf "  %-40s  %20s  %24s" "$_label" "${SUMMARY_PREFETCH_SETUP_OUTCOME["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_AVG_AICORE_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}")
             echo "$_row"
         done
     fi
