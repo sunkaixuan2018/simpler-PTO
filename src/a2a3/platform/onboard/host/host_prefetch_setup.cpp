@@ -15,6 +15,7 @@
 #include "device_runner.h"
 
 #include <acl/acl.h>
+#include <chrono>
 #include <cstdlib>
 #include <dlfcn.h>
 #include <cstring>
@@ -90,6 +91,22 @@ static void* g_opapi_handle = nullptr;
 static void* g_workspace_device_ptr = nullptr;
 static int g_cached_device_id = -1;
 static int g_cached_channel_count = 0;
+
+struct HostPrefetchSetupTimer {
+    std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
+    const char* outcome{"unknown"};
+    int channel_count{0};
+
+    ~HostPrefetchSetupTimer()
+    {
+        const auto elapsed =
+            std::chrono::duration_cast<std::chrono::duration<double, std::milli>>(std::chrono::steady_clock::now() - start);
+        LOG_INFO(
+            "SDMA prefetch: host_prefetch_setup outcome=%s channels=%d total=%.3fms",
+            outcome, channel_count, elapsed.count()
+        );
+    }
+};
 
 static const char* symbol_owner_path(void* symbol)
 {
@@ -186,13 +203,17 @@ static int resolve_channel_count(int requested_count)
 
 void* host_prefetch_setup(int channel_count)
 {
+    HostPrefetchSetupTimer setup_timer;
     if (!sdma_prefetch_enabled_by_env()) {
+        setup_timer.outcome = "disabled_by_env";
         LOG_INFO("SDMA prefetch: disabled by PTO_ENABLE_SDMA_PREFETCH");
         return nullptr;
     }
 
     channel_count = resolve_channel_count(channel_count);
+    setup_timer.channel_count = channel_count;
     if (channel_count <= 0) {
+        setup_timer.outcome = "invalid_channel_count";
         LOG_INFO("SDMA prefetch: disabled (invalid channel_count=%d)", channel_count);
         return nullptr;
     }
@@ -222,10 +243,12 @@ void* host_prefetch_setup(int channel_count)
     }
 
     if (!rtStreamGetSqid || !rtStreamGetCqid) {
+        setup_timer.outcome = "missing_rt_symbols";
         LOG_INFO("SDMA prefetch: rtStreamGetSqid/Cqid not found, skipping");
         return nullptr;
     }
     if (!aclCreateTensor || !aclDestroyTensor || !aclnnGetWs || !aclnnExec) {
+        setup_timer.outcome = "missing_shmem_symbols";
         LOG_INFO("SDMA prefetch: shmem aclnn ops not found, skipping");
         return nullptr;
     }
@@ -254,6 +277,7 @@ void* host_prefetch_setup(int channel_count)
         g_cached_device_id == dev_id &&
         g_cached_channel_count == channel_count &&
         static_cast<int>(g_prefetch_streams.size()) == channel_count) {
+        setup_timer.outcome = "cached_reuse";
         LOG_INFO("SDMA prefetch: reusing cached STARS workspace (device=%d channels=%d)", dev_id, channel_count);
         return g_workspace_device_ptr;
     }
@@ -441,6 +465,7 @@ void* host_prefetch_setup(int channel_count)
     g_workspace_device_ptr = workspace;
     g_cached_device_id = dev_id;
     g_cached_channel_count = channel_count;
+    setup_timer.outcome = "initialized";
     return workspace;
 
 fail_op_dev:
@@ -456,6 +481,7 @@ fail_streams:
         aclrtDestroyStream(reinterpret_cast<aclrtStream>(stream));
     }
     g_prefetch_streams.clear();
+    setup_timer.outcome = "failed";
     return nullptr;
 }
 
