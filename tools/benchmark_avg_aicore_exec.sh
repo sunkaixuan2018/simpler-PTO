@@ -325,9 +325,81 @@ parse_prefetch_issue_total_us() {
     return 1
 }
 
+parse_prefetch_debug_counts() {
+    local log_file="$1"
+    python3 - "$log_file" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text(encoding="utf-8", errors="ignore")
+
+patterns = {
+    "CTRL": re.compile(
+        r"Prefetch control path summary: .*?considered=(?P<considered>\d+)"
+        r".*?eligible_tasks=(?P<eligible>\d+)"
+        r".*?total=(?P<total_us>[0-9.]+)us"
+        r".*?avg=(?P<avg_us>[0-9.]+)us"
+        r".*?eligible_total=(?P<eligible_total_us>[0-9.]+)us"
+        r".*?eligible_avg=(?P<eligible_avg_us>[0-9.]+)us",
+        re.S,
+    ),
+    "CTRL_SKIP": re.compile(
+        r"Prefetch task summary: .*?considered=(?P<considered>\d+)"
+        r".*?eligible_tasks=(?P<eligible>\d+)"
+        r".*?tensors=(?P<tensors>\d+)"
+        r".*?bytes=(?P<bytes>\d+)"
+        r".*?min_bytes=(?P<min_bytes>\d+)"
+        r".*?skip_not_sdma=(?P<skip_not_sdma>\d+)"
+        r".*?skip_not_available=(?P<skip_not_available>\d+)"
+        r".*?skip_null_payload=(?P<skip_null_payload>\d+)"
+        r".*?skip_below_min_bytes=(?P<skip_below_min_bytes>\d+)"
+        r".*?skip_no_valid_tensor=(?P<skip_no_valid_tensor>\d+)",
+        re.S,
+    ),
+    "ISSUE": re.compile(
+        r"SDMA prefetch issue summary: .*?enabled=(?P<enabled>\d+)"
+        r".*?attempts=(?P<attempts>\d+)"
+        r".*?issues=(?P<issues>\d+)"
+        r".*?bytes=(?P<bytes>\d+)"
+        r".*?issue_bytes=(?P<issue_bytes>\d+)"
+        r".*?suppressed=(?P<suppressed>\d+)"
+        r".*?queue_full=(?P<queue_full>\d+)"
+        r".*?total=(?P<total_us>[0-9.]+)us"
+        r".*?avg=(?P<avg_us>[0-9.]+)us"
+        r".*?issue_total=(?P<issue_total_us>[0-9.]+)us"
+        r".*?issue_avg=(?P<issue_avg_us>[0-9.]+)us",
+        re.S,
+    ),
+}
+
+results = {}
+for prefix, pattern in patterns.items():
+    match = pattern.search(text)
+    if match:
+        for key, value in match.groupdict().items():
+            results[f"{prefix}_{key.upper()}"] = value
+
+for key in sorted(results):
+    print(f"{key}={results[key]}")
+PY
+}
+
 PROFILE_AVG_AICORE_EXEC="-"
 PROFILE_PREFETCH_CTRL_US="-"
 PROFILE_PREFETCH_ISSUE_US="-"
+PROFILE_PREFETCH_CTRL_CONSIDERED="-"
+PROFILE_PREFETCH_CTRL_ELIGIBLE="-"
+PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA="-"
+PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE="-"
+PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD="-"
+PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES="-"
+PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR="-"
+PROFILE_PREFETCH_ISSUE_ATTEMPTS="-"
+PROFILE_PREFETCH_ISSUE_ISSUES="-"
+PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
+PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
 run_profile_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
@@ -353,6 +425,17 @@ run_profile_once() {
     PROFILE_AVG_AICORE_EXEC="-"
     PROFILE_PREFETCH_CTRL_US="-"
     PROFILE_PREFETCH_ISSUE_US="-"
+    PROFILE_PREFETCH_CTRL_CONSIDERED="-"
+    PROFILE_PREFETCH_CTRL_ELIGIBLE="-"
+    PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA="-"
+    PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE="-"
+    PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD="-"
+    PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES="-"
+    PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR="-"
+    PROFILE_PREFETCH_ISSUE_ATTEMPTS="-"
+    PROFILE_PREFETCH_ISSUE_ISSUES="-"
+    PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
+    PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
     if [[ $profile_rc -ne 0 ]]; then
         [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
         return 1
@@ -375,6 +458,25 @@ run_profile_once() {
             && PROFILE_PREFETCH_CTRL_US=$(parse_prefetch_ctrl_total_us "$device_log")
         parse_prefetch_issue_total_us "$device_log" >/dev/null \
             && PROFILE_PREFETCH_ISSUE_US=$(parse_prefetch_issue_total_us "$device_log")
+        local prefetch_debug
+        if prefetch_debug=$(parse_prefetch_debug_counts "$device_log"); then
+            while IFS='=' read -r key value; do
+                [[ -z "${key:-}" ]] && continue
+                case "$key" in
+                    CTRL_CONSIDERED) PROFILE_PREFETCH_CTRL_CONSIDERED="$value" ;;
+                    CTRL_ELIGIBLE) PROFILE_PREFETCH_CTRL_ELIGIBLE="$value" ;;
+                    CTRL_SKIP_NOT_SDMA) PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA="$value" ;;
+                    CTRL_SKIP_NOT_AVAILABLE) PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE="$value" ;;
+                    CTRL_SKIP_NULL_PAYLOAD) PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD="$value" ;;
+                    CTRL_SKIP_BELOW_MIN_BYTES) PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES="$value" ;;
+                    CTRL_SKIP_NO_VALID_TENSOR) PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR="$value" ;;
+                    ISSUE_ATTEMPTS) PROFILE_PREFETCH_ISSUE_ATTEMPTS="$value" ;;
+                    ISSUE_ISSUES) PROFILE_PREFETCH_ISSUE_ISSUES="$value" ;;
+                    ISSUE_SUPPRESSED) PROFILE_PREFETCH_ISSUE_SUPPRESSED="$value" ;;
+                    ISSUE_QUEUE_FULL) PROFILE_PREFETCH_ISSUE_QUEUE_FULL="$value" ;;
+                esac
+            done <<<"$prefetch_debug"
+        fi
     fi
     [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
     return 0
@@ -391,6 +493,17 @@ declare -A SUMMARY_LABELS_SEEN=()
 declare -A SUMMARY_AVG_AICORE_EXEC=()
 declare -A SUMMARY_PREFETCH_CTRL_US=()
 declare -A SUMMARY_PREFETCH_ISSUE_US=()
+declare -A SUMMARY_PREFETCH_CTRL_CONSIDERED=()
+declare -A SUMMARY_PREFETCH_CTRL_ELIGIBLE=()
+declare -A SUMMARY_PREFETCH_CTRL_SKIP_NOT_SDMA=()
+declare -A SUMMARY_PREFETCH_CTRL_SKIP_NOT_AVAILABLE=()
+declare -A SUMMARY_PREFETCH_CTRL_SKIP_NULL_PAYLOAD=()
+declare -A SUMMARY_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES=()
+declare -A SUMMARY_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR=()
+declare -A SUMMARY_PREFETCH_ISSUE_ATTEMPTS=()
+declare -A SUMMARY_PREFETCH_ISSUE_ISSUES=()
+declare -A SUMMARY_PREFETCH_ISSUE_SUPPRESSED=()
+declare -A SUMMARY_PREFETCH_ISSUE_QUEUE_FULL=()
 
 echo ""
 echo "Runtime: $RUNTIME"
@@ -434,9 +547,22 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             SUMMARY_AVG_AICORE_EXEC["$mode|$_label"]="$PROFILE_AVG_AICORE_EXEC"
             SUMMARY_PREFETCH_CTRL_US["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_US"
             SUMMARY_PREFETCH_ISSUE_US["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_US"
+            SUMMARY_PREFETCH_CTRL_CONSIDERED["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_CONSIDERED"
+            SUMMARY_PREFETCH_CTRL_ELIGIBLE["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_ELIGIBLE"
+            SUMMARY_PREFETCH_CTRL_SKIP_NOT_SDMA["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA"
+            SUMMARY_PREFETCH_CTRL_SKIP_NOT_AVAILABLE["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE"
+            SUMMARY_PREFETCH_CTRL_SKIP_NULL_PAYLOAD["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD"
+            SUMMARY_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES"
+            SUMMARY_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR["$mode|$_label"]="$PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR"
+            SUMMARY_PREFETCH_ISSUE_ATTEMPTS["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_ATTEMPTS"
+            SUMMARY_PREFETCH_ISSUE_ISSUES["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_ISSUES"
+            SUMMARY_PREFETCH_ISSUE_SUPPRESSED["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_SUPPRESSED"
+            SUMMARY_PREFETCH_ISSUE_QUEUE_FULL["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
             echo "  Avg AICore Task Exec (us): $PROFILE_AVG_AICORE_EXEC"
             echo "  Prefetch Ctrl Path Total (us): $PROFILE_PREFETCH_CTRL_US"
             echo "  Prefetch SQE Issue Total (us): $PROFILE_PREFETCH_ISSUE_US"
+            echo "  Prefetch Ctrl Counts: considered=$PROFILE_PREFETCH_CTRL_CONSIDERED eligible=$PROFILE_PREFETCH_CTRL_ELIGIBLE skip_not_sdma=$PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA skip_not_available=$PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE skip_null_payload=$PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD skip_below_min_bytes=$PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES skip_no_valid_tensor=$PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR"
+            echo "  Prefetch Issue Counts: attempts=$PROFILE_PREFETCH_ISSUE_ATTEMPTS issues=$PROFILE_PREFETCH_ISSUE_ISSUES suppressed=$PROFILE_PREFETCH_ISSUE_SUPPRESSED queue_full=$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
         done
     }
 
