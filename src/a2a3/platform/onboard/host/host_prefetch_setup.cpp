@@ -295,6 +295,7 @@ void* host_prefetch_setup(int channel_count)
         void* stream = nullptr;
         rc = aclrtCreateStreamWithConfig(reinterpret_cast<aclrtStream*>(&stream), 0, 0x20);  // ACL_STREAM_DEVICE_USE_ONLY
         if (rc != 0 || !stream) {
+            setup_timer.outcome = "stream_create_failed";
             LOG_INFO("SDMA prefetch: create device stream %d/%d failed (rc=%d)", i, channel_count, rc);
             goto fail_streams;
         }
@@ -320,6 +321,7 @@ void* host_prefetch_setup(int channel_count)
     // 2. Allocate workspace
     rc = aclrtMalloc(&workspace, SDMA_WORKSPACE_SIZE, ACL_MEM_MALLOC_HUGE_FIRST);
     if (rc != 0) {
+        setup_timer.outcome = "workspace_malloc_failed";
         LOG_ERROR("SDMA prefetch: workspace malloc failed");
         goto fail_streams;
     }
@@ -331,7 +333,10 @@ void* host_prefetch_setup(int channel_count)
         void* si_dev = nullptr;
         size_t stream_infos_size = stream_infos.size() * sizeof(host_stream_info_t);
         rc = aclrtMalloc(&si_dev, stream_infos_size, ACL_MEM_MALLOC_HUGE_FIRST);
-        if (rc != 0) goto fail_workspace;
+        if (rc != 0) {
+            setup_timer.outcome = "stream_info_upload_failed";
+            goto fail_workspace;
+        }
         aclrtMemcpy(si_dev, stream_infos_size, stream_infos.data(), stream_infos_size, ACL_MEMCPY_HOST_TO_DEVICE);
         g_streams_device_ptr = si_dev;
         LOG_INFO(
@@ -347,7 +352,10 @@ void* host_prefetch_setup(int channel_count)
 
         void* op_dev = nullptr;
         rc = aclrtMalloc(&op_dev, sizeof(op_res), ACL_MEM_MALLOC_HUGE_FIRST);
-        if (rc != 0) goto fail_si_dev;
+        if (rc != 0) {
+            setup_timer.outcome = "op_res_upload_failed";
+            goto fail_si_dev;
+        }
         aclrtMemcpy(op_dev, sizeof(op_res), &op_res, sizeof(op_res), ACL_MEMCPY_HOST_TO_DEVICE);
         g_op_res_device_ptr = op_dev;
         LOG_INFO(
@@ -361,9 +369,20 @@ void* host_prefetch_setup(int channel_count)
         uint64_t out_data[1] = {0};
         void* in_dev = nullptr;
         void* out_dev = nullptr;
-        aclrtMalloc(&in_dev, sizeof(in_data), ACL_MEM_MALLOC_HUGE_FIRST);
+        rc = aclrtMalloc(&in_dev, sizeof(in_data), ACL_MEM_MALLOC_HUGE_FIRST);
+        if (rc != 0 || in_dev == nullptr) {
+            setup_timer.outcome = "input_tensor_alloc_failed";
+            LOG_ERROR("SDMA prefetch: input tensor device malloc failed (rc=%d)", rc);
+            goto fail_op_dev;
+        }
         aclrtMemcpy(in_dev, sizeof(in_data), in_data, sizeof(in_data), ACL_MEMCPY_HOST_TO_DEVICE);
-        aclrtMalloc(&out_dev, sizeof(out_data), ACL_MEM_MALLOC_HUGE_FIRST);
+        rc = aclrtMalloc(&out_dev, sizeof(out_data), ACL_MEM_MALLOC_HUGE_FIRST);
+        if (rc != 0 || out_dev == nullptr) {
+            setup_timer.outcome = "output_tensor_alloc_failed";
+            LOG_ERROR("SDMA prefetch: output tensor device malloc failed (rc=%d)", rc);
+            aclrtFree(in_dev);
+            goto fail_op_dev;
+        }
         aclrtMemset(out_dev, sizeof(out_data), 0, sizeof(out_data));
 
         int64_t in_shape[] = {2};
@@ -375,6 +394,7 @@ void* host_prefetch_setup(int channel_count)
         void* output = aclCreateTensor(out_shape, 1, 10, strides, 0, 2, out_shape, 1, out_dev);
 
         if (!input || !output) {
+            setup_timer.outcome = "tensor_create_failed";
             LOG_ERROR("SDMA prefetch: aclCreateTensor failed");
             if (input) aclDestroyTensor(input);
             if (output) aclDestroyTensor(output);
@@ -385,7 +405,16 @@ void* host_prefetch_setup(int channel_count)
 
         // Launch AICPU op
         void* aicpu_stream = nullptr;
-        aclrtCreateStreamWithConfig(reinterpret_cast<aclrtStream*>(&aicpu_stream), 0, 0x3);
+        rc = aclrtCreateStreamWithConfig(reinterpret_cast<aclrtStream*>(&aicpu_stream), 0, 0x3);
+        if (rc != 0 || aicpu_stream == nullptr) {
+            setup_timer.outcome = "aicpu_stream_create_failed";
+            LOG_ERROR("SDMA prefetch: AICPU stream creation failed (rc=%d)", rc);
+            aclDestroyTensor(input);
+            aclDestroyTensor(output);
+            aclrtFree(in_dev);
+            aclrtFree(out_dev);
+            goto fail_op_dev;
+        }
 
         uint64_t ws_size = 0;
         void* executor = nullptr;
@@ -395,7 +424,14 @@ void* host_prefetch_setup(int channel_count)
 
         void* ws = nullptr;
         if (rc == 0) {
-            if (ws_size > 0) aclrtMalloc(&ws, ws_size, ACL_MEM_MALLOC_HUGE_FIRST);
+            if (ws_size > 0) {
+                int ws_rc = aclrtMalloc(&ws, ws_size, ACL_MEM_MALLOC_HUGE_FIRST);
+                if (ws_rc != 0 || ws == nullptr) {
+                    setup_timer.outcome = "workspace_query_ws_alloc_failed";
+                    LOG_ERROR("SDMA prefetch: workspace for query failed to allocate (rc=%d)", ws_rc);
+                    rc = ws_rc != 0 ? ws_rc : -1;
+                }
+            }
             rc = aclnnExec(ws, ws_size, executor, aicpu_stream);
             if (rc == 0) {
                 int sync_rc = aclrtSynchronizeStream(reinterpret_cast<aclrtStream>(aicpu_stream));
@@ -424,6 +460,7 @@ void* host_prefetch_setup(int channel_count)
                     }
                     LOG_INFO("SDMA prefetch: STARS channel initialized");
                 } else {
+                    setup_timer.outcome = "aicpu_stream_sync_failed";
                     std::vector<unsigned char> workspace_dump(128, 0);
                     int copy_rc = aclrtMemcpy(
                         workspace_dump.data(), workspace_dump.size(), workspace, workspace_dump.size(), ACL_MEMCPY_DEVICE_TO_HOST
@@ -446,10 +483,12 @@ void* host_prefetch_setup(int channel_count)
                     rc = sync_rc;
                 }
             } else {
+                setup_timer.outcome = "aclnn_exec_failed";
                 LOG_ERROR("SDMA prefetch: aclnnShmemSdmaStarsQuery exec failed (rc=%d)", rc);
             }
             if (ws) aclrtFree(ws);
         } else {
+            setup_timer.outcome = "aclnn_get_ws_failed";
             LOG_ERROR("SDMA prefetch: aclnnShmemSdmaStarsQuery getWs failed (rc=%d)", rc);
         }
 
@@ -469,14 +508,26 @@ void* host_prefetch_setup(int channel_count)
     return workspace;
 
 fail_op_dev:
+    if (setup_timer.outcome == std::string("unknown")) {
+        setup_timer.outcome = "fail_op_dev";
+    }
     aclrtFree(g_op_res_device_ptr);
     g_op_res_device_ptr = nullptr;
 fail_si_dev:
+    if (setup_timer.outcome == std::string("unknown")) {
+        setup_timer.outcome = "fail_si_dev";
+    }
     aclrtFree(g_streams_device_ptr);
     g_streams_device_ptr = nullptr;
 fail_workspace:
+    if (setup_timer.outcome == std::string("unknown")) {
+        setup_timer.outcome = "fail_workspace";
+    }
     aclrtFree(workspace);
 fail_streams:
+    if (setup_timer.outcome == std::string("unknown")) {
+        setup_timer.outcome = "fail_streams";
+    }
     for (void* stream : g_prefetch_streams) {
         aclrtDestroyStream(reinterpret_cast<aclrtStream>(stream));
     }
