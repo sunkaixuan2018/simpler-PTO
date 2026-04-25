@@ -335,54 +335,41 @@ from pathlib import Path
 path = Path(sys.argv[1])
 text = path.read_text(encoding="utf-8", errors="ignore")
 
-patterns = {
-    "CTRL": re.compile(
-        r"Prefetch control path summary: .*?considered=(?P<considered>\d+)"
-        r".*?eligible_tasks=(?P<eligible>\d+)"
-        r".*?total=(?P<total_us>[0-9.]+)us"
-        r".*?avg=(?P<avg_us>[0-9.]+)us"
-        r".*?eligible_total=(?P<eligible_total_us>[0-9.]+)us"
-        r".*?eligible_avg=(?P<eligible_avg_us>[0-9.]+)us",
-        re.S,
-    ),
-    "CTRL_SKIP": re.compile(
-        r"Prefetch task summary: .*?considered=(?P<considered>\d+)"
-        r".*?eligible_tasks=(?P<eligible>\d+)"
-        r".*?tensors=(?P<tensors>\d+)"
-        r".*?bytes=(?P<bytes>\d+)"
-        r".*?min_bytes=(?P<min_bytes>\d+)"
-        r".*?skip_not_sdma=(?P<skip_not_sdma>\d+)"
-        r".*?skip_not_available=(?P<skip_not_available>\d+)"
-        r".*?skip_null_payload=(?P<skip_null_payload>\d+)"
-        r".*?skip_below_min_bytes=(?P<skip_below_min_bytes>\d+)"
-        r".*?skip_no_valid_tensor=(?P<skip_no_valid_tensor>\d+)",
-        re.S,
-    ),
-    "ISSUE": re.compile(
-        r"SDMA prefetch issue summary: .*?enabled=(?P<enabled>\d+)"
-        r".*?attempts=(?P<attempts>\d+)"
-        r".*?issues=(?P<issues>\d+)"
-        r".*?bytes=(?P<bytes>\d+)"
-        r".*?issue_bytes=(?P<issue_bytes>\d+)"
-        r".*?suppressed=(?P<suppressed>\d+)"
-        r".*?queue_full=(?P<queue_full>\d+)"
-        r".*?total=(?P<total_us>[0-9.]+)us"
-        r".*?avg=(?P<avg_us>[0-9.]+)us"
-        r".*?issue_total=(?P<issue_total_us>[0-9.]+)us"
-        r".*?issue_avg=(?P<issue_avg_us>[0-9.]+)us",
-        re.S,
-    ),
+def find(pattern):
+    m = re.search(pattern, text, re.S)
+    return m.group(1) if m else None
+
+results = {
+    "CTRL_CONSIDERED": find(r"Prefetch control path summary: .*?considered=(\d+)"),
+    "CTRL_ELIGIBLE": find(r"Prefetch control path summary: .*?eligible_tasks=(\d+)"),
+    "CTRL_TOTAL_US": find(r"Prefetch control path summary: .*?total=([0-9.]+)us"),
+    "CTRL_AVG_US": find(r"Prefetch control path summary: .*?avg=([0-9.]+)us"),
+    "CTRL_ELIGIBLE_TOTAL_US": find(r"Prefetch control path summary: .*?eligible_total=([0-9.]+)us"),
+    "CTRL_ELIGIBLE_AVG_US": find(r"Prefetch control path summary: .*?eligible_avg=([0-9.]+)us"),
+    "CTRL_SKIP_NOT_SDMA": find(r"Prefetch task summary: .*?skip_not_sdma=(\d+)"),
+    "CTRL_SKIP_NOT_AVAILABLE": find(r"Prefetch task summary: .*?skip_not_available=(\d+)"),
+    "CTRL_SKIP_NULL_PAYLOAD": find(r"Prefetch task summary: .*?skip_null_payload=(\d+)"),
+    "CTRL_SKIP_BELOW_MIN_BYTES": find(r"Prefetch task summary: .*?skip_below_min_bytes=(\d+)"),
+    "CTRL_SKIP_NO_VALID_TENSOR": find(r"Prefetch task summary: .*?skip_no_valid_tensor=(\d+)"),
+    "CTRL_BYTES": find(r"Prefetch task summary: .*?bytes=(\d+)"),
+    "CTRL_TENSORS": find(r"Prefetch task summary: .*?tensors=(\d+)"),
+    "CTRL_MIN_BYTES": find(r"Prefetch task summary: .*?min_bytes=(\d+)"),
+    "ISSUE_ENABLED": find(r"SDMA prefetch issue summary: .*?enabled=(\d+)"),
+    "ISSUE_ATTEMPTS": find(r"SDMA prefetch issue summary: .*?attempts=(\d+)"),
+    "ISSUE_ISSUES": find(r"SDMA prefetch issue summary: .*?issues=(\d+)"),
+    "ISSUE_BYTES": find(r"SDMA prefetch issue summary: .*?bytes=(\d+)"),
+    "ISSUE_ISSUE_BYTES": find(r"SDMA prefetch issue summary: .*?issue_bytes=(\d+)"),
+    "ISSUE_SUPPRESSED": find(r"SDMA prefetch issue summary: .*?suppressed=(\d+)"),
+    "ISSUE_QUEUE_FULL": find(r"SDMA prefetch issue summary: .*?queue_full=(\d+)"),
+    "ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?total=([0-9.]+)us"),
+    "ISSUE_AVG_US": find(r"SDMA prefetch issue summary: .*?avg=([0-9.]+)us"),
+    "ISSUE_ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?issue_total=([0-9.]+)us"),
+    "ISSUE_ISSUE_AVG_US": find(r"SDMA prefetch issue summary: .*?issue_avg=([0-9.]+)us"),
 }
 
-results = {}
-for prefix, pattern in patterns.items():
-    match = pattern.search(text)
-    if match:
-        for key, value in match.groupdict().items():
-            results[f"{prefix}_{key.upper()}"] = value
-
 for key in sorted(results):
-    print(f"{key}={results[key]}")
+    if results[key] is not None:
+        print(f"{key}={results[key]}")
 PY
 }
 
