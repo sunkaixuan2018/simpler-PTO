@@ -579,33 +579,8 @@ struct AicpuExecutor {
     void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
         uint64_t start_cycle = get_sys_cnt_aicpu();
         bool eligible_task = false;
-        prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
         do {
-            if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA) {
-                prefetch_skip_not_sdma_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-            if (!aicpu_prefetch_available()) {
-                prefetch_skip_not_available_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-            if (slot_state.payload == nullptr) {
-                prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-            if ((pto2_core_mask(slot_state.active_mask) & PTO2_SUBTASK_MASK_AIC) == 0) {
-                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
             const PTO2TaskPayload &payload = *slot_state.payload;
-            if (payload.prefetch_addr == 0 || payload.prefetch_issue_bytes == 0 || payload.prefetch_filter_bytes == 0) {
-                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
-            if (payload.prefetch_filter_bytes < prefetch_min_bytes_) {
-                prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
-                break;
-            }
             eligible_task = true;
             if (!aicpu_prefetch_reserve_channel(channel_idx)) {
                 break;
@@ -625,6 +600,36 @@ struct AicpuExecutor {
         if (eligible_task) {
             prefetch_eligible_control_cycles_.fetch_add(elapsed, std::memory_order_relaxed);
         }
+    }
+
+    bool should_attempt_task_prefetch(const PTO2TaskSlotState &slot_state) const {
+        prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
+        if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA) {
+            prefetch_skip_not_sdma_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (!aicpu_prefetch_available()) {
+            prefetch_skip_not_available_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (slot_state.payload == nullptr) {
+            prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if ((pto2_core_mask(slot_state.active_mask) & PTO2_SUBTASK_MASK_AIC) == 0) {
+            prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        const PTO2TaskPayload &payload = *slot_state.payload;
+        if (payload.prefetch_addr == 0 || payload.prefetch_issue_bytes == 0 || payload.prefetch_filter_bytes == 0) {
+            prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        if (payload.prefetch_filter_bytes < prefetch_min_bytes_) {
+            prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
+            return false;
+        }
+        return true;
     }
 
     /**
@@ -1628,7 +1633,9 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                             );
                             slot_state->next_block_idx++;
                             int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
-                            issue_task_prefetch(*slot_state, current_core_id);
+                            if (should_attempt_task_prefetch(*slot_state)) {
+                                issue_task_prefetch(*slot_state, current_core_id);
+                            }
                             first_block = false;
                         } else {
                             dispatch_block_to_cluster(
