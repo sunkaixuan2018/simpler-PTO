@@ -576,115 +576,6 @@ struct AicpuExecutor {
         return count;
     }
 
-    struct PrefetchPlan {
-        uint64_t addr{0};
-        size_t issue_bytes{0};
-        size_t filter_bytes{0};
-
-        bool valid() const { return addr != 0 && issue_bytes > 0 && filter_bytes >= issue_bytes; }
-    };
-
-    static size_t get_tensor_view_nbytes(const Tensor &tensor) {
-        if (tensor.buffer.addr == 0 || tensor.ndims == 0) {
-            return 0;
-        }
-        uint64_t elems = 1;
-        for (uint32_t i = 0; i < tensor.ndims; ++i) {
-            elems *= tensor.shapes[i];
-        }
-        return static_cast<size_t>(elems * get_element_size(tensor.dtype));
-    }
-
-    static uint64_t get_tensor_view_addr(const Tensor &tensor) {
-        return tensor.buffer.addr + tensor.start_offset * static_cast<uint64_t>(get_element_size(tensor.dtype));
-    }
-
-    static const int32_t *get_tensor_i32_ptr(const Tensor &tensor) {
-        return reinterpret_cast<const int32_t *>(get_tensor_view_addr(tensor));
-    }
-
-    static bool try_build_paged_attention_prefetch_plan(const PTO2TaskPayload &payload, PrefetchPlan &plan) {
-        if (payload.tensor_count != 4) {
-            return false;
-        }
-        const Tensor &cache = payload.tensors[1];
-        const Tensor &block_table = payload.tensors[2];
-        if (cache.buffer.addr == 0 || cache.ndims != 2 || cache.shapes[1] == 0 || block_table.dtype != DataType::INT32) {
-            return false;
-        }
-
-        const uint64_t head_dim = static_cast<uint64_t>(cache.shapes[1]);
-        const uint64_t elem_size = static_cast<uint64_t>(get_element_size(cache.dtype));
-        const int32_t *bt = get_tensor_i32_ptr(block_table);
-        if (bt == nullptr) {
-            return false;
-        }
-
-        uint64_t block_size = 0;
-        uint64_t logical_blocks = 0;
-        uint64_t bt_index = 0;
-
-        if (payload.scalar_count == 2) {
-            const uint64_t n_blocks = payload.scalars[0];
-            const uint64_t bt_offset = payload.scalars[1];
-            if (n_blocks == 0) {
-                return false;
-            }
-            const Tensor &tensor0 = payload.tensors[0];
-            const Tensor &tensor3 = payload.tensors[3];
-            if (tensor3.ndims == 2 && tensor3.shapes[1] > 0 && tensor3.shapes[1] % n_blocks == 0) {
-                block_size = tensor3.shapes[1] / n_blocks;  // paged_attention_unroll QK
-            } else if (tensor0.ndims == 2 && tensor0.shapes[1] > 0 && tensor0.shapes[1] % n_blocks == 0) {
-                block_size = tensor0.shapes[1] / n_blocks;  // paged_attention_unroll PV
-            } else {
-                return false;
-            }
-            logical_blocks = n_blocks;
-            bt_index = bt_offset;
-        } else if (payload.scalar_count == 6) {
-            const uint64_t batch_count = payload.scalars[0];
-            const uint64_t block_idx = payload.scalars[1];
-            const uint64_t block_num = payload.scalars[3];
-            const uint64_t batch_start = payload.scalars[5];
-            const Tensor &tensor3 = payload.tensors[3];
-            if (batch_count == 0 || block_num == 0 || tensor3.ndims != 2 || tensor3.shapes[1] == 0) {
-                return false;
-            }
-            block_size = tensor3.shapes[1];  // batch_paged_attention QK
-            logical_blocks = batch_count;
-            bt_index = batch_start * block_num + block_idx;
-        } else if (payload.scalar_count == 4) {
-            const uint64_t batch_count = payload.scalars[0];
-            const uint64_t block_idx = payload.scalars[1];
-            const uint64_t block_num = payload.scalars[2];
-            const uint64_t batch_start = payload.scalars[3];
-            const Tensor &tensor0 = payload.tensors[0];
-            if (batch_count == 0 || block_num == 0 || tensor0.ndims != 2 || tensor0.shapes[1] == 0) {
-                return false;
-            }
-            block_size = tensor0.shapes[1];  // batch_paged_attention PV
-            logical_blocks = batch_count;
-            bt_index = batch_start * block_num + block_idx;
-        } else {
-            return false;
-        }
-
-        if (block_size == 0 || logical_blocks == 0) {
-            return false;
-        }
-
-        int32_t phys_block = bt[bt_index];
-        if (phys_block < 0) {
-            return false;
-        }
-
-        const uint64_t issue_bytes = block_size * head_dim * elem_size;
-        plan.addr = get_tensor_view_addr(cache) + static_cast<uint64_t>(phys_block) * issue_bytes;
-        plan.issue_bytes = static_cast<size_t>(issue_bytes);
-        plan.filter_bytes = static_cast<size_t>(logical_blocks * issue_bytes);
-        return plan.valid();
-    }
-
     void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
         uint64_t start_cycle = get_sys_cnt_aicpu();
         bool eligible_task = false;
@@ -702,22 +593,29 @@ struct AicpuExecutor {
                 prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
-            PrefetchPlan plan;
-            if (!try_build_paged_attention_prefetch_plan(*slot_state.payload, plan)) {
+            if ((pto2_core_mask(slot_state.active_mask) & PTO2_SUBTASK_MASK_AIC) == 0) {
                 prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
-            if (plan.filter_bytes < prefetch_min_bytes_) {
+            const PTO2TaskPayload &payload = *slot_state.payload;
+            if (payload.prefetch_addr == 0 || payload.prefetch_issue_bytes == 0 || payload.prefetch_filter_bytes == 0) {
+                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+                break;
+            }
+            if (payload.prefetch_filter_bytes < prefetch_min_bytes_) {
                 prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
             eligible_task = true;
+            if (!aicpu_prefetch_reserve_channel(channel_idx)) {
+                break;
+            }
             prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
             prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
-            prefetch_total_bytes_.fetch_add(static_cast<uint64_t>(plan.issue_bytes), std::memory_order_relaxed);
-            aicpu_prefetch_tensor(
-                reinterpret_cast<void *>(plan.addr),
-                plan.issue_bytes,
+            prefetch_total_bytes_.fetch_add(payload.prefetch_issue_bytes, std::memory_order_relaxed);
+            aicpu_prefetch_issue_reserved(
+                reinterpret_cast<void *>(payload.prefetch_addr),
+                static_cast<size_t>(payload.prefetch_issue_bytes),
                 channel_idx
             );
         } while (false);

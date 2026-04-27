@@ -48,6 +48,28 @@ void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window);
 void aicpu_prefetch_deinit();
 
 /**
+ * Reserve a channel for a potential prefetch attempt.
+ *
+ * Performs cheap availability/suppression checks and consumes one suppress
+ * slot if the channel is currently suppressed.
+ *
+ * @param thread_idx   Scheduler thread index (selects which channel to use)
+ * @return true if the caller should proceed to issue a prefetch
+ */
+bool aicpu_prefetch_reserve_channel(int thread_idx);
+
+/**
+ * Issue a prefetch after reserve_channel has already succeeded.
+ *
+ * Skips suppression handling and writes the SQE directly.
+ *
+ * @param addr         Device memory address to prefetch
+ * @param size         Number of bytes to prefetch
+ * @param thread_idx   Scheduler thread index (selects which channel to use)
+ */
+void aicpu_prefetch_issue_reserved(void* addr, size_t size, int thread_idx);
+
+/**
  * Issue an asynchronous SDMA prefetch for a device memory region.
  *
  * Writes a CMO PREFETCH SQE to the STARS submission queue and rings

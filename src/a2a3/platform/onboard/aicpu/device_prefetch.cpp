@@ -145,6 +145,36 @@ static inline uint32_t consume_prefetch_suppress_window(int channel_idx)
     }
 }
 
+static bool prepare_prefetch_channel(int* channel_idx, bool count_attempt, bool consume_suppress)
+{
+    if (!g_prefetch_enabled || g_channel_info == nullptr || g_channel_count == 0 || channel_idx == nullptr ||
+        *channel_idx < 0) {
+        return false;
+    }
+
+    *channel_idx %= static_cast<int>(g_channel_count);
+
+    if (count_attempt) {
+        __atomic_add_fetch(&g_prefetch_attempt_count, 1, __ATOMIC_RELAXED);
+    }
+
+    if (consume_suppress) {
+        uint32_t suppress_remaining = consume_prefetch_suppress_window(*channel_idx);
+        if (suppress_remaining != 0) {
+            uint32_t skipped = __atomic_add_fetch(&g_prefetch_skip_suppressed[*channel_idx], 1, __ATOMIC_RELAXED);
+            if (skipped <= 4 || (skipped % 64) == 0) {
+                DEV_ALWAYS(
+                    "SDMA prefetch: suppressed, skip issue (channel=%d skipped=%u remaining_after=%u)",
+                    *channel_idx, skipped, suppress_remaining - 1
+                );
+            }
+            return false;
+        }
+    }
+
+    return true;
+}
+
 static void fill_cmo_prefetch_sqe(volatile stars_sdma_cmo_sqe_t* sqe,
                                   uint64_t src_addr, uint32_t length,
                                   uint16_t stream_id, uint16_t task_id)
@@ -275,7 +305,12 @@ void aicpu_prefetch_deinit()
     __atomic_store_n(&g_prefetch_issue_cycles, 0, __ATOMIC_RELEASE);
 }
 
-void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
+bool aicpu_prefetch_reserve_channel(int channel_idx)
+{
+    return prepare_prefetch_channel(&channel_idx, true, true);
+}
+
+void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
 {
     uint64_t start_cycle = get_sys_cnt_aicpu();
     bool issued = false;
@@ -285,25 +320,10 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
             break;
         }
 
-        if (g_channel_info == nullptr || g_channel_count == 0 || channel_idx < 0) {
+        if (!prepare_prefetch_channel(&channel_idx, false, false)) {
             break;
         }
-
-        channel_idx %= static_cast<int>(g_channel_count);
-        __atomic_add_fetch(&g_prefetch_attempt_count, 1, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
-
-        uint32_t suppress_remaining = consume_prefetch_suppress_window(channel_idx);
-        if (suppress_remaining != 0) {
-            uint32_t skipped = __atomic_add_fetch(&g_prefetch_skip_suppressed[channel_idx], 1, __ATOMIC_RELAXED);
-            if (skipped <= 4 || (skipped % 64) == 0) {
-                DEV_ALWAYS(
-                    "SDMA prefetch: suppressed, skip issue (channel=%d skipped=%u remaining_after=%u)",
-                    channel_idx, skipped, suppress_remaining - 1
-                );
-            }
-            break;
-        }
 
         volatile stars_channel_info_t* ch = g_channel_info + channel_idx;
         prefetch_lock(channel_idx);
@@ -363,6 +383,14 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
     if (issued) {
         __atomic_add_fetch(&g_prefetch_issue_cycles, elapsed, __ATOMIC_RELAXED);
     }
+}
+
+void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
+{
+    if (!aicpu_prefetch_reserve_channel(channel_idx)) {
+        return;
+    }
+    aicpu_prefetch_issue_reserved(addr, size, channel_idx);
 }
 
 bool aicpu_prefetch_available()

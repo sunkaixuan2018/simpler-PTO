@@ -15,6 +15,17 @@ void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window) {
 void aicpu_prefetch_deinit() {
 }
 
+bool aicpu_prefetch_reserve_channel(int thread_idx) {
+    (void)thread_idx;
+    return false;
+}
+
+void aicpu_prefetch_issue_reserved(void* addr, size_t size, int thread_idx) {
+    (void)addr;
+    (void)size;
+    (void)thread_idx;
+}
+
 void aicpu_prefetch_tensor(void* addr, size_t size, int thread_idx) {
     (void)addr;
     (void)size;
