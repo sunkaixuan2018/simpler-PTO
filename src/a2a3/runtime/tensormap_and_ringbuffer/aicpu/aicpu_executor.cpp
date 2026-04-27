@@ -627,8 +627,13 @@ struct AicpuExecutor {
         const PTO2TaskPayload &payload = *slot_state.payload;
         if (payload.tensor_count == 4) {
             if (payload.scalar_count == 2) {
-                // paged_attention_unroll: currently the most promising case, keep it aggressive.
-                return prefetch_suppress_window_;
+                // paged_attention_unroll:
+                //   - 32KB+ block prefetch (Case1-like): stay moderately aggressive
+                //   - 16KB block prefetch (Case2-like): space attempts out more
+                if (payload.prefetch_issue_bytes <= 16 * 1024) {
+                    return prefetch_suppress_window_ >= 7 ? prefetch_suppress_window_ : 7;
+                }
+                return prefetch_suppress_window_ >= 3 ? prefetch_suppress_window_ : 3;
             }
             if (payload.scalar_count == 4 || payload.scalar_count == 6) {
                 // batch_paged_attention: keep SDMA enabled, but space attempts out more.
@@ -636,7 +641,7 @@ struct AicpuExecutor {
             }
         }
         // Generic AIC tasks: retain sparse sampling only.
-        return prefetch_suppress_window_ >= 15 ? prefetch_suppress_window_ : 15;
+        return prefetch_suppress_window_ >= 31 ? prefetch_suppress_window_ : 31;
     }
 
     bool should_attempt_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
