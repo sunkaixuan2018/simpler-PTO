@@ -169,6 +169,7 @@ public:  // NOLINT(whitespace/indent)
     uint32_t prefetch_mode;  // baseline / twoslot / sdma / sdma_fake
     uint64_t sdma_prefetch_min_bytes;  // Minimum task payload bytes to enable SDMA prefetch
     uint32_t sdma_prefetch_suppress_window;  // Per-channel suppression window after a successful issue
+    bool sdma_prefetch_debug;  // Enable extra SDMA debug counters/logging
 
     // Ring buffer size overrides (0 = use compile-time defaults)
     uint64_t pto2_task_window_size;

@@ -7,9 +7,10 @@
 
 #include "aicpu/device_prefetch.h"
 
-void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window) {
+void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window, bool debug_enabled) {
     (void)sdma_workspace;
     (void)suppress_window;
+    (void)debug_enabled;
 }
 
 void aicpu_prefetch_deinit() {
@@ -34,4 +35,8 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int thread_idx) {
 
 bool aicpu_prefetch_available() {
     return false;
+}
+
+uint32_t aicpu_prefetch_channel_count() {
+    return 0;
 }

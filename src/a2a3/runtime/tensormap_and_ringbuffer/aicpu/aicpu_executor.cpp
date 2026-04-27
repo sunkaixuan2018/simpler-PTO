@@ -350,6 +350,7 @@ struct AicpuExecutor {
     uint32_t prefetch_mode_{Runtime::PREFETCH_MODE_TWOSLOT};
     size_t prefetch_min_bytes_{256 * 1024};
     uint32_t prefetch_suppress_window_{2};
+    bool prefetch_debug_enabled_{false};
     mutable std::atomic<uint64_t> prefetch_considered_count_{0};
     mutable std::atomic<uint64_t> prefetch_task_count_{0};
     mutable std::atomic<uint64_t> prefetch_tensor_count_{0};
@@ -579,7 +580,7 @@ struct AicpuExecutor {
     }
 
     void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
-        uint64_t start_cycle = get_sys_cnt_aicpu();
+        uint64_t start_cycle = prefetch_debug_enabled_ ? get_sys_cnt_aicpu() : 0;
         bool eligible_task = false;
         do {
             const PTO2TaskPayload &payload = *slot_state.payload;
@@ -587,9 +588,11 @@ struct AicpuExecutor {
             if (!aicpu_prefetch_reserve_channel(channel_idx)) {
                 break;
             }
-            prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
-            prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
-            prefetch_total_bytes_.fetch_add(payload.prefetch_issue_bytes, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
+                prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
+                prefetch_total_bytes_.fetch_add(payload.prefetch_issue_bytes, std::memory_order_relaxed);
+            }
             aicpu_prefetch_issue_reserved(
                 reinterpret_cast<void *>(payload.prefetch_addr),
                 static_cast<size_t>(payload.prefetch_issue_bytes),
@@ -597,52 +600,82 @@ struct AicpuExecutor {
             );
         } while (false);
 
-        uint64_t elapsed = get_sys_cnt_aicpu() - start_cycle;
-        prefetch_control_cycles_.fetch_add(elapsed, std::memory_order_relaxed);
-        if (eligible_task) {
-            prefetch_eligible_control_cycles_.fetch_add(elapsed, std::memory_order_relaxed);
+        if (prefetch_debug_enabled_) {
+            uint64_t elapsed = get_sys_cnt_aicpu() - start_cycle;
+            prefetch_control_cycles_.fetch_add(elapsed, std::memory_order_relaxed);
+            if (eligible_task) {
+                prefetch_eligible_control_cycles_.fetch_add(elapsed, std::memory_order_relaxed);
+            }
         }
     }
 
+    static int get_scheduler_prefetch_channel_idx(int channel_idx) {
+        if (channel_idx < 0) {
+            return channel_idx;
+        }
+        uint32_t channel_count = aicpu_prefetch_channel_count();
+        if (channel_count == 0) {
+            return channel_idx;
+        }
+        return channel_idx % static_cast<int>(channel_count);
+    }
+
     bool should_attempt_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
-        prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
+        if (prefetch_debug_enabled_) {
+            prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
+        }
         if (prefetch_mode_ != Runtime::PREFETCH_MODE_SDMA) {
-            prefetch_skip_not_sdma_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_not_sdma_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         if (!aicpu_prefetch_available()) {
-            prefetch_skip_not_available_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_not_available_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         if (slot_state.payload == nullptr) {
-            prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_null_payload_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         if ((pto2_core_mask(slot_state.active_mask) & PTO2_SUBTASK_MASK_AIC) == 0) {
-            prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         const PTO2TaskPayload &payload = *slot_state.payload;
         if (payload.prefetch_addr == 0 || payload.prefetch_issue_bytes == 0 || payload.prefetch_filter_bytes == 0) {
-            prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
         if (payload.prefetch_filter_bytes < prefetch_min_bytes_) {
-            prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
+            if (prefetch_debug_enabled_) {
+                prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
+            }
             return false;
         }
-        if (prefetch_suppress_window_ > 0 && channel_idx >= 0 && channel_idx < PLATFORM_MAX_CORES) {
+        int suppress_channel_idx = get_scheduler_prefetch_channel_idx(channel_idx);
+        if (prefetch_suppress_window_ > 0 && suppress_channel_idx >= 0 && suppress_channel_idx < PLATFORM_MAX_CORES) {
             while (true) {
                 uint32_t remaining =
-                    prefetch_scheduler_suppress_remaining_[channel_idx].load(std::memory_order_relaxed);
+                    prefetch_scheduler_suppress_remaining_[suppress_channel_idx].load(std::memory_order_relaxed);
                 if (remaining == 0) {
                     break;
                 }
                 uint32_t desired = remaining - 1;
-                if (prefetch_scheduler_suppress_remaining_[channel_idx].compare_exchange_weak(
+                if (prefetch_scheduler_suppress_remaining_[suppress_channel_idx].compare_exchange_weak(
                         remaining, desired, std::memory_order_acq_rel, std::memory_order_relaxed
                     )) {
-                    prefetch_skip_scheduler_suppressed_.fetch_add(1, std::memory_order_relaxed);
+                    if (prefetch_debug_enabled_) {
+                        prefetch_skip_scheduler_suppressed_.fetch_add(1, std::memory_order_relaxed);
+                    }
                     return false;
                 }
             }
@@ -1269,6 +1302,7 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     prefetch_mode_ = runtime->prefetch_mode;
     prefetch_min_bytes_ = static_cast<size_t>(runtime->sdma_prefetch_min_bytes);
     prefetch_suppress_window_ = runtime->sdma_prefetch_suppress_window;
+    prefetch_debug_enabled_ = runtime->sdma_prefetch_debug;
     prefetch_considered_count_.store(0, std::memory_order_relaxed);
     prefetch_task_count_.store(0, std::memory_order_relaxed);
     prefetch_tensor_count_.store(0, std::memory_order_relaxed);
@@ -1284,7 +1318,7 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     for (int i = 0; i < PLATFORM_MAX_CORES; ++i) {
         prefetch_scheduler_suppress_remaining_[i].store(0, std::memory_order_relaxed);
     }
-    aicpu_prefetch_init(runtime->sdma_prefetch_workspace, prefetch_suppress_window_);
+    aicpu_prefetch_init(runtime->sdma_prefetch_workspace, prefetch_suppress_window_, prefetch_debug_enabled_);
     const char *prefetch_mode_name =
         prefetch_mode_ == Runtime::PREFETCH_MODE_BASELINE ? "baseline" :
         prefetch_mode_ == Runtime::PREFETCH_MODE_TWOSLOT ? "twoslot" :
@@ -1657,9 +1691,10 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                             int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
                             if (should_attempt_task_prefetch(*slot_state, current_core_id)) {
                                 issue_task_prefetch(*slot_state, current_core_id);
-                                if (prefetch_suppress_window_ > 0 && current_core_id >= 0 &&
-                                    current_core_id < PLATFORM_MAX_CORES) {
-                                    prefetch_scheduler_suppress_remaining_[current_core_id].store(
+                                int suppress_channel_idx = get_scheduler_prefetch_channel_idx(current_core_id);
+                                if (prefetch_suppress_window_ > 0 && suppress_channel_idx >= 0 &&
+                                    suppress_channel_idx < PLATFORM_MAX_CORES) {
+                                    prefetch_scheduler_suppress_remaining_[suppress_channel_idx].store(
                                         prefetch_suppress_window_, std::memory_order_release
                                     );
                                 }

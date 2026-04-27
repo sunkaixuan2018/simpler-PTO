@@ -146,6 +146,20 @@ static uint32_t parse_prefetch_suppress_window() {
     return static_cast<uint32_t>(value);
 }
 
+static bool parse_prefetch_debug() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_DEBUG");
+    if (env == nullptr || *env == '\0') {
+        return false;
+    }
+    if (
+        strcmp(env, "0") == 0 || strcasecmp(env, "false") == 0 || strcasecmp(env, "off") == 0 ||
+        strcasecmp(env, "no") == 0
+    ) {
+        return false;
+    }
+    return true;
+}
+
 /**
  * Initialize a pre-allocated runtime for device orchestration.
  *
@@ -282,9 +296,11 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     runtime->prefetch_mode = parse_prefetch_mode();
     runtime->sdma_prefetch_min_bytes = parse_prefetch_min_bytes();
     runtime->sdma_prefetch_suppress_window = parse_prefetch_suppress_window();
+    runtime->sdma_prefetch_debug = parse_prefetch_debug();
     LOG_INFO("Prefetch mode: %s", prefetch_mode_name(runtime->prefetch_mode));
     LOG_INFO("SDMA prefetch min bytes: %" PRIu64, runtime->sdma_prefetch_min_bytes);
     LOG_INFO("SDMA prefetch suppress window: %u", runtime->sdma_prefetch_suppress_window);
+    LOG_INFO("SDMA prefetch debug: %s", runtime->sdma_prefetch_debug ? "on" : "off");
 
     // Read orchestrator-to-scheduler transition flag from environment
     {

@@ -37,7 +37,7 @@
  * @param suppress_window Number of future eligible attempts to suppress on the
  *                        same channel after one successful issue.
  */
-void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window);
+void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window, bool debug_enabled);
 
 /**
  * Shut down SDMA prefetch subsystem.
@@ -89,5 +89,10 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int thread_idx);
  * @return true if prefetch calls will actually issue SDMA commands
  */
 bool aicpu_prefetch_available();
+
+/**
+ * Return current SDMA channel count observed by AICPU prefetch subsystem.
+ */
+uint32_t aicpu_prefetch_channel_count();
 
 #endif  // PLATFORM_DEVICE_PREFETCH_H_

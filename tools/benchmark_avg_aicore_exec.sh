@@ -410,7 +410,7 @@ PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
 run_profile_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
-        env "PTO_SDMA_PREFETCH_MODE=$mode"
+        env "PTO_SDMA_PREFETCH_MODE=$mode" "PTO_SDMA_PREFETCH_DEBUG=1"
         python3 "$RUN_EXAMPLE"
         -k "$kernels_dir" -g "$golden"
         -p "$PLATFORM" -d "$DEVICE_ID"

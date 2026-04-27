@@ -116,6 +116,7 @@ static volatile uint64_t g_prefetch_attempt_bytes = 0;
 static volatile uint64_t g_prefetch_issue_bytes = 0;
 static volatile uint64_t g_prefetch_attempt_cycles = 0;
 static volatile uint64_t g_prefetch_issue_cycles = 0;
+static bool g_prefetch_debug_enabled = false;
 
 static inline void prefetch_lock(int channel_idx)
 {
@@ -154,15 +155,16 @@ static bool prepare_prefetch_channel(int* channel_idx, bool count_attempt, bool 
 
     *channel_idx %= static_cast<int>(g_channel_count);
 
-    if (count_attempt) {
+    if (count_attempt && g_prefetch_debug_enabled) {
         __atomic_add_fetch(&g_prefetch_attempt_count, 1, __ATOMIC_RELAXED);
     }
 
     if (consume_suppress) {
         uint32_t suppress_remaining = consume_prefetch_suppress_window(*channel_idx);
         if (suppress_remaining != 0) {
-            uint32_t skipped = __atomic_add_fetch(&g_prefetch_skip_suppressed[*channel_idx], 1, __ATOMIC_RELAXED);
-            if (skipped <= 4 || (skipped % 64) == 0) {
+            uint32_t skipped =
+                g_prefetch_debug_enabled ? __atomic_add_fetch(&g_prefetch_skip_suppressed[*channel_idx], 1, __ATOMIC_RELAXED) : 0;
+            if (g_prefetch_debug_enabled && (skipped <= 4 || (skipped % 64) == 0)) {
                 DEV_ALWAYS(
                     "SDMA prefetch: suppressed, skip issue (channel=%d skipped=%u remaining_after=%u)",
                     *channel_idx, skipped, suppress_remaining - 1
@@ -200,12 +202,13 @@ static void fill_cmo_prefetch_sqe(volatile stars_sdma_cmo_sqe_t* sqe,
     sqe->dns = 1;
 }
 
-void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window)
+void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window, bool debug_enabled)
 {
     g_prefetch_enabled = false;
     g_channel_info = nullptr;
     g_channel_count = 0;
     g_prefetch_suppress_window = suppress_window;
+    g_prefetch_debug_enabled = debug_enabled;
     g_prefetch_attempt_count = 0;
     g_prefetch_issue_count = 0;
     g_prefetch_attempt_bytes = 0;
@@ -225,43 +228,49 @@ void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window)
     uint8_t* base = static_cast<uint8_t*>(sdma_workspace);
     auto* flag_info = reinterpret_cast<volatile stars_channel_flag_info_t*>(base);
     g_channel_info = reinterpret_cast<volatile stars_channel_info_t*>(base + sizeof(stars_channel_flag_info_t));
-    DEV_ALWAYS(
-        "SDMA prefetch: workspace=%p flag_info=%p channel_info=%p flag=0x%x totalQueueNum=%u", sdma_workspace,
-        const_cast<stars_channel_flag_info_t*>(flag_info), const_cast<stars_channel_info_t*>(g_channel_info),
-        flag_info->flag, flag_info->totalQueueNum
-    );
+    if (g_prefetch_debug_enabled) {
+        DEV_ALWAYS(
+            "SDMA prefetch: workspace=%p flag_info=%p channel_info=%p flag=0x%x totalQueueNum=%u", sdma_workspace,
+            const_cast<stars_channel_flag_info_t*>(flag_info), const_cast<stars_channel_info_t*>(g_channel_info),
+            flag_info->flag, flag_info->totalQueueNum
+        );
+    }
     g_channel_count = flag_info->totalQueueNum;
     if (g_channel_count == 0 || g_channel_count > PLATFORM_MAX_CORES) {
-        DEV_ALWAYS("SDMA prefetch: invalid channel count %u", g_channel_count);
+        if (g_prefetch_debug_enabled) DEV_ALWAYS("SDMA prefetch: invalid channel count %u", g_channel_count);
         g_channel_info = nullptr;
         g_channel_count = 0;
         return;
     }
 
     if (g_channel_info->sq_base == 0 || g_channel_info->sq_reg_base == 0 || g_channel_info->sq_depth == 0) {
-        DEV_ALWAYS("SDMA prefetch: disabled (channel info not initialized: sq_base=%llu sq_reg=%llu depth=%u)",
-                   (unsigned long long)g_channel_info->sq_base,
-                   (unsigned long long)g_channel_info->sq_reg_base,
-                   g_channel_info->sq_depth);
+        if (g_prefetch_debug_enabled) {
+            DEV_ALWAYS("SDMA prefetch: disabled (channel info not initialized: sq_base=%llu sq_reg=%llu depth=%u)",
+                       (unsigned long long)g_channel_info->sq_base,
+                       (unsigned long long)g_channel_info->sq_reg_base,
+                       g_channel_info->sq_depth);
+        }
         g_channel_info = nullptr;
         return;
     }
 
     g_prefetch_enabled = true;
-    for (uint32_t i = 0; i < g_channel_count && i < 4; ++i) {
-        volatile stars_channel_info_t* ch = g_channel_info + i;
-        DEV_ALWAYS(
-            "SDMA prefetch: channel[%u] sq_head=%u sq_tail=%u sq_base=0x%llx sq_reg=0x%llx depth=%u sq_id=%u cq_id=%u stream=%u",
-            i, ch->sq_head, ch->sq_tail, (unsigned long long)ch->sq_base, (unsigned long long)ch->sq_reg_base,
-            ch->sq_depth, ch->sq_id, ch->cq_id, ch->stream_id
-        );
+    if (g_prefetch_debug_enabled) {
+        for (uint32_t i = 0; i < g_channel_count && i < 4; ++i) {
+            volatile stars_channel_info_t* ch = g_channel_info + i;
+            DEV_ALWAYS(
+                "SDMA prefetch: channel[%u] sq_head=%u sq_tail=%u sq_base=0x%llx sq_reg=0x%llx depth=%u sq_id=%u cq_id=%u stream=%u",
+                i, ch->sq_head, ch->sq_tail, (unsigned long long)ch->sq_base, (unsigned long long)ch->sq_reg_base,
+                ch->sq_depth, ch->sq_id, ch->cq_id, ch->stream_id
+            );
+        }
+        DEV_ALWAYS("SDMA prefetch: enabled (channels=%u sq_base=0x%llx sq_reg=0x%llx depth=%u stream=%u)",
+                   g_channel_count,
+                   (unsigned long long)g_channel_info->sq_base,
+                   (unsigned long long)g_channel_info->sq_reg_base,
+                   g_channel_info->sq_depth,
+                   g_channel_info->stream_id);
     }
-    DEV_ALWAYS("SDMA prefetch: enabled (channels=%u sq_base=0x%llx sq_reg=0x%llx depth=%u stream=%u)",
-               g_channel_count,
-               (unsigned long long)g_channel_info->sq_base,
-               (unsigned long long)g_channel_info->sq_reg_base,
-               g_channel_info->sq_depth,
-               g_channel_info->stream_id);
 }
 
 void aicpu_prefetch_deinit()
@@ -278,15 +287,17 @@ void aicpu_prefetch_deinit()
         suppressed_count += __atomic_load_n(&g_prefetch_skip_suppressed[i], __ATOMIC_ACQUIRE);
         queue_full_count += __atomic_load_n(&g_prefetch_skip_queue_full[i], __ATOMIC_ACQUIRE);
     }
-    DEV_ALWAYS(
-        "SDMA prefetch issue summary: enabled=%d attempts=%u issues=%u bytes=%" PRIu64
-        " issue_bytes=%" PRIu64 " suppressed=%" PRIu64 " queue_full=%" PRIu64 " total=%.3fus avg=%.3fus"
-        " issue_total=%.3fus issue_avg=%.3fus",
-        g_prefetch_enabled ? 1 : 0, attempt_count, issue_count, attempt_bytes, issue_bytes, suppressed_count,
-        queue_full_count, cycles_to_us(attempt_cycles),
-        attempt_count > 0 ? cycles_to_us(attempt_cycles) / attempt_count : 0.0,
-        cycles_to_us(issue_cycles), issue_count > 0 ? cycles_to_us(issue_cycles) / issue_count : 0.0
-    );
+    if (g_prefetch_debug_enabled) {
+        DEV_ALWAYS(
+            "SDMA prefetch issue summary: enabled=%d attempts=%u issues=%u bytes=%" PRIu64
+            " issue_bytes=%" PRIu64 " suppressed=%" PRIu64 " queue_full=%" PRIu64 " total=%.3fus avg=%.3fus"
+            " issue_total=%.3fus issue_avg=%.3fus",
+            g_prefetch_enabled ? 1 : 0, attempt_count, issue_count, attempt_bytes, issue_bytes, suppressed_count,
+            queue_full_count, cycles_to_us(attempt_cycles),
+            attempt_count > 0 ? cycles_to_us(attempt_cycles) / attempt_count : 0.0,
+            cycles_to_us(issue_cycles), issue_count > 0 ? cycles_to_us(issue_cycles) / issue_count : 0.0
+        );
+    }
 
     g_prefetch_enabled = false;
     g_channel_info = nullptr;
@@ -312,7 +323,7 @@ bool aicpu_prefetch_reserve_channel(int channel_idx)
 
 void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
 {
-    uint64_t start_cycle = get_sys_cnt_aicpu();
+    uint64_t start_cycle = g_prefetch_debug_enabled ? get_sys_cnt_aicpu() : 0;
     bool issued = false;
 
     do {
@@ -323,7 +334,9 @@ void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
         if (!prepare_prefetch_channel(&channel_idx, false, false)) {
             break;
         }
-        __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
+        if (g_prefetch_debug_enabled) {
+            __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
+        }
 
         volatile stars_channel_info_t* ch = g_channel_info + channel_idx;
         prefetch_lock(channel_idx);
@@ -339,8 +352,9 @@ void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
 
         uint32_t new_tail = (sq_tail + 1) % sq_depth;
         if (new_tail == sq_head) {
-            uint32_t skipped = __atomic_add_fetch(&g_prefetch_skip_queue_full[channel_idx], 1, __ATOMIC_RELAXED);
-            if (skipped <= 4 || (skipped % 64) == 0) {
+            uint32_t skipped =
+                g_prefetch_debug_enabled ? __atomic_add_fetch(&g_prefetch_skip_queue_full[channel_idx], 1, __ATOMIC_RELAXED) : 0;
+            if (g_prefetch_debug_enabled && (skipped <= 4 || (skipped % 64) == 0)) {
                 DEV_ALWAYS("SDMA prefetch: queue full, skip issue (channel=%d head=%u tail=%u depth=%u skipped=%u)",
                            channel_idx, sq_head, sq_tail, sq_depth, skipped);
             }
@@ -357,9 +371,12 @@ void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
                               static_cast<uint32_t>(size),
                               static_cast<uint16_t>(ch->stream_id),
                               task_id);
-        uint32_t issue_idx = __atomic_add_fetch(&g_prefetch_issue_count, 1, __ATOMIC_RELAXED);
-        __atomic_add_fetch(&g_prefetch_issue_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
-        if (issue_idx <= 8) {
+        uint32_t issue_idx =
+            g_prefetch_debug_enabled ? __atomic_add_fetch(&g_prefetch_issue_count, 1, __ATOMIC_RELAXED) : 0;
+        if (g_prefetch_debug_enabled) {
+            __atomic_add_fetch(&g_prefetch_issue_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
+        }
+        if (g_prefetch_debug_enabled && issue_idx <= 8) {
             DEV_ALWAYS(
                 "SDMA prefetch: issue[%u] channel=%d addr=0x%llx size=%zu sq_head=%u sq_tail=%u new_tail=%u depth=%u stream=%u doorbell=0x%llx",
                 issue_idx, channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(addr), size, sq_head, sq_tail,
@@ -378,10 +395,12 @@ void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
         issued = true;
     } while (false);
 
-    uint64_t elapsed = get_sys_cnt_aicpu() - start_cycle;
-    __atomic_add_fetch(&g_prefetch_attempt_cycles, elapsed, __ATOMIC_RELAXED);
-    if (issued) {
-        __atomic_add_fetch(&g_prefetch_issue_cycles, elapsed, __ATOMIC_RELAXED);
+    if (g_prefetch_debug_enabled) {
+        uint64_t elapsed = get_sys_cnt_aicpu() - start_cycle;
+        __atomic_add_fetch(&g_prefetch_attempt_cycles, elapsed, __ATOMIC_RELAXED);
+        if (issued) {
+            __atomic_add_fetch(&g_prefetch_issue_cycles, elapsed, __ATOMIC_RELAXED);
+        }
     }
 }
 
@@ -396,4 +415,9 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
 bool aicpu_prefetch_available()
 {
     return g_prefetch_enabled;
+}
+
+uint32_t aicpu_prefetch_channel_count()
+{
+    return g_channel_count;
 }
