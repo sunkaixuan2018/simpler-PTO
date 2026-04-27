@@ -138,6 +138,26 @@ vlog() {
     fi
 }
 
+calc_improvement_pct() {
+    local baseline="$1"
+    local sdma="$2"
+    python3 - "$baseline" "$sdma" <<'PY'
+import sys
+
+try:
+    baseline = float(sys.argv[1])
+    sdma = float(sys.argv[2])
+except (ValueError, TypeError):
+    print("-")
+    raise SystemExit(0)
+
+if baseline == 0:
+    print("-")
+else:
+    print(f"{(baseline - sdma) / baseline * 100:.2f}%")
+PY
+}
+
 # ---------------------------------------------------------------------------
 # Derive arch from platform and set examples directory
 # ---------------------------------------------------------------------------
@@ -568,6 +588,15 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             echo "  Device E2E (device log, us): $PROFILE_DEVICE_E2E_LOG"
             echo "  Device E2E (profiling, us): $PROFILE_DEVICE_E2E_PROF"
         done
+        if [[ "$PREFETCH_MODE" == "compare" ]]; then
+            local _base_devlog="${SUMMARY_DEVICE_E2E_LOG["baseline|$_label"]:-"-"}"
+            local _sdma_devlog="${SUMMARY_DEVICE_E2E_LOG["sdma|$_label"]:-"-"}"
+            local _opt_pct="-"
+            if [[ "$_base_devlog" != "-" && "$_sdma_devlog" != "-" ]]; then
+                _opt_pct=$(calc_improvement_pct "$_base_devlog" "$_sdma_devlog")
+            fi
+            echo "  Device E2E (device log) SDMA vs Baseline: $_opt_pct"
+        fi
     }
     if [[ -z "${case_list:-}" ]]; then
         run_one_case "$example" "$KERNELS_DIR" "$GOLDEN"
