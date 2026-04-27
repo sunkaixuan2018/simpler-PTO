@@ -532,7 +532,6 @@ fail_streams:
         aclrtDestroyStream(reinterpret_cast<aclrtStream>(stream));
     }
     g_prefetch_streams.clear();
-    setup_timer.outcome = "failed";
     return nullptr;
 }
 
