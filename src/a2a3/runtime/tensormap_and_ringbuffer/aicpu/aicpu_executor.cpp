@@ -620,6 +620,25 @@ struct AicpuExecutor {
         return channel_idx % static_cast<int>(channel_count);
     }
 
+    uint32_t get_scheduler_prefetch_suppress_window(const PTO2TaskSlotState &slot_state) const {
+        if (slot_state.payload == nullptr) {
+            return prefetch_suppress_window_;
+        }
+        const PTO2TaskPayload &payload = *slot_state.payload;
+        if (payload.tensor_count == 4) {
+            if (payload.scalar_count == 2) {
+                // paged_attention_unroll: currently the most promising case, keep it aggressive.
+                return prefetch_suppress_window_;
+            }
+            if (payload.scalar_count == 4 || payload.scalar_count == 6) {
+                // batch_paged_attention: keep SDMA enabled, but space attempts out more.
+                return prefetch_suppress_window_ >= 7 ? prefetch_suppress_window_ : 7;
+            }
+        }
+        // Generic AIC tasks: retain sparse sampling only.
+        return prefetch_suppress_window_ >= 15 ? prefetch_suppress_window_ : 15;
+    }
+
     bool should_attempt_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
         if (prefetch_debug_enabled_) {
             prefetch_considered_count_.fetch_add(1, std::memory_order_relaxed);
@@ -662,7 +681,8 @@ struct AicpuExecutor {
             return false;
         }
         int suppress_channel_idx = get_scheduler_prefetch_channel_idx(channel_idx);
-        if (prefetch_suppress_window_ > 0 && suppress_channel_idx >= 0 && suppress_channel_idx < PLATFORM_MAX_CORES) {
+        uint32_t scheduler_suppress_window = get_scheduler_prefetch_suppress_window(slot_state);
+        if (scheduler_suppress_window > 0 && suppress_channel_idx >= 0 && suppress_channel_idx < PLATFORM_MAX_CORES) {
             while (true) {
                 uint32_t remaining =
                     prefetch_scheduler_suppress_remaining_[suppress_channel_idx].load(std::memory_order_relaxed);
@@ -1692,10 +1712,12 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                             if (should_attempt_task_prefetch(*slot_state, current_core_id)) {
                                 issue_task_prefetch(*slot_state, current_core_id);
                                 int suppress_channel_idx = get_scheduler_prefetch_channel_idx(current_core_id);
-                                if (prefetch_suppress_window_ > 0 && suppress_channel_idx >= 0 &&
+                                uint32_t scheduler_suppress_window =
+                                    get_scheduler_prefetch_suppress_window(*slot_state);
+                                if (scheduler_suppress_window > 0 && suppress_channel_idx >= 0 &&
                                     suppress_channel_idx < PLATFORM_MAX_CORES) {
                                     prefetch_scheduler_suppress_remaining_[suppress_channel_idx].store(
-                                        prefetch_suppress_window_, std::memory_order_release
+                                        scheduler_suppress_window, std::memory_order_release
                                     );
                                 }
                             }
