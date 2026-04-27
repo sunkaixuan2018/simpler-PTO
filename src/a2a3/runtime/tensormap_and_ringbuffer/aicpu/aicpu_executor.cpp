@@ -633,7 +633,7 @@ struct AicpuExecutor {
                 if (payload.prefetch_issue_bytes <= 16 * 1024) {
                     return prefetch_suppress_window_ >= 7 ? prefetch_suppress_window_ : 7;
                 }
-                return prefetch_suppress_window_ >= 3 ? prefetch_suppress_window_ : 3;
+                return prefetch_suppress_window_ >= 5 ? prefetch_suppress_window_ : 5;
             }
             if (payload.scalar_count == 4 || payload.scalar_count == 6) {
                 // batch_paged_attention: keep SDMA enabled, but space attempts out more.
@@ -706,6 +706,15 @@ struct AicpuExecutor {
             }
         }
         return true;
+    }
+
+    static PTO2TaskSlotState *select_next_task_prefetch_target(PTO2TaskSlotState *const *batch, int got, int bi) {
+        for (int next = bi + 1; next < got; ++next) {
+            if (batch[next] != nullptr) {
+                return batch[next];
+            }
+        }
+        return nullptr;
     }
 
     /**
@@ -1714,11 +1723,13 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                             );
                             slot_state->next_block_idx++;
                             int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
-                            if (should_attempt_task_prefetch(*slot_state, current_core_id)) {
-                                issue_task_prefetch(*slot_state, current_core_id);
+                            PTO2TaskSlotState *prefetch_target = select_next_task_prefetch_target(batch, got, bi);
+                            if (prefetch_target != nullptr &&
+                                should_attempt_task_prefetch(*prefetch_target, current_core_id)) {
+                                issue_task_prefetch(*prefetch_target, current_core_id);
                                 int suppress_channel_idx = get_scheduler_prefetch_channel_idx(current_core_id);
                                 uint32_t scheduler_suppress_window =
-                                    get_scheduler_prefetch_suppress_window(*slot_state);
+                                    get_scheduler_prefetch_suppress_window(*prefetch_target);
                                 if (scheduler_suppress_window > 0 && suppress_channel_idx >= 0 &&
                                     suppress_channel_idx < PLATFORM_MAX_CORES) {
                                     prefetch_scheduler_suppress_remaining_[suppress_channel_idx].store(
