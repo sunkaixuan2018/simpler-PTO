@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from multiprocessing.shared_memory import SharedMemory
 from typing import Optional
 
-from _task_interface import (  # pyright: ignore[reportMissingImports]
+from ._task_interface_compat import (
     CHIP_BOOTSTRAP_MAILBOX_SIZE,
     CONTINUOUS_TENSOR_MAX_DIMS,
     MAILBOX_ERROR_MSG_SIZE,
