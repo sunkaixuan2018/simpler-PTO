@@ -685,55 +685,6 @@ struct AicpuExecutor {
         return plan.valid();
     }
 
-    static bool build_generic_prefetch_plan(const PTO2TaskSlotState &slot_state, PrefetchPlan &plan) {
-        if (slot_state.payload == nullptr || slot_state.task == nullptr) {
-            return false;
-        }
-        const PTO2TaskPayload &payload = *slot_state.payload;
-        const Tensor *best_tensor = nullptr;
-        size_t best_bytes = 0;
-        size_t total_bytes = 0;
-
-        for (int32_t i = 0; i < payload.tensor_count; ++i) {
-            const Tensor &tensor = payload.tensors[i];
-            size_t view_bytes = get_tensor_view_nbytes(tensor);
-            if (view_bytes == 0) {
-                continue;
-            }
-            total_bytes += view_bytes;
-            if (tensor.owner_task_id == slot_state.task->task_id) {
-                continue;
-            }
-            if (best_tensor == nullptr || view_bytes > best_bytes) {
-                best_tensor = &tensor;
-                best_bytes = view_bytes;
-            }
-        }
-
-        if (best_tensor == nullptr) {
-            for (int32_t i = 0; i < payload.tensor_count; ++i) {
-                const Tensor &tensor = payload.tensors[i];
-                size_t view_bytes = get_tensor_view_nbytes(tensor);
-                if (view_bytes == 0) {
-                    continue;
-                }
-                if (best_tensor == nullptr || view_bytes > best_bytes) {
-                    best_tensor = &tensor;
-                    best_bytes = view_bytes;
-                }
-            }
-        }
-
-        if (best_tensor == nullptr || best_bytes == 0) {
-            return false;
-        }
-
-        plan.addr = get_tensor_view_addr(*best_tensor);
-        plan.issue_bytes = best_bytes;
-        plan.filter_bytes = total_bytes;
-        return plan.valid();
-    }
-
     void issue_task_prefetch(const PTO2TaskSlotState &slot_state, int channel_idx) const {
         uint64_t start_cycle = get_sys_cnt_aicpu();
         bool eligible_task = false;
@@ -753,10 +704,8 @@ struct AicpuExecutor {
             }
             PrefetchPlan plan;
             if (!try_build_paged_attention_prefetch_plan(*slot_state.payload, plan)) {
-                if (!build_generic_prefetch_plan(slot_state, plan)) {
-                    prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
-                    break;
-                }
+                prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
+                break;
             }
             if (plan.filter_bytes < prefetch_min_bytes_) {
                 prefetch_skip_below_min_bytes_.fetch_add(1, std::memory_order_relaxed);
