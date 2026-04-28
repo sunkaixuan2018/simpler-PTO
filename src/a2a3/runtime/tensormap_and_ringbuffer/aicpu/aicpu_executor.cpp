@@ -771,6 +771,16 @@ struct AicpuExecutor {
         }
     }
 
+    void mark_scheduler_prefetch_suppressed(int prefetch_core_id, const PTO2TaskSlotState &prefetch_target) const {
+        int suppress_channel_idx = get_scheduler_prefetch_channel_idx(prefetch_core_id);
+        uint32_t scheduler_suppress_window = get_scheduler_prefetch_suppress_window(prefetch_target);
+        if (scheduler_suppress_window > 0 && suppress_channel_idx >= 0 && suppress_channel_idx < PLATFORM_MAX_CORES) {
+            prefetch_scheduler_suppress_remaining_[suppress_channel_idx].store(
+                scheduler_suppress_window, std::memory_order_release
+            );
+        }
+    }
+
     /**
      * Build per-core dispatch payload: copy tensor pointers and scalars into
      * the per-core args[] array, then populate SPMD local context at the tail.
@@ -1770,35 +1780,40 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                     do {
                         auto current_valid_cluster_offset = valid_cluster_states.pop_first();
                         if (first_block) {
-                            dispatch_block_to_cluster(
-                                runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
-#if PTO2_PROFILING
-                                ,
-                                profiling_enabled, phase_dispatch_count
-#endif
-                            );
-                            slot_state->next_block_idx++;
                             int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
-                            PTO2TaskSlotState *prefetch_target = slot_state;
-                            int prefetch_core_id = current_core_id;
                             if (should_use_next_task_prefetch(*slot_state)) {
+                                dispatch_block_to_cluster(
+                                    runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
+#if PTO2_PROFILING
+                                    ,
+                                    profiling_enabled, phase_dispatch_count
+#endif
+                                );
+                                slot_state->next_block_idx++;
+                                PTO2TaskSlotState *prefetch_target = slot_state;
+                                int prefetch_core_id = current_core_id;
                                 auto next_prefetch_states = valid_cluster_states;
                                 prefetch_target = select_next_task_prefetch_target(batch, got, bi);
                                 prefetch_core_id =
                                     select_next_task_prefetch_core_id(tracker, shape, next_prefetch_states);
-                            }
-                            if (prefetch_target != nullptr && prefetch_core_id >= 0 &&
-                                should_attempt_task_prefetch(*prefetch_target, prefetch_core_id)) {
-                                issue_task_prefetch(*prefetch_target, prefetch_core_id);
-                                int suppress_channel_idx = get_scheduler_prefetch_channel_idx(prefetch_core_id);
-                                uint32_t scheduler_suppress_window =
-                                    get_scheduler_prefetch_suppress_window(*prefetch_target);
-                                if (scheduler_suppress_window > 0 && suppress_channel_idx >= 0 &&
-                                    suppress_channel_idx < PLATFORM_MAX_CORES) {
-                                    prefetch_scheduler_suppress_remaining_[suppress_channel_idx].store(
-                                        scheduler_suppress_window, std::memory_order_release
-                                    );
+                                if (prefetch_target != nullptr && prefetch_core_id >= 0 &&
+                                    should_attempt_task_prefetch(*prefetch_target, prefetch_core_id)) {
+                                    issue_task_prefetch(*prefetch_target, prefetch_core_id);
+                                    mark_scheduler_prefetch_suppressed(prefetch_core_id, *prefetch_target);
                                 }
+                            } else {
+                                if (should_attempt_task_prefetch(*slot_state, current_core_id)) {
+                                    issue_task_prefetch(*slot_state, current_core_id);
+                                    mark_scheduler_prefetch_suppressed(current_core_id, *slot_state);
+                                }
+                                dispatch_block_to_cluster(
+                                    runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
+#if PTO2_PROFILING
+                                    ,
+                                    profiling_enabled, phase_dispatch_count
+#endif
+                                );
+                                slot_state->next_block_idx++;
                             }
                             first_block = false;
                         } else {
