@@ -746,7 +746,7 @@ struct AicpuExecutor {
             return false;
         }
         const PTO2TaskPayload &payload = *slot_state.payload;
-        return payload.tensor_count == 4 && (payload.scalar_count == 2 || payload.scalar_count == 4 || payload.scalar_count == 6);
+        return payload.prefetch_region_count > 1;
     }
 
     static int select_next_task_prefetch_core_id(
