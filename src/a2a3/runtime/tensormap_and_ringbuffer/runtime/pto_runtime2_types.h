@@ -56,7 +56,7 @@
 #define PTO2_TENSORMAP_PROFILING 0
 #endif
 
-constexpr int32_t PTO2_PREFETCH_MAX_REGIONS = 4;
+constexpr int PTO2_PREFETCH_MAX_REGIONS = 4;
 
 #if PTO2_ORCH_PROFILING && !PTO2_PROFILING
 #error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
@@ -371,7 +371,7 @@ struct PTO2TaskPayload {
     uint64_t scalars[MAX_SCALAR_ARGS];
     // === Cold prefetch metadata (scheduler reads only when SDMA mode is on) ===
     uint32_t prefetch_region_count{0};
-    uint32_t prefetch_region_pad{0};
+    uint32_t _prefetch_pad{0};
     uint64_t prefetch_filter_bytes{0};
     uint64_t prefetch_region_addrs[PTO2_PREFETCH_MAX_REGIONS]{};
     uint64_t prefetch_region_bytes[PTO2_PREFETCH_MAX_REGIONS]{};
@@ -395,7 +395,7 @@ struct PTO2TaskPayload {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
         prefetch_region_count = 0;
-        prefetch_region_pad = 0;
+        _prefetch_pad = 0;
         prefetch_filter_bytes = 0;
         memset(prefetch_region_addrs, 0, sizeof(prefetch_region_addrs));
         memset(prefetch_region_bytes, 0, sizeof(prefetch_region_bytes));
@@ -444,9 +444,7 @@ struct PTO2TaskPayload {
         }
         if (prefetch_region_count > 0) {
             uint32_t last = prefetch_region_count - 1;
-            uint64_t last_addr = prefetch_region_addrs[last];
-            uint64_t last_bytes = prefetch_region_bytes[last];
-            if (last_addr + last_bytes == addr) {
+            if (prefetch_region_addrs[last] + prefetch_region_bytes[last] == addr) {
                 prefetch_region_bytes[last] += bytes;
                 return;
             }
@@ -479,7 +477,7 @@ struct PTO2TaskPayload {
         uint64_t block_size = 0;
         uint64_t logical_blocks = 0;
         uint64_t bt_index = 0;
-        uint64_t batch_block_num = 0;
+        uint64_t bt_stride = 1;
 
         if (scalar_count == 2) {
             const uint64_t n_blocks = scalars[0];
@@ -498,6 +496,7 @@ struct PTO2TaskPayload {
             }
             logical_blocks = n_blocks;
             bt_index = bt_offset;
+            bt_stride = 1;
         } else if (scalar_count == 6) {
             const uint64_t batch_count = scalars[0];
             const uint64_t block_idx = scalars[1];
@@ -509,8 +508,8 @@ struct PTO2TaskPayload {
             }
             block_size = tensor3.shapes[1];  // batch_paged_attention QK
             logical_blocks = batch_count;
-            batch_block_num = block_num;
             bt_index = batch_start * block_num + block_idx;
+            bt_stride = block_num;
         } else if (scalar_count == 4) {
             const uint64_t batch_count = scalars[0];
             const uint64_t block_idx = scalars[1];
@@ -522,8 +521,8 @@ struct PTO2TaskPayload {
             }
             block_size = tensor0.shapes[1];  // batch_paged_attention PV
             logical_blocks = batch_count;
-            batch_block_num = block_num;
             bt_index = batch_start * block_num + block_idx;
+            bt_stride = block_num;
         } else {
             return false;
         }
@@ -534,21 +533,9 @@ struct PTO2TaskPayload {
 
         const uint64_t issue_bytes = block_size * head_dim * elem_size;
         prefetch_filter_bytes = logical_blocks * issue_bytes;
-        uint64_t limit = logical_blocks;
-        if (limit > PTO2_PREFETCH_MAX_REGIONS) {
-            limit = PTO2_PREFETCH_MAX_REGIONS;
-        }
+        uint64_t limit = logical_blocks < PTO2_PREFETCH_MAX_REGIONS ? logical_blocks : PTO2_PREFETCH_MAX_REGIONS;
         for (uint64_t i = 0; i < limit; ++i) {
-            int32_t phys_block = -1;
-            if (scalar_count == 2) {
-                phys_block = bt[bt_index + i];
-            } else if (scalar_count == 6) {
-                uint64_t cur_bt_index = bt_index + i * batch_block_num;
-                phys_block = bt[cur_bt_index];
-            } else if (scalar_count == 4) {
-                uint64_t cur_bt_index = bt_index + i * batch_block_num;
-                phys_block = bt[cur_bt_index];
-            }
+            int32_t phys_block = bt[bt_index + i * bt_stride];
             if (phys_block < 0) {
                 continue;
             }

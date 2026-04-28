@@ -590,12 +590,12 @@ struct AicpuExecutor {
             if (!aicpu_prefetch_reserve_channel(channel_idx)) {
                 break;
             }
-            uint32_t regions_issued = 0;
-            uint64_t bytes_issued = 0;
             uint32_t region_limit = payload.prefetch_region_count;
             if (region_limit > prefetch_max_regions_) {
                 region_limit = prefetch_max_regions_;
             }
+            uint32_t regions_issued = 0;
+            uint64_t bytes_issued = 0;
             for (uint32_t i = 0; i < region_limit; ++i) {
                 uint64_t region_addr = payload.prefetch_region_addrs[i];
                 uint64_t region_bytes = payload.prefetch_region_bytes[i];
@@ -739,6 +739,14 @@ struct AicpuExecutor {
             }
         }
         return nullptr;
+    }
+
+    static bool should_use_next_task_prefetch(const PTO2TaskSlotState &slot_state) {
+        if (slot_state.payload == nullptr) {
+            return false;
+        }
+        const PTO2TaskPayload &payload = *slot_state.payload;
+        return payload.tensor_count == 4 && (payload.scalar_count == 2 || payload.scalar_count == 4 || payload.scalar_count == 6);
     }
 
     static int select_next_task_prefetch_core_id(
@@ -1762,7 +1770,6 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
                     do {
                         auto current_valid_cluster_offset = valid_cluster_states.pop_first();
                         if (first_block) {
-                            auto next_prefetch_states = valid_cluster_states;
                             dispatch_block_to_cluster(
                                 runtime, thread_idx, current_valid_cluster_offset, *slot_state, shape
 #if PTO2_PROFILING
@@ -1771,9 +1778,15 @@ int32_t AicpuExecutor::resolve_and_dispatch_pto2(Runtime *runtime, int32_t threa
 #endif
                             );
                             slot_state->next_block_idx++;
-                            PTO2TaskSlotState *prefetch_target = select_next_task_prefetch_target(batch, got, bi);
-                            int prefetch_core_id =
-                                select_next_task_prefetch_core_id(tracker, shape, next_prefetch_states);
+                            int current_core_id = tracker.get_core_id_by_offset(current_valid_cluster_offset);
+                            PTO2TaskSlotState *prefetch_target = slot_state;
+                            int prefetch_core_id = current_core_id;
+                            if (should_use_next_task_prefetch(*slot_state)) {
+                                auto next_prefetch_states = valid_cluster_states;
+                                prefetch_target = select_next_task_prefetch_target(batch, got, bi);
+                                prefetch_core_id =
+                                    select_next_task_prefetch_core_id(tracker, shape, next_prefetch_states);
+                            }
                             if (prefetch_target != nullptr && prefetch_core_id >= 0 &&
                                 should_attempt_task_prefetch(*prefetch_target, prefetch_core_id)) {
                                 issue_task_prefetch(*prefetch_target, prefetch_core_id);
