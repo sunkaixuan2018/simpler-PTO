@@ -37,6 +37,8 @@ Runtime::Runtime() {
     prefetch_mode = Runtime::PREFETCH_MODE_TWOSLOT;
     sdma_prefetch_min_bytes = 256 * 1024;
     sdma_prefetch_suppress_window = 2;
+    sdma_prefetch_max_regions = 2;
+    sdma_prefetch_budget_bytes = 256 * 1024;
     sdma_prefetch_debug = false;
     pto2_task_window_size = 0;
     pto2_heap_size = 0;

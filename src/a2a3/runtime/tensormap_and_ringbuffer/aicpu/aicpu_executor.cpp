@@ -350,6 +350,8 @@ struct AicpuExecutor {
     uint32_t prefetch_mode_{Runtime::PREFETCH_MODE_TWOSLOT};
     size_t prefetch_min_bytes_{256 * 1024};
     uint32_t prefetch_suppress_window_{2};
+    uint32_t prefetch_max_regions_{2};
+    uint64_t prefetch_budget_bytes_{256 * 1024};
     bool prefetch_debug_enabled_{false};
     mutable std::atomic<uint64_t> prefetch_considered_count_{0};
     mutable std::atomic<uint64_t> prefetch_task_count_{0};
@@ -588,16 +590,37 @@ struct AicpuExecutor {
             if (!aicpu_prefetch_reserve_channel(channel_idx)) {
                 break;
             }
+            uint32_t regions_issued = 0;
+            uint64_t bytes_issued = 0;
+            uint32_t region_limit = payload.prefetch_region_count;
+            if (region_limit > prefetch_max_regions_) {
+                region_limit = prefetch_max_regions_;
+            }
+            for (uint32_t i = 0; i < region_limit; ++i) {
+                uint64_t region_addr = payload.prefetch_region_addrs[i];
+                uint64_t region_bytes = payload.prefetch_region_bytes[i];
+                if (region_addr == 0 || region_bytes == 0) {
+                    continue;
+                }
+                if (bytes_issued > 0 && bytes_issued + region_bytes > prefetch_budget_bytes_) {
+                    break;
+                }
+                aicpu_prefetch_issue_reserved(
+                    reinterpret_cast<void *>(region_addr),
+                    static_cast<size_t>(region_bytes),
+                    channel_idx
+                );
+                regions_issued++;
+                bytes_issued += region_bytes;
+            }
+            if (regions_issued == 0) {
+                break;
+            }
             if (prefetch_debug_enabled_) {
                 prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
-                prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
-                prefetch_total_bytes_.fetch_add(payload.prefetch_issue_bytes, std::memory_order_relaxed);
+                prefetch_tensor_count_.fetch_add(regions_issued, std::memory_order_relaxed);
+                prefetch_total_bytes_.fetch_add(bytes_issued, std::memory_order_relaxed);
             }
-            aicpu_prefetch_issue_reserved(
-                reinterpret_cast<void *>(payload.prefetch_addr),
-                static_cast<size_t>(payload.prefetch_issue_bytes),
-                channel_idx
-            );
         } while (false);
 
         if (prefetch_debug_enabled_) {
@@ -625,12 +648,13 @@ struct AicpuExecutor {
             return prefetch_suppress_window_;
         }
         const PTO2TaskPayload &payload = *slot_state.payload;
+        uint64_t first_region_bytes = payload.prefetch_region_count > 0 ? payload.prefetch_region_bytes[0] : 0;
         if (payload.tensor_count == 4) {
             if (payload.scalar_count == 2) {
                 // paged_attention_unroll:
                 //   - 32KB+ block prefetch (Case1-like): stay moderately aggressive
                 //   - 16KB block prefetch (Case2-like): space attempts out more
-                if (payload.prefetch_issue_bytes <= 16 * 1024) {
+                if (first_region_bytes <= 16 * 1024) {
                     return prefetch_suppress_window_ >= 7 ? prefetch_suppress_window_ : 7;
                 }
                 return prefetch_suppress_window_ >= 5 ? prefetch_suppress_window_ : 5;
@@ -673,7 +697,7 @@ struct AicpuExecutor {
             return false;
         }
         const PTO2TaskPayload &payload = *slot_state.payload;
-        if (payload.prefetch_addr == 0 || payload.prefetch_issue_bytes == 0 || payload.prefetch_filter_bytes == 0) {
+        if (payload.prefetch_region_count == 0 || payload.prefetch_filter_bytes == 0) {
             if (prefetch_debug_enabled_) {
                 prefetch_skip_no_valid_tensor_.fetch_add(1, std::memory_order_relaxed);
             }
@@ -1358,6 +1382,8 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     prefetch_mode_ = runtime->prefetch_mode;
     prefetch_min_bytes_ = static_cast<size_t>(runtime->sdma_prefetch_min_bytes);
     prefetch_suppress_window_ = runtime->sdma_prefetch_suppress_window;
+    prefetch_max_regions_ = runtime->sdma_prefetch_max_regions;
+    prefetch_budget_bytes_ = runtime->sdma_prefetch_budget_bytes;
     prefetch_debug_enabled_ = runtime->sdma_prefetch_debug;
     prefetch_considered_count_.store(0, std::memory_order_relaxed);
     prefetch_task_count_.store(0, std::memory_order_relaxed);

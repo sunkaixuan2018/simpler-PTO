@@ -56,6 +56,8 @@
 #define PTO2_TENSORMAP_PROFILING 0
 #endif
 
+constexpr int32_t PTO2_PREFETCH_MAX_REGIONS = 4;
+
 #if PTO2_ORCH_PROFILING && !PTO2_PROFILING
 #error "PTO2_ORCH_PROFILING requires PTO2_PROFILING=1"
 #endif
@@ -368,9 +370,11 @@ struct PTO2TaskPayload {
     // === Cache lines 35-50 (1024B) — scalars ===
     uint64_t scalars[MAX_SCALAR_ARGS];
     // === Cold prefetch metadata (scheduler reads only when SDMA mode is on) ===
-    uint64_t prefetch_addr{0};
-    uint64_t prefetch_issue_bytes{0};
+    uint32_t prefetch_region_count{0};
+    uint32_t prefetch_region_pad{0};
     uint64_t prefetch_filter_bytes{0};
+    uint64_t prefetch_region_addrs[PTO2_PREFETCH_MAX_REGIONS]{};
+    uint64_t prefetch_region_bytes[PTO2_PREFETCH_MAX_REGIONS]{};
 
     // Layout verification (size checks that don't need offsetof).
     static_assert(sizeof(Tensor) == 128, "Tensor must be 2 cache lines");
@@ -390,9 +394,11 @@ struct PTO2TaskPayload {
     init(const Arg &args, TaskOutputTensors &result, void *base_addr, uint64_t offsets[], uint64_t buffer_sizes[]) {
         tensor_count = args.tensor_count();
         scalar_count = args.scalar_count();
-        prefetch_addr = 0;
-        prefetch_issue_bytes = 0;
+        prefetch_region_count = 0;
+        prefetch_region_pad = 0;
         prefetch_filter_bytes = 0;
+        memset(prefetch_region_addrs, 0, sizeof(prefetch_region_addrs));
+        memset(prefetch_region_bytes, 0, sizeof(prefetch_region_bytes));
 
         // int32_t out_idx = 0;
         for (int32_t i = 0; i < args.tensor_count(); i++) {
@@ -432,6 +438,27 @@ struct PTO2TaskPayload {
         return tag == TensorArgType::INPUT || tag == TensorArgType::INOUT || tag == TensorArgType::NO_DEP;
     }
 
+    void append_prefetch_region(uint64_t addr, uint64_t bytes) {
+        if (addr == 0 || bytes == 0) {
+            return;
+        }
+        if (prefetch_region_count > 0) {
+            uint32_t last = prefetch_region_count - 1;
+            uint64_t last_addr = prefetch_region_addrs[last];
+            uint64_t last_bytes = prefetch_region_bytes[last];
+            if (last_addr + last_bytes == addr) {
+                prefetch_region_bytes[last] += bytes;
+                return;
+            }
+        }
+        if (prefetch_region_count >= PTO2_PREFETCH_MAX_REGIONS) {
+            return;
+        }
+        prefetch_region_addrs[prefetch_region_count] = addr;
+        prefetch_region_bytes[prefetch_region_count] = bytes;
+        prefetch_region_count++;
+    }
+
     bool init_paged_attention_prefetch_metadata() {
         if (tensor_count != 4) {
             return false;
@@ -452,6 +479,7 @@ struct PTO2TaskPayload {
         uint64_t block_size = 0;
         uint64_t logical_blocks = 0;
         uint64_t bt_index = 0;
+        uint64_t batch_block_num = 0;
 
         if (scalar_count == 2) {
             const uint64_t n_blocks = scalars[0];
@@ -481,6 +509,7 @@ struct PTO2TaskPayload {
             }
             block_size = tensor3.shapes[1];  // batch_paged_attention QK
             logical_blocks = batch_count;
+            batch_block_num = block_num;
             bt_index = batch_start * block_num + block_idx;
         } else if (scalar_count == 4) {
             const uint64_t batch_count = scalars[0];
@@ -493,6 +522,7 @@ struct PTO2TaskPayload {
             }
             block_size = tensor0.shapes[1];  // batch_paged_attention PV
             logical_blocks = batch_count;
+            batch_block_num = block_num;
             bt_index = batch_start * block_num + block_idx;
         } else {
             return false;
@@ -502,16 +532,30 @@ struct PTO2TaskPayload {
             return false;
         }
 
-        int32_t phys_block = bt[bt_index];
-        if (phys_block < 0) {
-            return false;
-        }
-
         const uint64_t issue_bytes = block_size * head_dim * elem_size;
-        prefetch_addr = tensor_view_addr(cache) + static_cast<uint64_t>(phys_block) * issue_bytes;
-        prefetch_issue_bytes = issue_bytes;
         prefetch_filter_bytes = logical_blocks * issue_bytes;
-        return prefetch_addr != 0 && prefetch_issue_bytes > 0 && prefetch_filter_bytes >= prefetch_issue_bytes;
+        uint64_t limit = logical_blocks;
+        if (limit > PTO2_PREFETCH_MAX_REGIONS) {
+            limit = PTO2_PREFETCH_MAX_REGIONS;
+        }
+        for (uint64_t i = 0; i < limit; ++i) {
+            int32_t phys_block = -1;
+            if (scalar_count == 2) {
+                phys_block = bt[bt_index + i];
+            } else if (scalar_count == 6) {
+                uint64_t cur_bt_index = bt_index + i * batch_block_num;
+                phys_block = bt[cur_bt_index];
+            } else if (scalar_count == 4) {
+                uint64_t cur_bt_index = bt_index + i * batch_block_num;
+                phys_block = bt[cur_bt_index];
+            }
+            if (phys_block < 0) {
+                continue;
+            }
+            uint64_t addr = tensor_view_addr(cache) + static_cast<uint64_t>(phys_block) * issue_bytes;
+            append_prefetch_region(addr, issue_bytes);
+        }
+        return prefetch_region_count > 0;
     }
 
     void init_generic_prefetch_metadata(const Arg &args) {
@@ -540,8 +584,7 @@ struct PTO2TaskPayload {
             return;
         }
 
-        prefetch_addr = tensor_view_addr(*best_tensor);
-        prefetch_issue_bytes = best_bytes;
+        append_prefetch_region(tensor_view_addr(*best_tensor), best_bytes);
         prefetch_filter_bytes = total_readable_bytes;
     }
 

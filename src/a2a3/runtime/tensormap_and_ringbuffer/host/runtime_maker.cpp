@@ -146,6 +146,36 @@ static uint32_t parse_prefetch_suppress_window() {
     return static_cast<uint32_t>(value);
 }
 
+static uint32_t parse_prefetch_max_regions() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_MAX_REGIONS");
+    if (env == nullptr || *env == '\0') {
+        return 2;
+    }
+    char *endptr = nullptr;
+    errno = 0;
+    unsigned long value = strtoul(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0' || value == 0) {
+        LOG_WARN("PTO_SDMA_PREFETCH_MAX_REGIONS=%s invalid, using default %u", env, 2u);
+        return 2;
+    }
+    return static_cast<uint32_t>(value);
+}
+
+static uint64_t parse_prefetch_budget_bytes() {
+    const char *env = std::getenv("PTO_SDMA_PREFETCH_BUDGET_BYTES");
+    if (env == nullptr || *env == '\0') {
+        return 256 * 1024;
+    }
+    char *endptr = nullptr;
+    errno = 0;
+    uint64_t value = strtoull(env, &endptr, 10);
+    if (errno == ERANGE || endptr == env || *endptr != '\0' || value == 0) {
+        LOG_WARN("PTO_SDMA_PREFETCH_BUDGET_BYTES=%s invalid, using default %u", env, 256 * 1024);
+        return 256 * 1024;
+    }
+    return value;
+}
+
 static bool parse_prefetch_debug() {
     const char *env = std::getenv("PTO_SDMA_PREFETCH_DEBUG");
     if (env == nullptr || *env == '\0') {
@@ -296,10 +326,14 @@ extern "C" int init_runtime_impl(Runtime *runtime, const ChipCallable *callable,
     runtime->prefetch_mode = parse_prefetch_mode();
     runtime->sdma_prefetch_min_bytes = parse_prefetch_min_bytes();
     runtime->sdma_prefetch_suppress_window = parse_prefetch_suppress_window();
+    runtime->sdma_prefetch_max_regions = parse_prefetch_max_regions();
+    runtime->sdma_prefetch_budget_bytes = parse_prefetch_budget_bytes();
     runtime->sdma_prefetch_debug = parse_prefetch_debug();
     LOG_INFO("Prefetch mode: %s", prefetch_mode_name(runtime->prefetch_mode));
     LOG_INFO("SDMA prefetch min bytes: %" PRIu64, runtime->sdma_prefetch_min_bytes);
     LOG_INFO("SDMA prefetch suppress window: %u", runtime->sdma_prefetch_suppress_window);
+    LOG_INFO("SDMA prefetch max regions: %u", runtime->sdma_prefetch_max_regions);
+    LOG_INFO("SDMA prefetch budget bytes: %" PRIu64, runtime->sdma_prefetch_budget_bytes);
     LOG_INFO("SDMA prefetch debug: %s", runtime->sdma_prefetch_debug ? "on" : "off");
 
     // Read orchestrator-to-scheduler transition flag from environment
