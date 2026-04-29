@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Benchmark wrapper: run examples on hardware and summarize profiling metrics.
+# Benchmark wrapper: run examples on hardware and summarize profiling spans plus device-log averaged E2E.
 
 set -euo pipefail
 
@@ -45,6 +45,7 @@ RUNTIME=tensormap_and_ringbuffer
 VERBOSE=0
 PREFETCH_MODE=compare
 EXTRA_ARGS=()
+PROFILE_SAMPLE_ROUNDS=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -74,7 +75,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         --help|-h)
             cat <<'USAGE'
-benchmark_rounds.sh — run all examples and report per-round timing from device logs
+benchmark_rounds.sh — run all examples and report profiling spans plus device-log averaged E2E
 
 Usage:
   ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [--prefetch-mode <mode>] [-v]
@@ -94,10 +95,10 @@ Edit the EXAMPLE_CASES map at the top of this script to control which
 examples and cases to benchmark.
 
 Output:
-  AICore Exec (host profiling derived earliest AICore start to latest AICore end).
-  AICPU Dispatch->Finish (profiling derived earliest dispatch to latest finish).
-  Device E2E (device log derived earliest orch/sched start to latest orch/sched end).
-  Device E2E (profiling derived earliest orch/sched/task start to latest orch/sched/task end).
+  AICore Exec (profiling derived earliest AICore start to latest AICore end; single run with --enable-profiling).
+  AICPU Dispatch->Finish (profiling derived earliest dispatch to latest finish; single run with --enable-profiling).
+  Device E2E (profiling) (profiling derived earliest orch/sched/task start to latest orch/sched/task end; single run with --enable-profiling).
+  Device E2E Avg (device log) (average of per-round E2E from a separate non-profiling run using --rounds).
 USAGE
             exit 0
             ;;
@@ -473,28 +474,27 @@ PROFILE_AICORE_EXEC="-"
 PROFILE_AICPU_EXEC="-"
 PROFILE_DEVICE_E2E_LOG="-"
 PROFILE_DEVICE_E2E_PROF="-"
-run_profile_once() {
+run_profiling_metrics_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
         env "PTO_SDMA_PREFETCH_MODE=$mode"
         python3 "$RUN_EXAMPLE"
         -k "$kernels_dir" -g "$golden"
         -p "$PLATFORM" -d "$DEVICE_ID"
-        -n "$ROUNDS" --skip-golden --enable-profiling
+        -n "$PROFILE_SAMPLE_ROUNDS" --skip-golden --enable-profiling
     )
     if [[ -n "$case_name" ]]; then
         profile_cmd+=(--case "$case_name")
     fi
     profile_cmd+=("${EXTRA_ARGS[@]}")
 
-    local pre_run_logs pre_run_perf_jsons profile_tmp profile_output profile_rc=0
-    pre_run_logs=$(list_device_logs)
+    local pre_run_perf_jsons profile_tmp profile_output profile_rc=0
     pre_run_perf_jsons=$(list_perf_jsons)
     profile_tmp=$(mktemp)
     "${profile_cmd[@]}" >"$profile_tmp" 2>&1 || profile_rc=$?
     profile_output=$(<"$profile_tmp")
     rm -f "$profile_tmp"
-    PROFILE_AICORE_EXEC="-"; PROFILE_AICPU_EXEC="-"; PROFILE_DEVICE_E2E_LOG="-"; PROFILE_DEVICE_E2E_PROF="-"
+    PROFILE_AICORE_EXEC="-"; PROFILE_AICPU_EXEC="-"; PROFILE_DEVICE_E2E_PROF="-"
     if [[ $profile_rc -ne 0 ]]; then return 1; fi
     local perf_json perf_metrics
     if perf_json=$(find_new_perf_json "$pre_run_perf_jsons"); then
@@ -517,12 +517,55 @@ run_profile_once() {
         parse_dispatch_finish_fallback "$profile_output" >/dev/null \
             && PROFILE_AICPU_EXEC=$(parse_dispatch_finish_fallback "$profile_output")
     fi
+    [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && {
+        echo "===== profiling run (mode=$mode case=${case_name:-DEFAULT} rounds=$PROFILE_SAMPLE_ROUNDS) =====" >> "$VERBOSE_LOG"
+        echo "$profile_output" >> "$VERBOSE_LOG"
+    }
+    return 0
+}
+
+run_device_log_rounds_once() {
+    local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
+    local device_log_cmd=(
+        env "PTO_SDMA_PREFETCH_MODE=$mode"
+        python3 "$RUN_EXAMPLE"
+        -k "$kernels_dir" -g "$golden"
+        -p "$PLATFORM" -d "$DEVICE_ID"
+        -n "$ROUNDS" --skip-golden
+    )
+    if [[ -n "$case_name" ]]; then
+        device_log_cmd+=(--case "$case_name")
+    fi
+    device_log_cmd+=("${EXTRA_ARGS[@]}")
+
+    local pre_run_logs device_tmp device_output device_rc=0
+    pre_run_logs=$(list_device_logs)
+    device_tmp=$(mktemp)
+    "${device_log_cmd[@]}" >"$device_tmp" 2>&1 || device_rc=$?
+    device_output=$(<"$device_tmp")
+    rm -f "$device_tmp"
+    PROFILE_DEVICE_E2E_LOG="-"
+    if [[ $device_rc -ne 0 ]]; then return 1; fi
     local device_log
     if device_log=$(find_new_device_log "$pre_run_logs"); then
         vlog "Resolved device log: $device_log"
         parse_device_e2e_avg "$device_log" >/dev/null && PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log")
     fi
-    [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
+    [[ -n "$VERBOSE_LOG" && -n "$device_output" ]] && {
+        echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) =====" >> "$VERBOSE_LOG"
+        echo "$device_output" >> "$VERBOSE_LOG"
+    }
+    return 0
+}
+
+run_benchmark_once() {
+    local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
+    PROFILE_AICORE_EXEC="-"
+    PROFILE_AICPU_EXEC="-"
+    PROFILE_DEVICE_E2E_PROF="-"
+    PROFILE_DEVICE_E2E_LOG="-"
+    run_profiling_metrics_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
+    run_device_log_rounds_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
     return 0
 }
 
@@ -544,9 +587,8 @@ echo ""
 echo "Runtime: $RUNTIME"
 echo "Tests dir: $EXAMPLES_DIR"
 echo "Prefetch modes: ${RUN_MODES[*]}"
-if (( ROUNDS > 1 )); then
-    echo "Note: profiling-derived metrics reflect the first profiled round; device-log E2E is averaged across all rounds."
-fi
+echo "Profiling metrics: 1 round with --enable-profiling"
+echo "Device-log E2E Avg: $ROUNDS round(s) without --enable-profiling"
 
 for example in "${EXAMPLE_ORDER[@]}"; do
     case_list="${EXAMPLE_CASES[$example]:-}"
@@ -573,7 +615,7 @@ for example in "${EXAMPLE_ORDER[@]}"; do
         if [[ -n "$_case" ]]; then echo "  ---- $_case ----"; fi
         for mode in "${RUN_MODES[@]}"; do
             echo "  Mode: $mode"
-            if run_profile_once "$mode" "$_kernels" "$_golden" "$_case"; then
+            if run_benchmark_once "$mode" "$_kernels" "$_golden" "$_case"; then
                 ((PASS++)) || true
             else
                 ((FAIL++)) || true
@@ -583,10 +625,10 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             SUMMARY_AICPU_EXEC["$mode|$_label"]="$PROFILE_AICPU_EXEC"
             SUMMARY_DEVICE_E2E_LOG["$mode|$_label"]="$PROFILE_DEVICE_E2E_LOG"
             SUMMARY_DEVICE_E2E_PROF["$mode|$_label"]="$PROFILE_DEVICE_E2E_PROF"
-            echo "  AICore Exec (us): $PROFILE_AICORE_EXEC"
-            echo "  AICPU Dispatch->Finish (us): $PROFILE_AICPU_EXEC"
-            echo "  Device E2E (device log, us): $PROFILE_DEVICE_E2E_LOG"
-            echo "  Device E2E (profiling, us): $PROFILE_DEVICE_E2E_PROF"
+            echo "  AICore Exec (profiling, single-run, us): $PROFILE_AICORE_EXEC"
+            echo "  AICPU Dispatch->Finish (profiling, single-run, us): $PROFILE_AICPU_EXEC"
+            echo "  Device E2E (profiling, single-run, us): $PROFILE_DEVICE_E2E_PROF"
+            echo "  Device E2E Avg (device log, ${ROUNDS} round(s), us): $PROFILE_DEVICE_E2E_LOG"
         done
         if [[ "$PREFETCH_MODE" == "compare" ]]; then
             local _base_devlog="${SUMMARY_DEVICE_E2E_LOG["baseline|$_label"]:-"-"}"
@@ -595,7 +637,7 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             if [[ "$_base_devlog" != "-" && "$_sdma_devlog" != "-" ]]; then
                 _opt_pct=$(calc_improvement_pct "$_base_devlog" "$_sdma_devlog")
             fi
-            echo "  Device E2E (device log) SDMA vs Baseline: $_opt_pct"
+            echo "  Device E2E Avg (device log) SDMA vs Baseline: $_opt_pct"
         fi
     }
     if [[ -z "${case_list:-}" ]]; then
@@ -609,33 +651,72 @@ for example in "${EXAMPLE_ORDER[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# Performance Summary Table
+# Profiling Summary Table
 # ---------------------------------------------------------------------------
 if [[ ${#SUMMARY_NAMES[@]} -gt 0 ]]; then
     echo ""
     echo "================================================================"
-    echo "  Performance Summary ($RUNTIME)"
+    echo "  Profiling Summary ($RUNTIME)"
     echo "================================================================"
     echo ""
 
     if [[ "$PREFETCH_MODE" == "compare" ]]; then
-        _hdr=$(printf "  %-40s  %20s  %20s  %18s  %18s  %20s  %20s  %21s  %21s" "Example" "Baseline AICore Exec" "SDMA AICore Exec" "Base AICPU D->F" "SDMA AICPU D->F" "Base E2E(devlog)" "SDMA E2E(devlog)" "Base E2E(profiling)" "SDMA E2E(profiling)")
-        _sep=$(printf "  %-40s  %20s  %20s  %18s  %18s  %20s  %20s  %21s  %21s" "----------------------------------------" "--------------------" "--------------------" "------------------" "------------------" "--------------------" "--------------------" "---------------------" "---------------------")
+        _hdr=$(printf "  %-40s  %20s  %20s  %18s  %18s  %21s  %21s" "Example" "Baseline AICore Exec" "SDMA AICore Exec" "Base AICPU D->F" "SDMA AICPU D->F" "Base E2E(profiling)" "SDMA E2E(profiling)")
+        _sep=$(printf "  %-40s  %20s  %20s  %18s  %18s  %21s  %21s" "----------------------------------------" "--------------------" "--------------------" "------------------" "------------------" "---------------------" "---------------------")
         echo "$_hdr"; echo "$_sep"
         for _i in "${!SUMMARY_NAMES[@]}"; do
             _label="${SUMMARY_NAMES[$_i]}"
-            _row=$(printf "  %-40s  %20s  %20s  %18s  %18s  %20s  %20s  %21s  %21s" "$_label" "${SUMMARY_AICORE_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AICORE_EXEC["sdma|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["sdma|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_LOG["baseline|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_LOG["sdma|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["baseline|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["sdma|$_label"]:-"-"}")
+            _row=$(printf "  %-40s  %20s  %20s  %18s  %18s  %21s  %21s" "$_label" "${SUMMARY_AICORE_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AICORE_EXEC["sdma|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["baseline|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["sdma|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["baseline|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["sdma|$_label"]:-"-"}")
             echo "$_row"
         done
     else
         _mode_name="${RUN_MODES[0]}"
         _mode_title=$(printf "%s" "$_mode_name" | tr '[:lower:]' '[:upper:]')
-        _hdr=$(printf "  %-40s  %20s  %18s  %20s  %21s" "Example" "${_mode_title} AICore Exec" "AICPU Dispatch->Finish" "E2E (device log)" "E2E (profiling)")
-        _sep=$(printf "  %-40s  %20s  %18s  %20s  %21s" "----------------------------------------" "--------------------" "------------------" "--------------------" "---------------------")
+        _hdr=$(printf "  %-40s  %20s  %18s  %21s" "Example" "${_mode_title} AICore Exec" "AICPU Dispatch->Finish" "E2E (profiling)")
+        _sep=$(printf "  %-40s  %20s  %18s  %21s" "----------------------------------------" "--------------------" "------------------" "---------------------")
         echo "$_hdr"; echo "$_sep"
         for _i in "${!SUMMARY_NAMES[@]}"; do
             _label="${SUMMARY_NAMES[$_i]}"
-            _row=$(printf "  %-40s  %20s  %18s  %20s  %21s" "$_label" "${SUMMARY_AICORE_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_LOG["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["${RUN_MODES[0]}|$_label"]:-"-"}")
+            _row=$(printf "  %-40s  %20s  %18s  %21s" "$_label" "${SUMMARY_AICORE_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_AICPU_EXEC["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_DEVICE_E2E_PROF["${RUN_MODES[0]}|$_label"]:-"-"}")
+            echo "$_row"
+        done
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Device-log E2E Avg Summary Table
+# ---------------------------------------------------------------------------
+if [[ ${#SUMMARY_NAMES[@]} -gt 0 ]]; then
+    echo ""
+    echo "================================================================"
+    echo "  Device-log E2E Avg Summary ($RUNTIME)"
+    echo "================================================================"
+    echo ""
+
+    if [[ "$PREFETCH_MODE" == "compare" ]]; then
+        _hdr=$(printf "  %-40s  %20s  %20s  %16s" "Example" "Base E2E(devlog avg)" "SDMA E2E(devlog avg)" "SDMA vs Base")
+        _sep=$(printf "  %-40s  %20s  %20s  %16s" "----------------------------------------" "--------------------" "--------------------" "----------------")
+        echo "$_hdr"; echo "$_sep"
+        for _i in "${!SUMMARY_NAMES[@]}"; do
+            _label="${SUMMARY_NAMES[$_i]}"
+            _base_devlog="${SUMMARY_DEVICE_E2E_LOG["baseline|$_label"]:-"-"}"
+            _sdma_devlog="${SUMMARY_DEVICE_E2E_LOG["sdma|$_label"]:-"-"}"
+            _opt_pct="-"
+            if [[ "$_base_devlog" != "-" && "$_sdma_devlog" != "-" ]]; then
+                _opt_pct=$(calc_improvement_pct "$_base_devlog" "$_sdma_devlog")
+            fi
+            _row=$(printf "  %-40s  %20s  %20s  %16s" "$_label" "$_base_devlog" "$_sdma_devlog" "$_opt_pct")
+            echo "$_row"
+        done
+    else
+        _mode_name="${RUN_MODES[0]}"
+        _mode_title=$(printf "%s" "$_mode_name" | tr '[:lower:]' '[:upper:]')
+        _hdr=$(printf "  %-40s  %20s" "Example" "${_mode_title} E2E Avg(devlog)")
+        _sep=$(printf "  %-40s  %20s" "----------------------------------------" "--------------------")
+        echo "$_hdr"; echo "$_sep"
+        for _i in "${!SUMMARY_NAMES[@]}"; do
+            _label="${SUMMARY_NAMES[$_i]}"
+            _row=$(printf "  %-40s  %20s" "$_label" "${SUMMARY_DEVICE_E2E_LOG["${RUN_MODES[0]}|$_label"]:-"-"}")
             echo "$_row"
         done
     fi
