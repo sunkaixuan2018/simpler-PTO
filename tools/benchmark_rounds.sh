@@ -615,22 +615,21 @@ run_device_log_rounds_once() {
     fi
     device_log_cmd+=("${EXTRA_ARGS[@]}")
 
-    local device_rc=0
+    local device_tmp device_output device_rc=0
     PROFILE_DEVICE_E2E_LOG="-"
-    if [[ -n "$VERBOSE_LOG" ]]; then
-        {
-            echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) ====="
-            "${device_log_cmd[@]}"
-        } 2>&1 | tee -a "$VERBOSE_LOG" || device_rc=$?
-    else
-        "${device_log_cmd[@]}" || device_rc=$?
-    fi
+    device_tmp=$(mktemp)
+    "${device_log_cmd[@]}" >"$device_tmp" 2>&1 || device_rc=$?
+    device_output=$(<"$device_tmp")
+    rm -f "$device_tmp"
+    [[ -n "$VERBOSE_LOG" && -n "$device_output" ]] && {
+        echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) =====" >> "$VERBOSE_LOG"
+        echo "$device_output" >> "$VERBOSE_LOG"
+    }
     if [[ $device_rc -ne 0 ]]; then
         return 1
     fi
 
     local device_log="" elapsed=0 timeout_s=15
-    echo "    Waiting for device log E2E..."
     while (( elapsed < timeout_s )); do
         device_log=$(latest_device_log || true)
         if [[ -n "$device_log" ]]; then
@@ -642,7 +641,7 @@ run_device_log_rounds_once() {
         sleep 1
         elapsed=$((elapsed + 1))
     done
-    echo "    Warning: unable to extract $ROUNDS round(s) from latest device log"
+    vlog "Unable to extract $ROUNDS round(s) from latest device log within ${timeout_s}s"
     if [[ -n "$device_log" ]]; then
         if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log"); then
             vlog "Fallback latest device log (all available rounds): $device_log"
@@ -657,9 +656,7 @@ run_benchmark_once() {
     PROFILE_AICPU_EXEC="-"
     PROFILE_DEVICE_E2E_PROF="-"
     PROFILE_DEVICE_E2E_LOG="-"
-    echo "    Profiling pass: rounds=$PROFILE_SAMPLE_ROUNDS, --enable-profiling"
     run_profile_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
-    echo "    Device-log pass: rounds=$ROUNDS, no --enable-profiling"
     run_device_log_rounds_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
     return 0
 }
