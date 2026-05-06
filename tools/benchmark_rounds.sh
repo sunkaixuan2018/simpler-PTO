@@ -525,7 +525,7 @@ PROFILE_AICORE_EXEC="-"
 PROFILE_AICPU_EXEC="-"
 PROFILE_DEVICE_E2E_LOG="-"
 PROFILE_DEVICE_E2E_PROF="-"
-run_profiling_metrics_once() {
+run_profile_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
         env "PTO_SDMA_PREFETCH_MODE=$mode"
@@ -589,14 +589,21 @@ run_device_log_rounds_once() {
     fi
     device_log_cmd+=("${EXTRA_ARGS[@]}")
 
-    local pre_run_logs device_tmp device_output device_rc=0
+    local pre_run_logs device_rc=0
     pre_run_logs=$(snapshot_device_logs)
-    device_tmp=$(mktemp)
-    "${device_log_cmd[@]}" >"$device_tmp" 2>&1 || device_rc=$?
-    device_output=$(<"$device_tmp")
-    rm -f "$device_tmp"
     PROFILE_DEVICE_E2E_LOG="-"
-    if [[ $device_rc -ne 0 ]]; then return 1; fi
+    if [[ -n "$VERBOSE_LOG" ]]; then
+        {
+            echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) ====="
+            "${device_log_cmd[@]}"
+        } 2>&1 | tee -a "$VERBOSE_LOG" || device_rc=$?
+    else
+        "${device_log_cmd[@]}" || device_rc=$?
+    fi
+    if [[ $device_rc -ne 0 ]]; then
+        return 1
+    fi
+
     local device_log segment_log=""
     if find_updated_device_log "$pre_run_logs"; then
         device_log="$UPDATED_DEVICE_LOG_PATH"
@@ -608,10 +615,6 @@ run_device_log_rounds_once() {
     else
         echo "    Warning: no device log update detected after device-log pass"
     fi
-    [[ -n "$VERBOSE_LOG" && -n "$device_output" ]] && {
-        echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) =====" >> "$VERBOSE_LOG"
-        echo "$device_output" >> "$VERBOSE_LOG"
-    }
     return 0
 }
 
@@ -622,7 +625,7 @@ run_benchmark_once() {
     PROFILE_DEVICE_E2E_PROF="-"
     PROFILE_DEVICE_E2E_LOG="-"
     echo "    Profiling pass: rounds=$PROFILE_SAMPLE_ROUNDS, --enable-profiling"
-    run_profiling_metrics_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
+    run_profile_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
     echo "    Device-log pass: rounds=$ROUNDS, no --enable-profiling"
     run_device_log_rounds_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
     return 0
