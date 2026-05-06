@@ -191,30 +191,91 @@ list_device_logs() {
     )
 }
 
-find_new_device_log() {
+snapshot_device_logs() {
+    local log_root
+    if [[ -n "${ASCEND_WORK_PATH:-}" ]]; then
+        log_root="$ASCEND_WORK_PATH/log/debug"
+        if [[ ! -d "$log_root" ]]; then
+            log_root="$HOME/ascend/log/debug"
+        fi
+    else
+        log_root="$HOME/ascend/log/debug"
+    fi
+    local device_log_dir="$log_root/device-${DEVICE_ID}"
+    if [[ ! -d "$device_log_dir" ]]; then
+        return 0
+    fi
+    (
+        shopt -s nullglob
+        for _log in "$device_log_dir"/*.log; do
+            local _size _mtime
+            _size=$(stat -c '%s' "$_log" 2>/dev/null || echo 0)
+            _mtime=$(stat -c '%Y' "$_log" 2>/dev/null || echo 0)
+            printf '%s\t%s\t%s\n' "$_log" "$_size" "$_mtime"
+        done
+    )
+}
+
+UPDATED_DEVICE_LOG_PATH=""
+UPDATED_DEVICE_LOG_OFFSET=0
+find_updated_device_log() {
     local pre_snapshot="$1"
     local timeout_s=15
     local elapsed=0
+    UPDATED_DEVICE_LOG_PATH=""
+    UPDATED_DEVICE_LOG_OFFSET=0
     while (( elapsed < timeout_s )); do
         local newest=""
+        local newest_offset=0
         local current_logs
         current_logs=$(list_device_logs)
         while IFS= read -r _log; do
             [[ -z "$_log" ]] && continue
-            if ! grep -Fxq "$_log" <<<"$pre_snapshot"; then
+            local current_size current_mtime snapshot_entry old_size old_mtime
+            current_size=$(stat -c '%s' "$_log" 2>/dev/null || echo 0)
+            current_mtime=$(stat -c '%Y' "$_log" 2>/dev/null || echo 0)
+            snapshot_entry=$(awk -F '\t' -v target="$_log" '$1 == target { print; exit }' <<<"$pre_snapshot")
+            if [[ -z "$snapshot_entry" ]]; then
                 if [[ -z "$newest" || "$_log" -nt "$newest" ]]; then
                     newest="$_log"
+                    newest_offset=0
+                fi
+                continue
+            fi
+            IFS=$'\t' read -r _snapshot_path old_size old_mtime <<<"$snapshot_entry"
+            if (( current_size > old_size || current_mtime > old_mtime )); then
+                if [[ -z "$newest" || "$_log" -nt "$newest" ]]; then
+                    newest="$_log"
+                    newest_offset="$old_size"
                 fi
             fi
         done <<<"$current_logs"
         if [[ -n "$newest" ]]; then
-            printf '%s\n' "$newest"
+            UPDATED_DEVICE_LOG_PATH="$newest"
+            UPDATED_DEVICE_LOG_OFFSET="$newest_offset"
             return 0
         fi
         sleep 1
         elapsed=$((elapsed + 1))
     done
     return 1
+}
+
+extract_device_log_segment() {
+    local log_file="$1"
+    local byte_offset="${2:-0}"
+    if (( byte_offset <= 0 )); then
+        printf '%s\n' "$log_file"
+        return 0
+    fi
+    local segment_tmp
+    segment_tmp=$(mktemp)
+    tail -c +"$((byte_offset + 1))" "$log_file" >"$segment_tmp"
+    if [[ ! -s "$segment_tmp" ]]; then
+        rm -f "$segment_tmp"
+        return 1
+    fi
+    printf '%s\n' "$segment_tmp"
 }
 
 find_new_perf_json() {
@@ -422,7 +483,7 @@ run_profile_once() {
     profile_cmd+=("${EXTRA_ARGS[@]}")
 
     local pre_run_logs pre_run_perf_jsons profile_tmp profile_output profile_rc=0
-    pre_run_logs=$(list_device_logs)
+    pre_run_logs=$(snapshot_device_logs)
     pre_run_perf_jsons=$(list_perf_jsons)
     profile_tmp=$(mktemp)
     "${profile_cmd[@]}" >"$profile_tmp" 2>&1 || profile_rc=$?
@@ -464,15 +525,17 @@ run_profile_once() {
         parse_host_prefetch_setup_outcome "$profile_output" >/dev/null \
             && PROFILE_PREFETCH_SETUP_OUTCOME=$(parse_host_prefetch_setup_outcome "$profile_output")
     fi
-    local device_log
-    if device_log=$(find_new_device_log "$pre_run_logs"); then
-        vlog "Resolved device log: $device_log"
-        parse_prefetch_ctrl_total_us "$device_log" >/dev/null \
-            && PROFILE_PREFETCH_CTRL_US=$(parse_prefetch_ctrl_total_us "$device_log")
-        parse_prefetch_issue_total_us "$device_log" >/dev/null \
-            && PROFILE_PREFETCH_ISSUE_US=$(parse_prefetch_issue_total_us "$device_log")
+    local device_log segment_log=""
+    if find_updated_device_log "$pre_run_logs"; then
+        device_log="$UPDATED_DEVICE_LOG_PATH"
+        vlog "Resolved device log update: $device_log (offset=$UPDATED_DEVICE_LOG_OFFSET)"
+        if segment_log=$(extract_device_log_segment "$device_log" "$UPDATED_DEVICE_LOG_OFFSET"); then
+            parse_prefetch_ctrl_total_us "$segment_log" >/dev/null \
+                && PROFILE_PREFETCH_CTRL_US=$(parse_prefetch_ctrl_total_us "$segment_log")
+            parse_prefetch_issue_total_us "$segment_log" >/dev/null \
+                && PROFILE_PREFETCH_ISSUE_US=$(parse_prefetch_issue_total_us "$segment_log")
         local prefetch_debug
-        if prefetch_debug=$(parse_prefetch_debug_counts "$device_log"); then
+            if prefetch_debug=$(parse_prefetch_debug_counts "$segment_log"); then
             while IFS='=' read -r key value; do
                 [[ -z "${key:-}" ]] && continue
                 case "$key" in
@@ -490,6 +553,8 @@ run_profile_once() {
                     ISSUE_QUEUE_FULL) PROFILE_PREFETCH_ISSUE_QUEUE_FULL="$value" ;;
                 esac
             done <<<"$prefetch_debug"
+            fi
+            [[ "$segment_log" != "$device_log" ]] && rm -f "$segment_log"
         fi
     fi
     [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
