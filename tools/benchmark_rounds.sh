@@ -605,6 +605,8 @@ run_device_log_rounds_once() {
             parse_device_e2e_avg "$segment_log" >/dev/null && PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$segment_log")
             [[ "$segment_log" != "$device_log" ]] && rm -f "$segment_log"
         fi
+    else
+        echo "    Warning: no device log update detected after device-log pass"
     fi
     [[ -n "$VERBOSE_LOG" && -n "$device_output" ]] && {
         echo "===== device-log run (mode=$mode case=${case_name:-DEFAULT} rounds=$ROUNDS) =====" >> "$VERBOSE_LOG"
@@ -619,7 +621,9 @@ run_benchmark_once() {
     PROFILE_AICPU_EXEC="-"
     PROFILE_DEVICE_E2E_PROF="-"
     PROFILE_DEVICE_E2E_LOG="-"
+    echo "    Profiling pass: rounds=$PROFILE_SAMPLE_ROUNDS, --enable-profiling"
     run_profiling_metrics_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
+    echo "    Device-log pass: rounds=$ROUNDS, no --enable-profiling"
     run_device_log_rounds_once "$mode" "$kernels_dir" "$golden" "$case_name" || return 1
     return 0
 }
