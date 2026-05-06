@@ -273,6 +273,25 @@ find_updated_device_log() {
     return 1
 }
 
+latest_device_log() {
+    local newest=""
+    local current_logs
+    current_logs=$(list_device_logs)
+    while IFS= read -r _log; do
+        [[ -z "$_log" ]] && continue
+        if [[ -z "$newest" || "$_log" -nt "$newest" ]]; then
+            newest="$_log"
+        fi
+    done <<<"$current_logs"
+    [[ -n "$newest" ]] && printf '%s\n' "$newest"
+}
+
+snapshot_device_log_old_size() {
+    local pre_snapshot="$1"
+    local log_path="$2"
+    awk -F '\t' -v target="$log_path" '$1 == target { print $2; exit }' <<<"$pre_snapshot"
+}
+
 extract_device_log_segment() {
     local log_file="$1"
     local byte_offset="${2:-0}"
@@ -330,8 +349,9 @@ find_new_perf_json() {
 
 parse_device_e2e_avg() {
     local log_file="$1"
+    local rounds_to_take="${2:-0}"
     local e2e_us
-    e2e_us=$(awk -v freq="$FREQ" '
+    if e2e_us=$(awk -v freq="$FREQ" -v take="$rounds_to_take" '
     function new_round() {
         flush_round()
         round++
@@ -385,11 +405,17 @@ parse_device_e2e_avg() {
     END {
         flush_round()
         if (count == 0) exit 1
+        start_idx = 0
+        denom = count
+        if (take > 0) {
+            if (count < take) exit 2
+            start_idx = count - take
+            denom = take
+        }
         sum_v = 0
-        for (i = 0; i < count; i++) sum_v += results[i]
-        printf "%.2f\n", sum_v / count
-    }' "$log_file" 2>/dev/null || true)
-    if [[ -n "$e2e_us" ]]; then
+        for (i = start_idx; i < count; i++) sum_v += results[i]
+        printf "%.2f\n", sum_v / denom
+    }' "$log_file" 2>/dev/null); then
         echo "$e2e_us"
         return 0
     fi
@@ -589,8 +615,7 @@ run_device_log_rounds_once() {
     fi
     device_log_cmd+=("${EXTRA_ARGS[@]}")
 
-    local pre_run_logs device_rc=0
-    pre_run_logs=$(snapshot_device_logs)
+    local device_rc=0
     PROFILE_DEVICE_E2E_LOG="-"
     if [[ -n "$VERBOSE_LOG" ]]; then
         {
@@ -604,16 +629,24 @@ run_device_log_rounds_once() {
         return 1
     fi
 
-    local device_log segment_log=""
-    if find_updated_device_log "$pre_run_logs"; then
-        device_log="$UPDATED_DEVICE_LOG_PATH"
-        vlog "Resolved device log update: $device_log (offset=$UPDATED_DEVICE_LOG_OFFSET)"
-        if segment_log=$(extract_device_log_segment "$device_log" "$UPDATED_DEVICE_LOG_OFFSET"); then
-            parse_device_e2e_avg "$segment_log" >/dev/null && PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$segment_log")
-            [[ "$segment_log" != "$device_log" ]] && rm -f "$segment_log"
+    local device_log="" elapsed=0 timeout_s=15
+    echo "    Waiting for device log E2E..."
+    while (( elapsed < timeout_s )); do
+        device_log=$(latest_device_log || true)
+        if [[ -n "$device_log" ]]; then
+            if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log" "$ROUNDS"); then
+                vlog "Resolved latest device log: $device_log (last $ROUNDS round(s))"
+                return 0
+            fi
         fi
-    else
-        echo "    Warning: no device log update detected after device-log pass"
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    echo "    Warning: unable to extract $ROUNDS round(s) from latest device log"
+    if [[ -n "$device_log" ]]; then
+        if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log"); then
+            vlog "Fallback latest device log (all available rounds): $device_log"
+        fi
     fi
     return 0
 }
