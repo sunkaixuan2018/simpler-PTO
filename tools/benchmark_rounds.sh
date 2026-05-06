@@ -40,6 +40,7 @@ ABG_EXAMPLE_ORDER=(
 # ---------------------------------------------------------------------------
 DEVICE_ID=0
 ROUNDS=1
+DEVICE_LOG_TAIL_ROUNDS=0
 PLATFORM=a2a3
 RUNTIME=tensormap_and_ringbuffer
 VERBOSE=0
@@ -61,6 +62,10 @@ while [[ $# -gt 0 ]]; do
             ROUNDS="$2"
             shift 2
             ;;
+        --device-log-tail-rounds)
+            DEVICE_LOG_TAIL_ROUNDS="$2"
+            shift 2
+            ;;
         -r|--runtime)
             RUNTIME="$2"
             shift 2
@@ -78,14 +83,17 @@ while [[ $# -gt 0 ]]; do
 benchmark_rounds.sh — run all examples and report profiling spans plus device-log averaged E2E
 
 Usage:
-  ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [-r <runtime>] [--prefetch-mode <mode>] [-v]
+  ./tools/benchmark_rounds.sh [-p <platform>] [-d <device>] [-n <rounds>] [--device-log-tail-rounds <n>] [-r <runtime>] [--prefetch-mode <mode>] [-v]
 
 Options:
   -p, --platform         Platform to run on (default: a2a3)
   -d, --device           Device ID (default: 0)
   -n, --rounds           Override number of rounds for each example (default: 1)
+      --device-log-tail-rounds
+                          Only average the last N rounds from device log E2E.
+                          Default: 0 = use all --rounds rounds.
   -r, --runtime          Runtime to benchmark: tensormap_and_ringbuffer (default), aicpu_build_graph
-      --prefetch-mode    baseline | sdma | compare (default: compare)
+  --prefetch-mode    baseline | sdma | compare (default: compare)
   -v, --verbose          Save detailed run_example.py output to a timestamped log file
   -h, --help             Show this help
 
@@ -120,6 +128,25 @@ case "$PREFETCH_MODE" in
     compare) RUN_MODES=(baseline sdma) ;;
     *) RUN_MODES=("$PREFETCH_MODE") ;;
 esac
+
+if ! [[ "$ROUNDS" =~ ^[0-9]+$ ]] || (( ROUNDS <= 0 )); then
+    echo "ERROR: --rounds must be a positive integer."
+    exit 1
+fi
+if ! [[ "$DEVICE_LOG_TAIL_ROUNDS" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: --device-log-tail-rounds must be a non-negative integer."
+    exit 1
+fi
+
+effective_device_log_tail_rounds() {
+    if (( DEVICE_LOG_TAIL_ROUNDS <= 0 || DEVICE_LOG_TAIL_ROUNDS >= ROUNDS )); then
+        printf '%s\n' "$ROUNDS"
+    else
+        printf '%s\n' "$DEVICE_LOG_TAIL_ROUNDS"
+    fi
+}
+
+DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS="$(effective_device_log_tail_rounds)"
 
 # ---------------------------------------------------------------------------
 # Verbose logging setup
@@ -633,15 +660,15 @@ run_device_log_rounds_once() {
     while (( elapsed < timeout_s )); do
         device_log=$(latest_device_log || true)
         if [[ -n "$device_log" ]]; then
-            if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log" "$ROUNDS"); then
-                vlog "Resolved latest device log: $device_log (last $ROUNDS round(s))"
+            if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log" "$DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS"); then
+                vlog "Resolved latest device log: $device_log (last $DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS round(s))"
                 return 0
             fi
         fi
         sleep 1
         elapsed=$((elapsed + 1))
     done
-    vlog "Unable to extract $ROUNDS round(s) from latest device log within ${timeout_s}s"
+    vlog "Unable to extract $DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS round(s) from latest device log within ${timeout_s}s"
     if [[ -n "$device_log" ]]; then
         if PROFILE_DEVICE_E2E_LOG=$(parse_device_e2e_avg "$device_log"); then
             vlog "Fallback latest device log (all available rounds): $device_log"
@@ -680,7 +707,11 @@ echo "Runtime: $RUNTIME"
 echo "Tests dir: $EXAMPLES_DIR"
 echo "Prefetch modes: ${RUN_MODES[*]}"
 echo "Profiling metrics: 1 round with --enable-profiling"
-echo "Device-log E2E Avg: $ROUNDS round(s) without --enable-profiling"
+if (( DEVICE_LOG_TAIL_ROUNDS > 0 )); then
+    echo "Device-log E2E Avg: last $DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS of $ROUNDS round(s) without --enable-profiling"
+else
+    echo "Device-log E2E Avg: all $ROUNDS round(s) without --enable-profiling"
+fi
 
 for example in "${EXAMPLE_ORDER[@]}"; do
     case_list="${EXAMPLE_CASES[$example]:-}"
@@ -720,7 +751,11 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             echo "  AICore Exec (profiling, single-run, us): $PROFILE_AICORE_EXEC"
             echo "  AICPU Dispatch->Finish (profiling, single-run, us): $PROFILE_AICPU_EXEC"
             echo "  Device E2E (profiling, single-run, us): $PROFILE_DEVICE_E2E_PROF"
-            echo "  Device E2E Avg (device log, ${ROUNDS} round(s), us): $PROFILE_DEVICE_E2E_LOG"
+            if (( DEVICE_LOG_TAIL_ROUNDS > 0 )); then
+                echo "  Device E2E Avg (device log, last ${DEVICE_LOG_EFFECTIVE_TAIL_ROUNDS}/${ROUNDS} round(s), us): $PROFILE_DEVICE_E2E_LOG"
+            else
+                echo "  Device E2E Avg (device log, ${ROUNDS} round(s), us): $PROFILE_DEVICE_E2E_LOG"
+            fi
         done
         if [[ "$PREFETCH_MODE" == "compare" ]]; then
             local _base_devlog="${SUMMARY_DEVICE_E2E_LOG["baseline|$_label"]:-"-"}"
