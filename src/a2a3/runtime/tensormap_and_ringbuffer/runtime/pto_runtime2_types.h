@@ -371,6 +371,8 @@ struct PTO2TaskPayload {
     uint64_t prefetch_addr{0};
     uint64_t prefetch_issue_bytes{0};
     uint64_t prefetch_filter_bytes{0};
+    /** GM instruction prefetch entry (`CoreCallable::resolved_addr()`); filled on AICPU before issue. */
+    uint64_t instr_prefetch_addr{0};
 
     // Layout verification (size checks that don't need offsetof).
     static_assert(sizeof(Tensor) == 128, "Tensor must be 2 cache lines");
@@ -393,6 +395,7 @@ struct PTO2TaskPayload {
         prefetch_addr = 0;
         prefetch_issue_bytes = 0;
         prefetch_filter_bytes = 0;
+        instr_prefetch_addr = 0;
 
         // int32_t out_idx = 0;
         for (int32_t i = 0; i < args.tensor_count(); i++) {

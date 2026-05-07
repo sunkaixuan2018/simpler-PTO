@@ -321,21 +321,20 @@ bool aicpu_prefetch_reserve_channel(int channel_idx)
     return prepare_prefetch_channel(&channel_idx, true, true);
 }
 
-void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
+void aicpu_prefetch_issue_reserved(
+    void* tensor_addr, size_t tensor_size, void* instr_addr, size_t instr_size, int channel_idx
+)
 {
     uint64_t start_cycle = g_prefetch_debug_enabled ? get_sys_cnt_aicpu() : 0;
     bool issued = false;
 
     do {
-        if (!g_prefetch_enabled || addr == nullptr || size == 0) {
+        if (!g_prefetch_enabled || tensor_addr == nullptr || tensor_size == 0) {
             break;
         }
 
         if (!prepare_prefetch_channel(&channel_idx, false, false)) {
             break;
-        }
-        if (g_prefetch_debug_enabled) {
-            __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
         }
 
         volatile stars_channel_info_t* ch = g_channel_info + channel_idx;
@@ -362,34 +361,65 @@ void aicpu_prefetch_issue_reserved(void* addr, size_t size, int channel_idx)
             break;
         }
 
-        volatile stars_sdma_cmo_sqe_t* sqe = reinterpret_cast<volatile stars_sdma_cmo_sqe_t*>(ch->sq_base);
-        sqe += sq_tail;
+        const bool want_instr = (instr_addr != nullptr && instr_size > 0 && sq_depth > 1);
+        const uint32_t tail_after_tensor = new_tail;
+        const uint32_t tail_after_instr = (tail_after_tensor + 1u) % sq_depth;
+        const bool issue_two = want_instr && (tail_after_instr != sq_head);
+        const uint32_t final_tail = issue_two ? tail_after_instr : tail_after_tensor;
 
-        uint16_t task_id = static_cast<uint16_t>(sq_tail - ch->sq_head);
-        fill_cmo_prefetch_sqe(sqe,
-                              reinterpret_cast<uint64_t>(addr),
-                              static_cast<uint32_t>(size),
-                              static_cast<uint16_t>(ch->stream_id),
-                              task_id);
+        if (g_prefetch_debug_enabled) {
+            __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(tensor_size), __ATOMIC_RELAXED);
+            if (issue_two) {
+                __atomic_add_fetch(&g_prefetch_attempt_bytes, static_cast<uint64_t>(instr_size), __ATOMIC_RELAXED);
+            }
+        }
+
+        volatile stars_sdma_cmo_sqe_t* sq_base =
+            reinterpret_cast<volatile stars_sdma_cmo_sqe_t*>(ch->sq_base);
+
+        uint16_t task_id0 = static_cast<uint16_t>((sq_tail + sq_depth - sq_head) % sq_depth);
+        fill_cmo_prefetch_sqe(
+            sq_base + sq_tail, reinterpret_cast<uint64_t>(tensor_addr), static_cast<uint32_t>(tensor_size),
+            static_cast<uint16_t>(ch->stream_id), task_id0
+        );
         uint32_t issue_idx =
             g_prefetch_debug_enabled ? __atomic_add_fetch(&g_prefetch_issue_count, 1, __ATOMIC_RELAXED) : 0;
         if (g_prefetch_debug_enabled) {
-            __atomic_add_fetch(&g_prefetch_issue_bytes, static_cast<uint64_t>(size), __ATOMIC_RELAXED);
+            __atomic_add_fetch(&g_prefetch_issue_bytes, static_cast<uint64_t>(tensor_size), __ATOMIC_RELAXED);
         }
         if (g_prefetch_debug_enabled && issue_idx <= 8) {
             DEV_ALWAYS(
-                "SDMA prefetch: issue[%u] channel=%d addr=0x%llx size=%zu sq_head=%u sq_tail=%u new_tail=%u depth=%u stream=%u doorbell=0x%llx",
-                issue_idx, channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(addr), size, sq_head, sq_tail,
-                new_tail, sq_depth, ch->stream_id, (unsigned long long)(ch->sq_reg_base + 8)
+                "SDMA prefetch: issue[%u] channel=%d tensor addr=0x%llx size=%zu sq_head=%u sq_tail=%u new_tail=%u depth=%u",
+                issue_idx, channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(tensor_addr), tensor_size, sq_head,
+                sq_tail, new_tail, sq_depth
             );
         }
 
+        if (issue_two) {
+            uint16_t task_id1 = static_cast<uint16_t>((tail_after_tensor + sq_depth - sq_head) % sq_depth);
+            fill_cmo_prefetch_sqe(
+                sq_base + tail_after_tensor, reinterpret_cast<uint64_t>(instr_addr),
+                static_cast<uint32_t>(instr_size), static_cast<uint16_t>(ch->stream_id), task_id1
+            );
+            if (g_prefetch_debug_enabled) {
+                issue_idx = __atomic_add_fetch(&g_prefetch_issue_count, 1, __ATOMIC_RELAXED);
+                __atomic_add_fetch(&g_prefetch_issue_bytes, static_cast<uint64_t>(instr_size), __ATOMIC_RELAXED);
+            }
+            if (g_prefetch_debug_enabled && issue_idx <= 8) {
+                DEV_ALWAYS(
+                    "SDMA prefetch: issue[%u] channel=%d instr addr=0x%llx size=%zu head=%u tail=%u final_tail=%u depth=%u",
+                    issue_idx, channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(instr_addr), instr_size, sq_head,
+                    sq_tail, final_tail, sq_depth
+                );
+            }
+        }
+
         __atomic_thread_fence(__ATOMIC_RELEASE);
-        __atomic_store_n(&ch->sq_tail, new_tail, __ATOMIC_RELEASE);
+        __atomic_store_n(&ch->sq_tail, final_tail, __ATOMIC_RELEASE);
         __atomic_store_n(&g_prefetch_channel_suppress_remaining[channel_idx], g_prefetch_suppress_window, __ATOMIC_RELEASE);
 
         volatile uint32_t* doorbell = reinterpret_cast<volatile uint32_t*>(ch->sq_reg_base + 8);
-        *doorbell = new_tail;
+        *doorbell = final_tail;
 
         prefetch_unlock(channel_idx);
         issued = true;
@@ -409,7 +439,7 @@ void aicpu_prefetch_tensor(void* addr, size_t size, int channel_idx)
     if (!aicpu_prefetch_reserve_channel(channel_idx)) {
         return;
     }
-    aicpu_prefetch_issue_reserved(addr, size, channel_idx);
+    aicpu_prefetch_issue_reserved(addr, size, nullptr, 0, channel_idx);
 }
 
 bool aicpu_prefetch_available()

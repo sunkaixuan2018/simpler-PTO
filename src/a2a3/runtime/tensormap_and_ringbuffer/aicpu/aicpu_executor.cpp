@@ -583,20 +583,58 @@ struct AicpuExecutor {
         uint64_t start_cycle = prefetch_debug_enabled_ ? get_sys_cnt_aicpu() : 0;
         bool eligible_task = false;
         do {
-            const PTO2TaskPayload &payload = *slot_state.payload;
+            PTO2TaskPayload *payload = slot_state.payload;
+            if (payload == nullptr) {
+                break;
+            }
+            const PTO2TaskPayload &p = *payload;
             eligible_task = true;
             if (!aicpu_prefetch_reserve_channel(channel_idx)) {
                 break;
             }
+            void *instr_ptr = nullptr;
+            size_t instr_size = 0;
+            if ((slot_state.active_mask & PTO2_SUBTASK_MASK_AIC) != 0 && slot_state.task != nullptr) {
+                int32_t kid = slot_state.task->kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)];
+                if (kid != INVALID_KERNEL_ID) {
+                    uint64_t callable_addr = get_function_bin_addr(kid);
+                    if (callable_addr != 0) {
+                        const auto *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
+                        const uint64_t resolved = callable->resolved_addr();
+                        if (resolved != 0) {
+                            const uint32_t bin = callable->binary_size();
+                            if (bin > 0) {
+                                static constexpr uint32_t kInstrPrefetchCap = 2048u;
+                                const uint32_t n = (bin < kInstrPrefetchCap) ? bin : kInstrPrefetchCap;
+                                payload->instr_prefetch_addr = resolved;
+                                instr_ptr = reinterpret_cast<void *>(resolved);
+                                instr_size = static_cast<size_t>(n);
+                            } else {
+                                payload->instr_prefetch_addr = 0;
+                            }
+                        } else {
+                            payload->instr_prefetch_addr = 0;
+                        }
+                    } else {
+                        payload->instr_prefetch_addr = 0;
+                    }
+                } else {
+                    payload->instr_prefetch_addr = 0;
+                }
+            } else {
+                payload->instr_prefetch_addr = 0;
+            }
             if (prefetch_debug_enabled_) {
                 prefetch_task_count_.fetch_add(1, std::memory_order_relaxed);
                 prefetch_tensor_count_.fetch_add(1, std::memory_order_relaxed);
-                prefetch_total_bytes_.fetch_add(payload.prefetch_issue_bytes, std::memory_order_relaxed);
+                prefetch_total_bytes_.fetch_add(p.prefetch_issue_bytes, std::memory_order_relaxed);
+                if (instr_ptr != nullptr) {
+                    prefetch_total_bytes_.fetch_add(static_cast<uint64_t>(instr_size), std::memory_order_relaxed);
+                }
             }
             aicpu_prefetch_issue_reserved(
-                reinterpret_cast<void *>(payload.prefetch_addr),
-                static_cast<size_t>(payload.prefetch_issue_bytes),
-                channel_idx
+                reinterpret_cast<void *>(p.prefetch_addr), static_cast<size_t>(p.prefetch_issue_bytes), instr_ptr,
+                instr_size, channel_idx
             );
         } while (false);
 
