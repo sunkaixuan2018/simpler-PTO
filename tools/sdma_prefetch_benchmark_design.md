@@ -415,3 +415,125 @@ device 侧还有一层 per-channel suppression：
 
 - `sdma` 是否把平均单 task 执行时间拉下来了
 - `sdma` 的控制开销和 issue 开销是否仍在可接受范围内
+
+## 10. 一组 30 轮实测结果
+
+下面这组结果来自：
+
+```bash
+./tools/benchmark_rounds_v1.sh -p a2a3 -r tensormap_and_ringbuffer --rounds 30
+```
+
+这组数据的读法是：
+
+- profiling 三列：每个 workload 只取 1 次 profiled run
+- `Device E2E Avg (device log)`：每个 workload 跑 30 轮 non-profiling run，再对 30 轮 E2E 求平均
+
+### 10.1 汇总结果
+
+| Example | Base E2E(devlog avg) us | SDMA E2E(devlog avg) us | 绝对收益 us | SDMA vs Base |
+| --- | ---: | ---: | ---: | ---: |
+| `alternating_matmul_add` | 965.17 | 946.23 | 18.94 | 1.96% |
+| `benchmark_bgemm` | 790.10 | 759.38 | 30.72 | 3.89% |
+| `paged_attention_unroll (Case1)` | 1204.11 | 1193.19 | 10.92 | 0.91% |
+| `paged_attention_unroll (Case2)` | 604.85 | 594.23 | 10.62 | 1.76% |
+| `batch_paged_attention` | 3546.56 | 3493.29 | 53.27 | 1.50% |
+
+如果只看这 5 个 workload 的简单平均，device-log 口径下的平均优化幅度大约是：
+
+```text
+(1.96% + 3.89% + 0.91% + 1.76% + 1.50%) / 5 = 2.00%
+```
+
+### 10.2 profiling 单轮结果的观察
+
+同一组实验里，profiling 单轮结果并不总是和 30 轮 device-log 平均值同向。例如：
+
+- `alternating_matmul_add`
+  - profiling：`sdma` 比 `baseline` 更慢
+  - device log 30 轮均值：`sdma` 反而更快 `1.96%`
+- `paged_attention_unroll (Case2)`
+  - profiling：`sdma` 三列都略差
+  - device log 30 轮均值：`sdma` 更快 `1.76%`
+
+这说明：
+
+- 单轮 profiling 样本波动更大
+- 30 轮 device-log 平均值更适合做最终收益判断
+- 设计上把 profiling 和 device log 分成两组指标是合理的
+
+### 10.3 逐 workload 结论
+
+#### `alternating_matmul_add`
+
+- 30 轮 device-log 平均值提升 `1.96%`
+- 绝对节省约 `18.94 us`
+- 说明即使是较通用的 workload，当前 prefetch 策略也能带来小幅收益
+
+#### `benchmark_bgemm`
+
+- 30 轮 device-log 平均值提升 `3.89%`
+- 绝对节省约 `30.72 us`
+- 是这一组里相对收益最明显的 case
+- 说明当前 SDMA prefetch 对较规则、较大粒度的数据访问有更明显帮助
+
+#### `paged_attention_unroll (Case1)`
+
+- 30 轮 device-log 平均值提升 `0.91%`
+- 绝对节省约 `10.92 us`
+- 是这一组里最保守的收益
+- 说明当前 Case1-like 路径虽然命中了 prefetch，但收益仍偏小
+
+#### `paged_attention_unroll (Case2)`
+
+- 30 轮 device-log 平均值提升 `1.76%`
+- 绝对节省约 `10.62 us`
+- 在 `16 KB` block prefetch 这一档位上，当前 `max(base, 7)` 的 suppression 规则至少没有造成负收益
+
+#### `batch_paged_attention`
+
+- 30 轮 device-log 平均值提升 `1.50%`
+- 绝对节省约 `53.27 us`
+- 虽然百分比不是最大，但绝对节省时间最大
+- 说明对长尾更大的 workload，哪怕百分比不高，累计收益仍可观
+
+## 11. 这组结果支持的结论
+
+### 11.1 当前结论
+
+基于这组 `--rounds 30` 的实测结果，可以给出一个比较稳妥的结论：
+
+- 当前 `sdma` 路径在这 5 个 workload 上**没有出现 device-log 平均值回退**
+- 所有 case 都是正收益
+- 收益区间约在 `0.91% ~ 3.89%`
+- 简单平均收益约 `2.00%`
+
+换句话说，当前这版 SDMA prefetch 设计已经从“功能可用”进入到了“有稳定小幅收益”的状态。
+
+### 11.2 更适合用哪个指标下结论
+
+如果要判断 `sdma` 有没有价值，更推荐优先看：
+
+- `Device E2E Avg (device log)`
+
+不建议只看：
+
+- 单轮 `AICore Exec`
+- 单轮 `AICPU Dispatch->Finish`
+- 单轮 `Device E2E (profiling)`
+
+原因不是 profiling 指标没意义，而是：
+
+- profiling 更适合看结构和跨度
+- device log 30 轮平均值更适合做收益判断
+
+### 11.3 对后续优化的启发
+
+这组结果也说明，后续优化不应该只盯着“是否有收益”，而应该更具体地优化：
+
+- 为什么 `benchmark_bgemm` 的收益能到 `3.89%`
+- 为什么 `paged_attention_unroll (Case1)` 只有 `0.91%`
+- `16 KB / 32 KB+` 两档 issue_bytes 是否需要不同的 `min_bytes` 和 suppression
+- `batch_paged_attention` 这种绝对收益更大的 workload，是否值得更激进地预取
+
+因此下一步最值得做的，不是再证明“SDMA 有无收益”，而是做 workload-aware 的参数细化，把当前 `~2%` 的平均改善继续往上推。
