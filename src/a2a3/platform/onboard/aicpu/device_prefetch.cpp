@@ -110,6 +110,9 @@ static volatile uint32_t g_prefetch_submit_lock[PLATFORM_MAX_CORES] = {0};
 static volatile uint32_t g_prefetch_skip_queue_full[PLATFORM_MAX_CORES] = {0};
 static volatile uint32_t g_prefetch_channel_suppress_remaining[PLATFORM_MAX_CORES] = {0};
 static volatile uint32_t g_prefetch_skip_suppressed[PLATFORM_MAX_CORES] = {0};
+static volatile uint64_t g_prefetch_last_instr_addr[PLATFORM_MAX_CORES] = {0};
+static volatile uint32_t g_prefetch_last_instr_size[PLATFORM_MAX_CORES] = {0};
+static volatile uint32_t g_prefetch_skip_duplicate_instr[PLATFORM_MAX_CORES] = {0};
 static volatile uint32_t g_prefetch_attempt_count = 0;
 static volatile uint32_t g_prefetch_issue_count = 0;
 static volatile uint64_t g_prefetch_attempt_bytes = 0;
@@ -218,6 +221,9 @@ void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window, bool de
     for (int i = 0; i < PLATFORM_MAX_CORES; ++i) {
         g_prefetch_channel_suppress_remaining[i] = 0;
         g_prefetch_skip_suppressed[i] = 0;
+        g_prefetch_last_instr_addr[i] = 0;
+        g_prefetch_last_instr_size[i] = 0;
+        g_prefetch_skip_duplicate_instr[i] = 0;
     }
 
     if (sdma_workspace == nullptr) {
@@ -283,17 +289,20 @@ void aicpu_prefetch_deinit()
     uint64_t issue_cycles = __atomic_load_n(&g_prefetch_issue_cycles, __ATOMIC_ACQUIRE);
     uint64_t suppressed_count = 0;
     uint64_t queue_full_count = 0;
+    uint64_t duplicate_instr_count = 0;
     for (int i = 0; i < PLATFORM_MAX_CORES; ++i) {
         suppressed_count += __atomic_load_n(&g_prefetch_skip_suppressed[i], __ATOMIC_ACQUIRE);
         queue_full_count += __atomic_load_n(&g_prefetch_skip_queue_full[i], __ATOMIC_ACQUIRE);
+        duplicate_instr_count += __atomic_load_n(&g_prefetch_skip_duplicate_instr[i], __ATOMIC_ACQUIRE);
     }
     if (g_prefetch_debug_enabled) {
         DEV_ALWAYS(
             "SDMA prefetch issue summary: enabled=%d attempts=%u issues=%u bytes=%" PRIu64
-            " issue_bytes=%" PRIu64 " suppressed=%" PRIu64 " queue_full=%" PRIu64 " total=%.3fus avg=%.3fus"
+            " issue_bytes=%" PRIu64 " suppressed=%" PRIu64 " queue_full=%" PRIu64
+            " dup_instr=%" PRIu64 " total=%.3fus avg=%.3fus"
             " issue_total=%.3fus issue_avg=%.3fus",
             g_prefetch_enabled ? 1 : 0, attempt_count, issue_count, attempt_bytes, issue_bytes, suppressed_count,
-            queue_full_count, cycles_to_us(attempt_cycles),
+            queue_full_count, duplicate_instr_count, cycles_to_us(attempt_cycles),
             attempt_count > 0 ? cycles_to_us(attempt_cycles) / attempt_count : 0.0,
             cycles_to_us(issue_cycles), issue_count > 0 ? cycles_to_us(issue_cycles) / issue_count : 0.0
         );
@@ -307,6 +316,9 @@ void aicpu_prefetch_deinit()
         __atomic_store_n(&g_prefetch_skip_queue_full[i], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&g_prefetch_channel_suppress_remaining[i], 0, __ATOMIC_RELEASE);
         __atomic_store_n(&g_prefetch_skip_suppressed[i], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_prefetch_last_instr_addr[i], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_prefetch_last_instr_size[i], 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_prefetch_skip_duplicate_instr[i], 0, __ATOMIC_RELEASE);
     }
     __atomic_store_n(&g_prefetch_attempt_count, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_prefetch_issue_count, 0, __ATOMIC_RELEASE);
@@ -362,9 +374,21 @@ void aicpu_prefetch_issue_reserved(
         }
 
         const bool want_instr = (instr_addr != nullptr && instr_size > 0 && sq_depth > 1);
+        bool duplicate_instr = false;
+        if (want_instr) {
+            duplicate_instr = (
+                __atomic_load_n(&g_prefetch_last_instr_addr[channel_idx], __ATOMIC_RELAXED) ==
+                    reinterpret_cast<uint64_t>(instr_addr) &&
+                __atomic_load_n(&g_prefetch_last_instr_size[channel_idx], __ATOMIC_RELAXED) ==
+                    static_cast<uint32_t>(instr_size)
+            );
+            if (duplicate_instr && g_prefetch_debug_enabled) {
+                __atomic_add_fetch(&g_prefetch_skip_duplicate_instr[channel_idx], 1, __ATOMIC_RELAXED);
+            }
+        }
         const uint32_t tail_after_tensor = new_tail;
         const uint32_t tail_after_instr = (tail_after_tensor + 1u) % sq_depth;
-        const bool issue_two = want_instr && (tail_after_instr != sq_head);
+        const bool issue_two = want_instr && !duplicate_instr && (tail_after_instr != sq_head);
         const uint32_t final_tail = issue_two ? tail_after_instr : tail_after_tensor;
 
         if (g_prefetch_debug_enabled) {
@@ -410,6 +434,20 @@ void aicpu_prefetch_issue_reserved(
                     "SDMA prefetch: issue[%u] channel=%d instr addr=0x%llx size=%zu head=%u tail=%u final_tail=%u depth=%u",
                     issue_idx, channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(instr_addr), instr_size, sq_head,
                     sq_tail, final_tail, sq_depth
+                );
+            }
+            __atomic_store_n(
+                &g_prefetch_last_instr_addr[channel_idx], reinterpret_cast<uint64_t>(instr_addr), __ATOMIC_RELEASE
+            );
+            __atomic_store_n(
+                &g_prefetch_last_instr_size[channel_idx], static_cast<uint32_t>(instr_size), __ATOMIC_RELEASE
+            );
+        } else if (duplicate_instr && g_prefetch_debug_enabled) {
+            uint32_t dup_count = __atomic_load_n(&g_prefetch_skip_duplicate_instr[channel_idx], __ATOMIC_RELAXED);
+            if (dup_count <= 4 || (dup_count % 64) == 0) {
+                DEV_ALWAYS(
+                    "SDMA prefetch: skip duplicate instr sqe (channel=%d addr=0x%llx size=%zu dup_count=%u)",
+                    channel_idx, (unsigned long long)reinterpret_cast<uint64_t>(instr_addr), instr_size, dup_count
                 );
             }
         }

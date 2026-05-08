@@ -440,6 +440,7 @@ results = {
     "ISSUE_ISSUE_BYTES": find(r"SDMA prefetch issue summary: .*?issue_bytes=(\d+)"),
     "ISSUE_SUPPRESSED": find(r"SDMA prefetch issue summary: .*?suppressed=(\d+)"),
     "ISSUE_QUEUE_FULL": find(r"SDMA prefetch issue summary: .*?queue_full=(\d+)"),
+    "ISSUE_DUP_INSTR": find(r"SDMA prefetch issue summary: .*?dup_instr=(\d+)"),
     "ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?total=([0-9.]+)us"),
     "ISSUE_AVG_US": find(r"SDMA prefetch issue summary: .*?avg=([0-9.]+)us"),
     "ISSUE_ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?issue_total=([0-9.]+)us"),
@@ -468,6 +469,7 @@ PROFILE_PREFETCH_ISSUE_ATTEMPTS="-"
 PROFILE_PREFETCH_ISSUE_ISSUES="-"
 PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
 PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
+PROFILE_PREFETCH_ISSUE_DUP_INSTR="-"
 run_profile_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
@@ -506,6 +508,7 @@ run_profile_once() {
     PROFILE_PREFETCH_ISSUE_ISSUES="-"
     PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
     PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
+    PROFILE_PREFETCH_ISSUE_DUP_INSTR="-"
     if [[ $profile_rc -ne 0 ]]; then
         [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
         return 1
@@ -551,6 +554,7 @@ run_profile_once() {
                     ISSUE_ISSUES) PROFILE_PREFETCH_ISSUE_ISSUES="$value" ;;
                     ISSUE_SUPPRESSED) PROFILE_PREFETCH_ISSUE_SUPPRESSED="$value" ;;
                     ISSUE_QUEUE_FULL) PROFILE_PREFETCH_ISSUE_QUEUE_FULL="$value" ;;
+                    ISSUE_DUP_INSTR) PROFILE_PREFETCH_ISSUE_DUP_INSTR="$value" ;;
                 esac
             done <<<"$prefetch_debug"
             fi
@@ -585,6 +589,7 @@ declare -A SUMMARY_PREFETCH_ISSUE_ATTEMPTS=()
 declare -A SUMMARY_PREFETCH_ISSUE_ISSUES=()
 declare -A SUMMARY_PREFETCH_ISSUE_SUPPRESSED=()
 declare -A SUMMARY_PREFETCH_ISSUE_QUEUE_FULL=()
+declare -A SUMMARY_PREFETCH_ISSUE_DUP_INSTR=()
 
 echo ""
 echo "Runtime: $RUNTIME"
@@ -641,12 +646,13 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             SUMMARY_PREFETCH_ISSUE_ISSUES["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_ISSUES"
             SUMMARY_PREFETCH_ISSUE_SUPPRESSED["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_SUPPRESSED"
             SUMMARY_PREFETCH_ISSUE_QUEUE_FULL["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
+            SUMMARY_PREFETCH_ISSUE_DUP_INSTR["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_DUP_INSTR"
             echo "  Avg AICore Task Exec (us): $PROFILE_AVG_AICORE_EXEC"
             echo "  Prefetch Setup Outcome: $PROFILE_PREFETCH_SETUP_OUTCOME"
             echo "  Prefetch Ctrl Path Total (us): $PROFILE_PREFETCH_CTRL_US"
             echo "  Prefetch SQE Issue Total (us): $PROFILE_PREFETCH_ISSUE_US"
             echo "  Prefetch Ctrl Counts: considered=$PROFILE_PREFETCH_CTRL_CONSIDERED eligible=$PROFILE_PREFETCH_CTRL_ELIGIBLE skip_not_sdma=$PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA skip_not_available=$PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE skip_null_payload=$PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD skip_below_min_bytes=$PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES skip_no_valid_tensor=$PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR skip_scheduler_suppressed=$PROFILE_PREFETCH_CTRL_SKIP_SCHEDULER_SUPPRESSED"
-            echo "  Prefetch Issue Counts: attempts=$PROFILE_PREFETCH_ISSUE_ATTEMPTS issues=$PROFILE_PREFETCH_ISSUE_ISSUES suppressed=$PROFILE_PREFETCH_ISSUE_SUPPRESSED queue_full=$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
+            echo "  Prefetch Issue Counts: attempts=$PROFILE_PREFETCH_ISSUE_ATTEMPTS issues=$PROFILE_PREFETCH_ISSUE_ISSUES suppressed=$PROFILE_PREFETCH_ISSUE_SUPPRESSED queue_full=$PROFILE_PREFETCH_ISSUE_QUEUE_FULL dup_instr=$PROFILE_PREFETCH_ISSUE_DUP_INSTR"
         done
     }
 
