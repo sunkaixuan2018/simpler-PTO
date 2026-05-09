@@ -697,21 +697,30 @@ struct AicpuExecutor {
         static constexpr uint64_t kSmallIssueBytes = 24 * 1024;
         static constexpr uint64_t kSmallFilterBytes = 384 * 1024;
         static constexpr uint64_t kMediumIssueBytes = 64 * 1024;
-        static constexpr uint64_t kLargeFilterBytes = 1024 * 1024;
         static constexpr uint64_t kWideSpanThreshold = 32;
+        static constexpr uint64_t kVeryWideSpanThreshold = 64;
         static constexpr uint64_t kTightSpanThreshold = 16;
 
         const uint64_t issue_bytes = payload.prefetch_issue_bytes;
         const uint64_t filter_bytes = payload.prefetch_filter_bytes;
         const uint64_t logical_span = get_prefetch_logical_span(payload);
+        const bool structured_block_task =
+            (payload.tensor_count == 4) && (payload.scalar_count == 2 || payload.scalar_count == 4 || payload.scalar_count == 6);
 
+        // Default: conservative sparse data prefetch, no instruction prefetch.
+        if (!structured_block_task) {
+            return {false, 0u, 31u};
+        }
         if (issue_bytes < kSmallIssueBytes || filter_bytes < kSmallFilterBytes) {
             return {false, 0u, 31u};
+        }
+        if (logical_span > kVeryWideSpanThreshold) {
+            return {false, 0u, 23u};
         }
         if (logical_span >= kWideSpanThreshold) {
             return {false, 0u, 15u};
         }
-        if (issue_bytes >= kMediumIssueBytes && filter_bytes >= kLargeFilterBytes && logical_span < kTightSpanThreshold) {
+        if (issue_bytes >= kMediumIssueBytes && logical_span <= kTightSpanThreshold) {
             return {true, 1024u, 7u};
         }
         return {true, 512u, 11u};
