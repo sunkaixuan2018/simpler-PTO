@@ -361,9 +361,11 @@ struct AicpuExecutor {
     mutable std::atomic<uint64_t> prefetch_skip_below_min_bytes_{0};
     mutable std::atomic<uint64_t> prefetch_skip_no_valid_tensor_{0};
     mutable std::atomic<uint64_t> prefetch_skip_scheduler_suppressed_{0};
+    mutable std::atomic<uint64_t> prefetch_skip_instr_kernel_scheduler_{0};
     mutable std::atomic<uint64_t> prefetch_control_cycles_{0};
     mutable std::atomic<uint64_t> prefetch_eligible_control_cycles_{0};
     mutable std::atomic<uint32_t> prefetch_scheduler_suppress_remaining_[PLATFORM_MAX_CORES]{};
+    mutable std::atomic<uint8_t> prefetch_instr_kernel_seen_[RUNTIME_MAX_FUNC_ID]{};
 
     uint64_t *func_id_to_addr_;
     uint64_t get_function_bin_addr(int func_id) const {
@@ -598,27 +600,35 @@ struct AicpuExecutor {
             if ((slot_state.active_mask & PTO2_SUBTASK_MASK_AIC) != 0 && slot_state.task != nullptr) {
                 int32_t kid = slot_state.task->kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)];
                 if (kid != INVALID_KERNEL_ID) {
-                    uint64_t callable_addr = get_function_bin_addr(kid);
-                    if (callable_addr != 0) {
-                        const auto *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
-                        const uint64_t resolved = callable->resolved_addr();
-                        if (resolved != 0) {
-                            const uint32_t bin = callable->binary_size();
-                            if (bin > 0) {
-                                static constexpr uint32_t kInstrPrefetchCap = 2048u;
-                                const uint32_t n = (bin < kInstrPrefetchCap) ? bin : kInstrPrefetchCap;
-                                payload->instr_prefetch_addr = resolved;
-                                instr_kernel_id = kid;
-                                instr_ptr = reinterpret_cast<void *>(resolved);
-                                instr_size = static_cast<size_t>(n);
+                    if (kid >= 0 && kid < RUNTIME_MAX_FUNC_ID &&
+                        prefetch_instr_kernel_seen_[kid].load(std::memory_order_relaxed) != 0) {
+                        if (prefetch_debug_enabled_) {
+                            prefetch_skip_instr_kernel_scheduler_.fetch_add(1, std::memory_order_relaxed);
+                        }
+                        payload->instr_prefetch_addr = 0;
+                    } else {
+                        uint64_t callable_addr = get_function_bin_addr(kid);
+                        if (callable_addr != 0) {
+                            const auto *callable = reinterpret_cast<const CoreCallable *>(callable_addr);
+                            const uint64_t resolved = callable->resolved_addr();
+                            if (resolved != 0) {
+                                const uint32_t bin = callable->binary_size();
+                                if (bin > 0) {
+                                    static constexpr uint32_t kInstrPrefetchCap = 1024u;
+                                    const uint32_t n = (bin < kInstrPrefetchCap) ? bin : kInstrPrefetchCap;
+                                    payload->instr_prefetch_addr = resolved;
+                                    instr_kernel_id = kid;
+                                    instr_ptr = reinterpret_cast<void *>(resolved);
+                                    instr_size = static_cast<size_t>(n);
+                                } else {
+                                    payload->instr_prefetch_addr = 0;
+                                }
                             } else {
                                 payload->instr_prefetch_addr = 0;
                             }
                         } else {
                             payload->instr_prefetch_addr = 0;
                         }
-                    } else {
-                        payload->instr_prefetch_addr = 0;
                     }
                 } else {
                     payload->instr_prefetch_addr = 0;
@@ -638,6 +648,9 @@ struct AicpuExecutor {
                 reinterpret_cast<void *>(p.prefetch_addr), static_cast<size_t>(p.prefetch_issue_bytes), instr_ptr,
                 instr_size, instr_kernel_id, channel_idx
             );
+            if (instr_kernel_id >= 0 && instr_kernel_id < RUNTIME_MAX_FUNC_ID && instr_ptr != nullptr) {
+                prefetch_instr_kernel_seen_[instr_kernel_id].store(1, std::memory_order_relaxed);
+            }
         } while (false);
 
         if (prefetch_debug_enabled_) {
@@ -1409,10 +1422,14 @@ int32_t AicpuExecutor::init(Runtime *runtime) {
     prefetch_skip_below_min_bytes_.store(0, std::memory_order_relaxed);
     prefetch_skip_no_valid_tensor_.store(0, std::memory_order_relaxed);
     prefetch_skip_scheduler_suppressed_.store(0, std::memory_order_relaxed);
+    prefetch_skip_instr_kernel_scheduler_.store(0, std::memory_order_relaxed);
     prefetch_control_cycles_.store(0, std::memory_order_relaxed);
     prefetch_eligible_control_cycles_.store(0, std::memory_order_relaxed);
     for (int i = 0; i < PLATFORM_MAX_CORES; ++i) {
         prefetch_scheduler_suppress_remaining_[i].store(0, std::memory_order_relaxed);
+    }
+    for (int i = 0; i < RUNTIME_MAX_FUNC_ID; ++i) {
+        prefetch_instr_kernel_seen_[i].store(0, std::memory_order_relaxed);
     }
     aicpu_prefetch_init(runtime->sdma_prefetch_workspace, prefetch_suppress_window_, prefetch_debug_enabled_);
     const char *prefetch_mode_name =
@@ -2650,6 +2667,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     uint64_t skip_below_min_bytes = prefetch_skip_below_min_bytes_.load(std::memory_order_relaxed);
     uint64_t skip_no_valid_tensor = prefetch_skip_no_valid_tensor_.load(std::memory_order_relaxed);
     uint64_t skip_scheduler_suppressed = prefetch_skip_scheduler_suppressed_.load(std::memory_order_relaxed);
+    uint64_t skip_instr_kernel_scheduler = prefetch_skip_instr_kernel_scheduler_.load(std::memory_order_relaxed);
     uint64_t control_cycles = prefetch_control_cycles_.load(std::memory_order_relaxed);
     uint64_t eligible_control_cycles = prefetch_eligible_control_cycles_.load(std::memory_order_relaxed);
     DEV_ALWAYS(
@@ -2664,9 +2682,11 @@ void AicpuExecutor::deinit(Runtime *runtime) {
         "Prefetch task summary: mode=%s considered=%" PRIu64 " eligible_tasks=%" PRIu64 " tensors=%" PRIu64
         " bytes=%" PRIu64 " min_bytes=%zu skip_not_sdma=%" PRIu64 " skip_not_available=%" PRIu64
         " skip_null_payload=%" PRIu64 " skip_below_min_bytes=%" PRIu64
-        " skip_no_valid_tensor=%" PRIu64 " skip_scheduler_suppressed=%" PRIu64,
+        " skip_no_valid_tensor=%" PRIu64 " skip_scheduler_suppressed=%" PRIu64
+        " skip_instr_kernel_scheduler=%" PRIu64,
         prefetch_mode_name, considered_count, task_count, tensor_count, total_bytes, prefetch_min_bytes_, skip_not_sdma,
-        skip_not_available, skip_null_payload, skip_below_min_bytes, skip_no_valid_tensor, skip_scheduler_suppressed
+        skip_not_available, skip_null_payload, skip_below_min_bytes, skip_no_valid_tensor, skip_scheduler_suppressed,
+        skip_instr_kernel_scheduler
     );
     aicpu_prefetch_deinit();
 
@@ -2724,6 +2744,7 @@ void AicpuExecutor::deinit(Runtime *runtime) {
     prefetch_skip_null_payload_.store(0, std::memory_order_relaxed);
     prefetch_skip_below_min_bytes_.store(0, std::memory_order_relaxed);
     prefetch_skip_no_valid_tensor_.store(0, std::memory_order_relaxed);
+    prefetch_skip_instr_kernel_scheduler_.store(0, std::memory_order_relaxed);
     orch_so_handle_ = nullptr;
     orch_so_path_[0] = '\0';
 
