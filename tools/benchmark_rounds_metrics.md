@@ -21,6 +21,8 @@
 - `Device E2E (profiling)`
 - `Device E2E Avg (device log)`
 
+补充说明：`benchmark_avg_aicore_exec.sh` 的 device-log 调试统计里，当前还会输出 `dup_instr`，表示 instruction SQE 被去重跳过的次数。
+
 ## 指标总览
 
 | 指标 | 数据源 | 采样方式 | 当前实现 | 语义 |

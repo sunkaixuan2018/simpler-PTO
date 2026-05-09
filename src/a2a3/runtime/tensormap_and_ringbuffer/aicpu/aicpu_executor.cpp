@@ -594,6 +594,7 @@ struct AicpuExecutor {
             }
             void *instr_ptr = nullptr;
             size_t instr_size = 0;
+            int32_t instr_kernel_id = INVALID_KERNEL_ID;
             if ((slot_state.active_mask & PTO2_SUBTASK_MASK_AIC) != 0 && slot_state.task != nullptr) {
                 int32_t kid = slot_state.task->kernel_id[static_cast<int>(PTO2SubtaskSlot::AIC)];
                 if (kid != INVALID_KERNEL_ID) {
@@ -607,6 +608,7 @@ struct AicpuExecutor {
                                 static constexpr uint32_t kInstrPrefetchCap = 2048u;
                                 const uint32_t n = (bin < kInstrPrefetchCap) ? bin : kInstrPrefetchCap;
                                 payload->instr_prefetch_addr = resolved;
+                                instr_kernel_id = kid;
                                 instr_ptr = reinterpret_cast<void *>(resolved);
                                 instr_size = static_cast<size_t>(n);
                             } else {
@@ -634,7 +636,7 @@ struct AicpuExecutor {
             }
             aicpu_prefetch_issue_reserved(
                 reinterpret_cast<void *>(p.prefetch_addr), static_cast<size_t>(p.prefetch_issue_bytes), instr_ptr,
-                instr_size, channel_idx
+                instr_size, instr_kernel_id, channel_idx
             );
         } while (false);
 

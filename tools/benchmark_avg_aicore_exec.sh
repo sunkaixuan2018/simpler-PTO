@@ -441,6 +441,7 @@ results = {
     "ISSUE_SUPPRESSED": find(r"SDMA prefetch issue summary: .*?suppressed=(\d+)"),
     "ISSUE_QUEUE_FULL": find(r"SDMA prefetch issue summary: .*?queue_full=(\d+)"),
     "ISSUE_DUP_INSTR": find(r"SDMA prefetch issue summary: .*?dup_instr=(\d+)"),
+    "ISSUE_DUP_INSTR_KERNEL": find(r"SDMA prefetch issue summary: .*?dup_instr_kernel=(\d+)"),
     "ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?total=([0-9.]+)us"),
     "ISSUE_AVG_US": find(r"SDMA prefetch issue summary: .*?avg=([0-9.]+)us"),
     "ISSUE_ISSUE_TOTAL_US": find(r"SDMA prefetch issue summary: .*?issue_total=([0-9.]+)us"),
@@ -470,6 +471,7 @@ PROFILE_PREFETCH_ISSUE_ISSUES="-"
 PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
 PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
 PROFILE_PREFETCH_ISSUE_DUP_INSTR="-"
+PROFILE_PREFETCH_ISSUE_DUP_INSTR_KERNEL="-"
 run_profile_once() {
     local mode="$1" kernels_dir="$2" golden="$3" case_name="${4:-}"
     local profile_cmd=(
@@ -509,6 +511,7 @@ run_profile_once() {
     PROFILE_PREFETCH_ISSUE_SUPPRESSED="-"
     PROFILE_PREFETCH_ISSUE_QUEUE_FULL="-"
     PROFILE_PREFETCH_ISSUE_DUP_INSTR="-"
+    PROFILE_PREFETCH_ISSUE_DUP_INSTR_KERNEL="-"
     if [[ $profile_rc -ne 0 ]]; then
         [[ -n "$VERBOSE_LOG" && -n "$profile_output" ]] && echo "$profile_output" >> "$VERBOSE_LOG"
         return 1
@@ -555,6 +558,7 @@ run_profile_once() {
                     ISSUE_SUPPRESSED) PROFILE_PREFETCH_ISSUE_SUPPRESSED="$value" ;;
                     ISSUE_QUEUE_FULL) PROFILE_PREFETCH_ISSUE_QUEUE_FULL="$value" ;;
                     ISSUE_DUP_INSTR) PROFILE_PREFETCH_ISSUE_DUP_INSTR="$value" ;;
+                    ISSUE_DUP_INSTR_KERNEL) PROFILE_PREFETCH_ISSUE_DUP_INSTR_KERNEL="$value" ;;
                 esac
             done <<<"$prefetch_debug"
             fi
@@ -590,6 +594,7 @@ declare -A SUMMARY_PREFETCH_ISSUE_ISSUES=()
 declare -A SUMMARY_PREFETCH_ISSUE_SUPPRESSED=()
 declare -A SUMMARY_PREFETCH_ISSUE_QUEUE_FULL=()
 declare -A SUMMARY_PREFETCH_ISSUE_DUP_INSTR=()
+declare -A SUMMARY_PREFETCH_ISSUE_DUP_INSTR_KERNEL=()
 
 echo ""
 echo "Runtime: $RUNTIME"
@@ -647,12 +652,13 @@ for example in "${EXAMPLE_ORDER[@]}"; do
             SUMMARY_PREFETCH_ISSUE_SUPPRESSED["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_SUPPRESSED"
             SUMMARY_PREFETCH_ISSUE_QUEUE_FULL["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_QUEUE_FULL"
             SUMMARY_PREFETCH_ISSUE_DUP_INSTR["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_DUP_INSTR"
+            SUMMARY_PREFETCH_ISSUE_DUP_INSTR_KERNEL["$mode|$_label"]="$PROFILE_PREFETCH_ISSUE_DUP_INSTR_KERNEL"
             echo "  Avg AICore Task Exec (us): $PROFILE_AVG_AICORE_EXEC"
             echo "  Prefetch Setup Outcome: $PROFILE_PREFETCH_SETUP_OUTCOME"
             echo "  Prefetch Ctrl Path Total (us): $PROFILE_PREFETCH_CTRL_US"
             echo "  Prefetch SQE Issue Total (us): $PROFILE_PREFETCH_ISSUE_US"
             echo "  Prefetch Ctrl Counts: considered=$PROFILE_PREFETCH_CTRL_CONSIDERED eligible=$PROFILE_PREFETCH_CTRL_ELIGIBLE skip_not_sdma=$PROFILE_PREFETCH_CTRL_SKIP_NOT_SDMA skip_not_available=$PROFILE_PREFETCH_CTRL_SKIP_NOT_AVAILABLE skip_null_payload=$PROFILE_PREFETCH_CTRL_SKIP_NULL_PAYLOAD skip_below_min_bytes=$PROFILE_PREFETCH_CTRL_SKIP_BELOW_MIN_BYTES skip_no_valid_tensor=$PROFILE_PREFETCH_CTRL_SKIP_NO_VALID_TENSOR skip_scheduler_suppressed=$PROFILE_PREFETCH_CTRL_SKIP_SCHEDULER_SUPPRESSED"
-            echo "  Prefetch Issue Counts: attempts=$PROFILE_PREFETCH_ISSUE_ATTEMPTS issues=$PROFILE_PREFETCH_ISSUE_ISSUES suppressed=$PROFILE_PREFETCH_ISSUE_SUPPRESSED queue_full=$PROFILE_PREFETCH_ISSUE_QUEUE_FULL dup_instr=$PROFILE_PREFETCH_ISSUE_DUP_INSTR"
+            echo "  Prefetch Issue Counts: attempts=$PROFILE_PREFETCH_ISSUE_ATTEMPTS issues=$PROFILE_PREFETCH_ISSUE_ISSUES suppressed=$PROFILE_PREFETCH_ISSUE_SUPPRESSED queue_full=$PROFILE_PREFETCH_ISSUE_QUEUE_FULL dup_instr=$PROFILE_PREFETCH_ISSUE_DUP_INSTR dup_instr_kernel=$PROFILE_PREFETCH_ISSUE_DUP_INSTR_KERNEL"
         done
     }
 
@@ -728,15 +734,25 @@ if [[ ${#SUMMARY_NAMES[@]} -gt 0 ]]; then
             _row=$(printf "  %-40s  %18s  %18s" "$_label" "${SUMMARY_PREFETCH_ISSUE_US["baseline|$_label"]:-"-"}" "${SUMMARY_PREFETCH_ISSUE_US["sdma|$_label"]:-"-"}")
             echo "$_row"
         done
-    else
-        _mode_name="${RUN_MODES[0]}"
-        _mode_title=$(printf "%s" "$_mode_name" | tr '[:lower:]' '[:upper:]')
-        _hdr=$(printf "  %-40s  %18s  %18s" "Example" "${_mode_title} Ctrl(us)" "${_mode_title} Issue(us)")
+
+        _hdr=$(printf "  %-40s  %18s  %18s" "Example" "Baseline DupInstr" "SDMA DupInstr")
         _sep=$(printf "  %-40s  %18s  %18s" "----------------------------------------" "------------------" "------------------")
+        echo ""
         echo "$_hdr"; echo "$_sep"
         for _i in "${!SUMMARY_NAMES[@]}"; do
             _label="${SUMMARY_NAMES[$_i]}"
-            _row=$(printf "  %-40s  %18s  %18s" "$_label" "${SUMMARY_PREFETCH_CTRL_US["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_PREFETCH_ISSUE_US["${RUN_MODES[0]}|$_label"]:-"-"}")
+            _row=$(printf "  %-40s  %18s  %18s" "$_label" "${SUMMARY_PREFETCH_ISSUE_DUP_INSTR["baseline|$_label"]:-"-"}" "${SUMMARY_PREFETCH_ISSUE_DUP_INSTR["sdma|$_label"]:-"-"}")
+            echo "$_row"
+        done
+    else
+        _mode_name="${RUN_MODES[0]}"
+        _mode_title=$(printf "%s" "$_mode_name" | tr '[:lower:]' '[:upper:]')
+        _hdr=$(printf "  %-40s  %18s  %18s  %18s" "Example" "${_mode_title} Ctrl(us)" "${_mode_title} Issue(us)" "${_mode_title} DupInstr")
+        _sep=$(printf "  %-40s  %18s  %18s  %18s" "----------------------------------------" "------------------" "------------------" "------------------")
+        echo "$_hdr"; echo "$_sep"
+        for _i in "${!SUMMARY_NAMES[@]}"; do
+            _label="${SUMMARY_NAMES[$_i]}"
+            _row=$(printf "  %-40s  %18s  %18s  %18s" "$_label" "${SUMMARY_PREFETCH_CTRL_US["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_PREFETCH_ISSUE_US["${RUN_MODES[0]}|$_label"]:-"-"}" "${SUMMARY_PREFETCH_ISSUE_DUP_INSTR["${RUN_MODES[0]}|$_label"]:-"-"}")
             echo "$_row"
         done
     fi

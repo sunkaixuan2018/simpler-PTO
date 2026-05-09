@@ -22,12 +22,14 @@ bool aicpu_prefetch_reserve_channel(int thread_idx) {
 }
 
 void aicpu_prefetch_issue_reserved(
-    void* tensor_addr, size_t tensor_size, void* instr_addr, size_t instr_size, int thread_idx
+    void* tensor_addr, size_t tensor_size, void* instr_addr, size_t instr_size, int32_t instr_kernel_id,
+    int thread_idx
 ) {
     (void)tensor_addr;
     (void)tensor_size;
     (void)instr_addr;
     (void)instr_size;
+    (void)instr_kernel_id;
     (void)thread_idx;
 }
 

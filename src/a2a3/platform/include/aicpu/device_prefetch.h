@@ -63,17 +63,20 @@ bool aicpu_prefetch_reserve_channel(int thread_idx);
  *
  * Skips suppression handling and writes the SQE(s) directly. When the STARS
  * queue depth is 1, only the tensor SQE is written. When depth > 1 and
- * @p instr_addr is non-null with @p instr_size > 0, a second SQE is written
- * for code (single lock, one doorbell).
+ * @p instr_addr is non-null with @p instr_size > 0, a second SQE may be written
+ * for code (single lock, one doorbell). Implementations may skip the instruction
+ * SQE when the same kernel has already been prefetched recently.
  *
  * @param tensor_addr  Device memory address for tensor prefetch
  * @param tensor_size  Tensor prefetch length in bytes
  * @param instr_addr   Device address for instruction prefetch, or NULL to skip
  * @param instr_size   Instruction prefetch length (e.g. 2048), ignored if @p instr_addr is NULL
+ * @param instr_kernel_id  Kernel id associated with @p instr_addr, or -1 to skip dedup
  * @param thread_idx   Scheduler thread index (selects which channel to use)
  */
 void aicpu_prefetch_issue_reserved(
-    void* tensor_addr, size_t tensor_size, void* instr_addr, size_t instr_size, int thread_idx
+    void* tensor_addr, size_t tensor_size, void* instr_addr, size_t instr_size, int32_t instr_kernel_id,
+    int thread_idx
 );
 
 /**
