@@ -184,17 +184,20 @@ static bool populate_channel_with_hal(volatile stars_channel_info_t* ch, uint32_
         return false;
     }
 
-    static constexpr uint32_t ts_ids[] = {0, 1};
-    static constexpr drvSqCqType_t sqcq_types[] = {DRV_NORMAL_TYPE, DRV_SHM_TYPE};
-    uint32_t dev_ids[] = {0, ch->dev_id};
+    // Prefer the current device id and device-only stream's normal queue semantics first.
+    // Only fall back to other combinations if the preferred path cannot resolve.
+    static constexpr uint32_t primary_ts_ids[] = {0, 1};
+    static constexpr drvSqCqType_t primary_types[] = {DRV_NORMAL_TYPE};
+    static constexpr uint32_t fallback_ts_ids[] = {0, 1};
+    static constexpr drvSqCqType_t fallback_types[] = {DRV_SHM_TYPE};
+    uint32_t dev_ids[] = {ch->dev_id, 0};
 
-    for (size_t dev_idx = 0; dev_idx < sizeof(dev_ids) / sizeof(dev_ids[0]); ++dev_idx) {
-        uint32_t dev_id = dev_ids[dev_idx];
-        if (dev_idx > 0 && dev_id == dev_ids[0]) {
-            continue;
-        }
-        for (uint32_t ts_id : ts_ids) {
-            for (drvSqCqType_t type : sqcq_types) {
+    auto try_query = [&](uint32_t dev_id, const uint32_t* ts_ids, size_t ts_count,
+                         const drvSqCqType_t* types, size_t type_count) -> bool {
+        for (size_t ts_idx = 0; ts_idx < ts_count; ++ts_idx) {
+            uint32_t ts_id = ts_ids[ts_idx];
+            for (size_t type_idx = 0; type_idx < type_count; ++type_idx) {
+                drvSqCqType_t type = types[type_idx];
                 uint64_t sq_base = 0;
                 uint64_t sq_reg_base = 0;
                 uint64_t sq_depth = 0;
@@ -218,6 +221,26 @@ static bool populate_channel_with_hal(volatile stars_channel_info_t* ch, uint32_
                 }
                 return true;
             }
+        }
+        return false;
+    };
+
+    for (size_t dev_idx = 0; dev_idx < sizeof(dev_ids) / sizeof(dev_ids[0]); ++dev_idx) {
+        uint32_t dev_id = dev_ids[dev_idx];
+        if (dev_idx > 0 && dev_id == dev_ids[0]) {
+            continue;
+        }
+        if (try_query(
+                dev_id, primary_ts_ids, sizeof(primary_ts_ids) / sizeof(primary_ts_ids[0]), primary_types,
+                sizeof(primary_types) / sizeof(primary_types[0])
+            )) {
+            return true;
+        }
+        if (try_query(
+                dev_id, fallback_ts_ids, sizeof(fallback_ts_ids) / sizeof(fallback_ts_ids[0]), fallback_types,
+                sizeof(fallback_types) / sizeof(fallback_types[0])
+            )) {
+            return true;
         }
     }
 
