@@ -98,12 +98,11 @@ flowchart TD
 `resolve_sdma_runtime_env()` 的行为是：
 
 - 仅在 `platform == a2a3` 时参与
-- 单卡场景下，`sdma` 会尝试补齐：
-  - `PTO_SDMA_PROVIDER_ROOT`
-  - `ASCEND_OPP_PATH`
-- `baseline` / `twoslot` / `sdma_fake` 不需要 provider
+- 当前 HAL 方案下，`sdma` 不再要求 legacy provider bundle 或 `_deps` 下的额外 op 包
+- `baseline` / `twoslot` / `sdma_fake` 同样不需要额外 provider
 
-设计意图很明确：provider 是 `sdma` 的增强依赖，不是 baseline 的公共依赖。
+设计意图很明确：Python 入口层不再把 legacy provider 当成运行前置条件，host/device 主链路只依赖 stream SQ/CQ ID
+和 HAL 查询能力。
 
 ### 4.3 host 侧 setup
 

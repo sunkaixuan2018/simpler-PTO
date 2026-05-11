@@ -696,10 +696,9 @@ struct AicpuExecutor {
     PrefetchFeatureTier classify_prefetch_features(const PTO2TaskPayload &payload) const {
         static constexpr uint64_t kSmallIssueBytes = 20 * 1024;
         static constexpr uint64_t kSmallFilterBytes = 384 * 1024;
-        static constexpr uint64_t kMediumIssueBytes = 64 * 1024;
-        static constexpr uint64_t kWideSpanThreshold = 32;
-        static constexpr uint64_t kVeryWideSpanThreshold = 64;
-        static constexpr uint64_t kTightSpanThreshold = 16;
+        static constexpr uint64_t kInstrEnableIssueBytes = 32 * 1024;
+        static constexpr uint64_t kMidSpanThreshold = 16;
+        static constexpr uint64_t kWideSpanThreshold = 48;
 
         const uint64_t issue_bytes = payload.prefetch_issue_bytes;
         const uint64_t filter_bytes = payload.prefetch_filter_bytes;
@@ -707,23 +706,22 @@ struct AicpuExecutor {
         const bool structured_block_task =
             (payload.tensor_count == 4) && (payload.scalar_count == 2 || payload.scalar_count == 4 || payload.scalar_count == 6);
 
-        // Default: conservative sparse data prefetch, no instruction prefetch.
         if (!structured_block_task) {
             return {false, 0u, 31u};
         }
         if (issue_bytes < kSmallIssueBytes || filter_bytes < kSmallFilterBytes) {
             return {false, 0u, 31u};
         }
-        if (logical_span > kVeryWideSpanThreshold) {
-            return {false, 0u, 27u};
+        if (logical_span > kWideSpanThreshold) {
+            return {false, 0u, 31u};
         }
-        if (logical_span >= kWideSpanThreshold) {
+        if (logical_span > kMidSpanThreshold) {
             return {false, 0u, 15u};
         }
-        if (issue_bytes >= kMediumIssueBytes && logical_span <= kTightSpanThreshold) {
-            return {true, 1024u, 7u};
+        if (issue_bytes >= kInstrEnableIssueBytes) {
+            return {true, 512u, 11u};
         }
-        return {true, 768u, 11u};
+        return {false, 0u, 23u};
     }
 
     uint32_t get_scheduler_prefetch_suppress_window(const PTO2TaskSlotState &slot_state) const {

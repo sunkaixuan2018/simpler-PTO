@@ -1,12 +1,11 @@
 """
-Helpers for activating the vendored minimal SDMA provider.
+Helpers for configuring SDMA prefetch runtime environment.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
 from typing import Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -32,31 +31,14 @@ def _parse_prefetch_mode() -> Optional[str]:
         return "twoslot"
     return "sdma"
 
-
-def _is_valid_provider_root(root: Path) -> bool:
-    return (root / "aarch64-linux" / "lib64" / "libopapi.so").exists() and (root / "opp").exists()
-
-
-def discover_provider_root(project_root: Path) -> Optional[Path]:
-    env_root = os.environ.get("PTO_SDMA_LEGACY_ROOT") or os.environ.get("PTO_SDMA_PROVIDER_ROOT")
-    if env_root:
-        candidate = Path(env_root).expanduser().resolve()
-        if _is_valid_provider_root(candidate):
-            return candidate
-        logger.warning("SDMA provider root invalid: %s", candidate)
-    vendored_root = project_root / "_deps" 
-    if _is_valid_provider_root(vendored_root):
-        return vendored_root
-    return None
-
-
 def resolve_sdma_runtime_env(
     *,
-    project_root: Path,
+    project_root,
     platform: str,
     n_devices: int,
     requires_comm: bool,
 ) -> Dict[str, str]:
+    del project_root
     if platform != "a2a3":
         return {}
 
@@ -73,13 +55,5 @@ def resolve_sdma_runtime_env(
     if mode in {"baseline", "twoslot", "sdma_fake"}:
         return {}
 
-    provider_root = discover_provider_root(project_root)
-    if provider_root is None:
-        return {}
-
-    opp_dir = str((provider_root / "opp").resolve())
-    logger.info("SDMA provider: using vendored provider at %s", provider_root)
-    return {
-        "PTO_SDMA_PROVIDER_ROOT": str(provider_root),
-        "ASCEND_OPP_PATH": opp_dir,
-    }
+    logger.info("SDMA provider: no extra provider bundle needed for current HAL-based setup")
+    return {}

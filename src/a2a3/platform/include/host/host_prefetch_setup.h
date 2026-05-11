@@ -3,8 +3,8 @@
  * @brief Host-side SDMA prefetch channel setup
  *
  * Sets up STARS SDMA channels for AICPU-initiated prefetch.
- * Uses shmem's AclnnShmemSdmaStarsQuery built-in op to populate
- * stars_channel_info_t in a device workspace.
+ * Host creates device-only streams and writes their SQ/CQ IDs into a
+ * device workspace. AICPU resolves SQ base/register/depth with halSqCqQuery.
  */
 
 #ifndef PLATFORM_HOST_PREFETCH_SETUP_H_
@@ -15,8 +15,8 @@
 /**
  * Set up SDMA prefetch channels for AICPU use.
  *
- * Creates device-only streams, allocates a workspace, and runs
- * AclnnShmemSdmaStarsQuery to populate the STARS channel info.
+ * Creates device-only streams, allocates a workspace, and writes initial
+ * STARS channel info for AICPU-side HAL completion.
  *
  * @param channel_count  Number of STARS channels/streams to create.
  *

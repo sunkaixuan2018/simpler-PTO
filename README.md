@@ -65,33 +65,8 @@ export ASCEND_HOME_PATH=/usr/local/Ascend/ascend-toolkit/latest
 ## SDMA Prefetch (Optional, a2a3 Hardware)
 
 The a2a3 onboard runtime supports an experimental "SDMA prefetch" path (AICPU issues STARS SDMA CMO PREFETCH SQEs)
-to warm AICore L2 before compute. This requires an additional minimal provider bundle containing:
-
-- `x86_64-linux/lib64/libopapi.so` (exports `aclnnShmemSdmaStarsQuery*`)
-- `opp/` (OPP metadata used by the provider)
-
-### Install Provider Bundle
-
-If you received a `sdma_legacy_provider.tar.gz`, unpack it into the repo root:
-
-```bash
-mkdir -p _deps
-tar -C _deps -xzf /path/to/sdma_legacy_provider.tar.gz
-```
-
-After unpacking, the layout should be:
-
-```text
-_deps/sdma_legacy_provider/x86_64-linux/lib64/libopapi.so
-_deps/sdma_legacy_provider/opp/...
-```
-
-Alternatively, point to an existing provider directory:
-
-```bash
-export PTO_SDMA_PROVIDER_ROOT=/abs/path/to/sdma_legacy_provider
-export ASCEND_OPP_PATH=/abs/path/to/sdma_legacy_provider/opp
-```
+to warm AICore L2 before compute. The current implementation uses device-side HAL query (`halSqCqQuery`) to resolve
+SQ base/register/depth from host-provided stream SQ/CQ IDs, and no longer requires the legacy `_deps` provider bundle.
 
 ### Run Tests (Different Prefetch Modes)
 
@@ -99,7 +74,7 @@ All modes are controlled by `PTO_SDMA_PREFETCH_MODE`:
 
 - `baseline`: disable SDMA prefetch (no SDMA channel setup)
 - `twoslot`: disable SDMA prefetch (two-slot scheduler mode)
-- `sdma`: enable SDMA prefetch (requires provider bundle above)
+- `sdma`: enable SDMA prefetch
 - `sdma_fake`: disables real SDMA, keeps the control-path for A/B (no provider required)
 
 Example: run a small workload on real hardware (skip golden for benchmarking):

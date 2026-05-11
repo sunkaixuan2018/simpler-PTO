@@ -16,8 +16,10 @@
 #include "aicpu/device_time.h"
 #include "common/platform_config.h"
 
+#include <driver/ascend_hal.h>
 #include <cinttypes>
 #include <cstring>
+#include <dlfcn.h>
 
 struct stars_channel_flag_info_t {
     uint32_t flag;
@@ -124,6 +126,107 @@ static volatile uint64_t g_prefetch_issue_bytes = 0;
 static volatile uint64_t g_prefetch_attempt_cycles = 0;
 static volatile uint64_t g_prefetch_issue_cycles = 0;
 static bool g_prefetch_debug_enabled = false;
+
+using HalSqCqQueryFn = drvError_t (*)(uint32_t devId, halSqCqQueryInfo* info);
+
+static HalSqCqQueryFn g_hal_sq_cq_query = nullptr;
+static bool g_hal_sq_cq_query_resolved = false;
+
+static void resolve_hal_sq_cq_query()
+{
+    if (g_hal_sq_cq_query_resolved) {
+        return;
+    }
+    g_hal_sq_cq_query = reinterpret_cast<HalSqCqQueryFn>(dlsym(RTLD_DEFAULT, "halSqCqQuery"));
+    if (g_hal_sq_cq_query == nullptr) {
+        DEV_ERROR("SDMA prefetch: failed to resolve halSqCqQuery: %s", dlerror());
+    }
+    g_hal_sq_cq_query_resolved = true;
+}
+
+static uint64_t query_value_to_u64(const uint32_t value[SQCQ_QUERY_INFO_LENGTH])
+{
+    return static_cast<uint64_t>(value[0]) | (static_cast<uint64_t>(value[1]) << 32);
+}
+
+static uint64_t query_value_to_u64_reversed(const uint32_t value[SQCQ_QUERY_INFO_LENGTH])
+{
+    return static_cast<uint64_t>(value[1]) | (static_cast<uint64_t>(value[0]) << 32);
+}
+
+static bool query_sqcq_u64(
+    uint32_t dev_id, uint32_t ts_id, drvSqCqType_t type, uint32_t sq_id, uint32_t cq_id, drvSqCqPropType_t prop,
+    uint64_t* value
+)
+{
+    halSqCqQueryInfo query = {};
+    query.type = type;
+    query.tsId = ts_id;
+    query.sqId = sq_id;
+    query.cqId = cq_id;
+    query.prop = prop;
+    drvError_t rc = g_hal_sq_cq_query(dev_id, &query);
+    if (rc != 0) {
+        return false;
+    }
+    if (prop == DRV_SQCQ_PROP_SQ_REG_BASE) {
+        *value = query_value_to_u64_reversed(query.value);
+    } else {
+        *value = query_value_to_u64(query.value);
+    }
+    return true;
+}
+
+static bool populate_channel_with_hal(volatile stars_channel_info_t* ch, uint32_t channel_idx, uint32_t channel_count)
+{
+    resolve_hal_sq_cq_query();
+    if (g_hal_sq_cq_query == nullptr) {
+        return false;
+    }
+
+    static constexpr uint32_t ts_ids[] = {0, 1};
+    static constexpr drvSqCqType_t sqcq_types[] = {DRV_NORMAL_TYPE, DRV_SHM_TYPE};
+    uint32_t dev_ids[] = {0, ch->dev_id};
+
+    for (size_t dev_idx = 0; dev_idx < sizeof(dev_ids) / sizeof(dev_ids[0]); ++dev_idx) {
+        uint32_t dev_id = dev_ids[dev_idx];
+        if (dev_idx > 0 && dev_id == dev_ids[0]) {
+            continue;
+        }
+        for (uint32_t ts_id : ts_ids) {
+            for (drvSqCqType_t type : sqcq_types) {
+                uint64_t sq_base = 0;
+                uint64_t sq_reg_base = 0;
+                uint64_t sq_depth = 0;
+                bool ok =
+                    query_sqcq_u64(dev_id, ts_id, type, ch->sq_id, ch->cq_id, DRV_SQCQ_PROP_SQ_BASE, &sq_base) &&
+                    query_sqcq_u64(dev_id, ts_id, type, ch->sq_id, ch->cq_id, DRV_SQCQ_PROP_SQ_REG_BASE, &sq_reg_base) &&
+                    query_sqcq_u64(dev_id, ts_id, type, ch->sq_id, ch->cq_id, DRV_SQCQ_PROP_SQ_DEPTH, &sq_depth);
+                if (!ok || sq_base == 0 || sq_reg_base == 0 || sq_depth == 0) {
+                    continue;
+                }
+
+                ch->sq_base = sq_base;
+                ch->sq_reg_base = sq_reg_base;
+                ch->sq_depth = static_cast<uint32_t>(sq_depth);
+                if (channel_idx < 4 || channel_idx + 1 == channel_count) {
+                    DEV_ALWAYS(
+                        "SDMA prefetch: HAL channel[%u] sid=%u sq=%u cq=%u dev=%u ts=%u type=%d base=0x%llx reg=0x%llx depth=%u",
+                        channel_idx, ch->stream_id, ch->sq_id, ch->cq_id, dev_id, ts_id, static_cast<int>(type),
+                        (unsigned long long)ch->sq_base, (unsigned long long)ch->sq_reg_base, ch->sq_depth
+                    );
+                }
+                return true;
+            }
+        }
+    }
+
+    DEV_ALWAYS(
+        "SDMA prefetch: HAL query failed for channel[%u] sid=%u sq=%u cq=%u dev=%u", channel_idx, ch->stream_id,
+        ch->sq_id, ch->cq_id, ch->dev_id
+    );
+    return false;
+}
 
 static inline void prefetch_lock(int channel_idx)
 {
@@ -257,12 +360,23 @@ void aicpu_prefetch_init(void* sdma_workspace, uint32_t suppress_window, bool de
         return;
     }
 
+    for (uint32_t i = 0; i < g_channel_count; ++i) {
+        volatile stars_channel_info_t* ch = g_channel_info + i;
+        if ((ch->sq_base == 0 || ch->sq_reg_base == 0 || ch->sq_depth == 0) &&
+            !populate_channel_with_hal(ch, i, g_channel_count)) {
+            g_channel_info = nullptr;
+            g_channel_count = 0;
+            return;
+        }
+    }
+
     if (g_channel_info->sq_base == 0 || g_channel_info->sq_reg_base == 0 || g_channel_info->sq_depth == 0) {
         if (g_prefetch_debug_enabled) {
-            DEV_ALWAYS("SDMA prefetch: disabled (channel info not initialized: sq_base=%llu sq_reg=%llu depth=%u)",
-                       (unsigned long long)g_channel_info->sq_base,
-                       (unsigned long long)g_channel_info->sq_reg_base,
-                       g_channel_info->sq_depth);
+            DEV_ALWAYS(
+                "SDMA prefetch: disabled (channel info not initialized after HAL query: sq_base=%llu sq_reg=%llu depth=%u)",
+                (unsigned long long)g_channel_info->sq_base, (unsigned long long)g_channel_info->sq_reg_base,
+                g_channel_info->sq_depth
+            );
         }
         g_channel_info = nullptr;
         return;

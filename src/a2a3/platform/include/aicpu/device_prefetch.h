@@ -27,13 +27,15 @@
  *
  * On a2a3: Reads STARS channel info (SQ base, doorbell register) from the
  * workspace pointer set by the host. If workspace is null, prefetch is
- * silently disabled.
+ * silently disabled. Host seeds the workspace with stream SQ/CQ IDs, and
+ * AICPU completes SQ base/register/depth resolution via HAL.
  *
  * On a2a3sim: No-op.
  *
- * @param sdma_workspace  Pointer to STARS channel workspace in device GM
- *                        (set up by host via aclnnShmemSdmaStarsQuery).
- *                        NULL to disable prefetch.
+ * @param sdma_workspace  Pointer to STARS channel workspace in device GM.
+ *                        Host writes initial channel IDs; AICPU fills the
+ *                        remaining SQ metadata via HAL query. NULL disables
+ *                        prefetch.
  * @param suppress_window Number of future eligible attempts to suppress on the
  *                        same channel after one successful issue.
  */
