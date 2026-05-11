@@ -134,6 +134,24 @@ static bool query_sqcq_u64(
     return true;
 }
 
+static int resolve_forced_ts_id()
+{
+    const char* env = std::getenv("PTO_SDMA_HAL_TS_ID");
+    if (env == nullptr || *env == '\0') {
+        return -1;
+    }
+
+    char* end = nullptr;
+    errno = 0;
+    long parsed = std::strtol(env, &end, 10);
+    if (errno != 0 || end == env || *end != '\0' || (parsed != 0 && parsed != 1)) {
+        LOG_INFO("SDMA prefetch: ignore invalid PTO_SDMA_HAL_TS_ID=%s", env);
+        return -1;
+    }
+    LOG_INFO("SDMA prefetch: forcing HAL ts_id=%ld", parsed);
+    return static_cast<int>(parsed);
+}
+
 static bool populate_channel_with_hal(stars_channel_info_t& ch, uint32_t channel_idx, uint32_t channel_count)
 {
     resolve_hal_sq_cq_query();
@@ -142,7 +160,8 @@ static bool populate_channel_with_hal(stars_channel_info_t& ch, uint32_t channel
     }
 
     static constexpr uint32_t ts_ids[] = {0, 1};
-    for (uint32_t ts_id : ts_ids) {
+    int forced_ts = resolve_forced_ts_id();
+    auto try_one = [&](uint32_t ts_id) -> bool {
         uint64_t sq_base = 0;
         uint64_t sq_reg_base = 0;
         uint64_t sq_depth = 0;
@@ -151,7 +170,7 @@ static bool populate_channel_with_hal(stars_channel_info_t& ch, uint32_t channel
             query_sqcq_u64(ch.dev_id, ts_id, DRV_NORMAL_TYPE, ch.sq_id, ch.cq_id, DRV_SQCQ_PROP_SQ_REG_BASE, &sq_reg_base) &&
             query_sqcq_u64(ch.dev_id, ts_id, DRV_NORMAL_TYPE, ch.sq_id, ch.cq_id, DRV_SQCQ_PROP_SQ_DEPTH, &sq_depth);
         if (!ok || sq_base == 0 || sq_reg_base == 0 || sq_depth == 0) {
-            continue;
+            return false;
         }
 
         ch.sq_base = sq_base;
@@ -165,6 +184,24 @@ static bool populate_channel_with_hal(stars_channel_info_t& ch, uint32_t channel
             );
         }
         return true;
+    };
+
+    if (forced_ts >= 0) {
+        uint32_t ts_id = static_cast<uint32_t>(forced_ts);
+        if (try_one(ts_id)) {
+            return true;
+        }
+        LOG_INFO(
+            "SDMA prefetch: host HAL forced ts=%u miss for channel[%u] sid=%u sq=%u cq=%u dev=%u",
+            ts_id, channel_idx, ch.stream_id, ch.sq_id, ch.cq_id, ch.dev_id
+        );
+        return false;
+    }
+
+    for (uint32_t ts_id : ts_ids) {
+        if (try_one(ts_id)) {
+            return true;
+        }
     }
 
     LOG_INFO(
