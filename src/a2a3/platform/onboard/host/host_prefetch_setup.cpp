@@ -18,6 +18,7 @@
 #include "device_runner.h"
 
 #include <acl/acl.h>
+#include <driver/ascend_hal.h>
 #include <chrono>
 #include <cstdlib>
 #include <dlfcn.h>
@@ -57,6 +58,7 @@ static_assert(sizeof(stars_channel_info_t) == 64, "Channel info must be 64 bytes
 // dlsym function pointer types
 using RtStreamGetSqidFn = int (*)(const void* stream, uint32_t* sqId);
 using RtStreamGetCqidFn = int (*)(const void* stream, uint32_t* cqId, uint32_t* logicCqId);
+using HalSqCqQueryFn = drvError_t (*)(uint32_t devId, halSqCqQueryInfo* info);
 
 static constexpr size_t SDMA_WORKSPACE_SIZE = 16 * 1024;
 
@@ -65,6 +67,8 @@ static std::vector<void*> g_prefetch_streams;
 static void* g_workspace_device_ptr = nullptr;
 static int g_cached_device_id = -1;
 static int g_cached_channel_count = 0;
+static HalSqCqQueryFn g_hal_sq_cq_query = nullptr;
+static bool g_hal_sq_cq_query_resolved = false;
 
 struct HostPrefetchSetupTimer {
     std::chrono::steady_clock::time_point start{std::chrono::steady_clock::now()};
@@ -81,6 +85,94 @@ struct HostPrefetchSetupTimer {
         );
     }
 };
+
+static void resolve_hal_sq_cq_query()
+{
+    if (g_hal_sq_cq_query_resolved) {
+        return;
+    }
+    g_hal_sq_cq_query = reinterpret_cast<HalSqCqQueryFn>(dlsym(RTLD_DEFAULT, "halSqCqQuery"));
+    if (g_hal_sq_cq_query == nullptr) {
+        LOG_INFO("SDMA prefetch: halSqCqQuery not found: %s", dlerror());
+    }
+    g_hal_sq_cq_query_resolved = true;
+}
+
+static uint64_t query_value_to_u64(const uint32_t value[SQCQ_QUERY_INFO_LENGTH])
+{
+    return static_cast<uint64_t>(value[0]) | (static_cast<uint64_t>(value[1]) << 32);
+}
+
+static uint64_t query_value_to_u64_reversed(const uint32_t value[SQCQ_QUERY_INFO_LENGTH])
+{
+    return static_cast<uint64_t>(value[1]) | (static_cast<uint64_t>(value[0]) << 32);
+}
+
+static bool query_sqcq_u64(
+    uint32_t dev_id, uint32_t ts_id, drvSqCqType_t type, uint32_t sq_id, uint32_t cq_id, drvSqCqPropType_t prop,
+    uint64_t* value
+)
+{
+    if (g_hal_sq_cq_query == nullptr) {
+        return false;
+    }
+    halSqCqQueryInfo query = {};
+    query.type = type;
+    query.tsId = ts_id;
+    query.sqId = sq_id;
+    query.cqId = cq_id;
+    query.prop = prop;
+    drvError_t rc = g_hal_sq_cq_query(dev_id, &query);
+    if (rc != 0) {
+        return false;
+    }
+    if (prop == DRV_SQCQ_PROP_SQ_REG_BASE) {
+        *value = query_value_to_u64_reversed(query.value);
+    } else {
+        *value = query_value_to_u64(query.value);
+    }
+    return true;
+}
+
+static bool populate_channel_with_hal(stars_channel_info_t& ch, uint32_t channel_idx, uint32_t channel_count)
+{
+    resolve_hal_sq_cq_query();
+    if (g_hal_sq_cq_query == nullptr) {
+        return false;
+    }
+
+    static constexpr uint32_t ts_ids[] = {0, 1};
+    for (uint32_t ts_id : ts_ids) {
+        uint64_t sq_base = 0;
+        uint64_t sq_reg_base = 0;
+        uint64_t sq_depth = 0;
+        bool ok =
+            query_sqcq_u64(ch.dev_id, ts_id, DRV_NORMAL_TYPE, ch.sq_id, ch.cq_id, DRV_SQCQ_PROP_SQ_BASE, &sq_base) &&
+            query_sqcq_u64(ch.dev_id, ts_id, DRV_NORMAL_TYPE, ch.sq_id, ch.cq_id, DRV_SQCQ_PROP_SQ_REG_BASE, &sq_reg_base) &&
+            query_sqcq_u64(ch.dev_id, ts_id, DRV_NORMAL_TYPE, ch.sq_id, ch.cq_id, DRV_SQCQ_PROP_SQ_DEPTH, &sq_depth);
+        if (!ok || sq_base == 0 || sq_reg_base == 0 || sq_depth == 0) {
+            continue;
+        }
+
+        ch.sq_base = sq_base;
+        ch.sq_reg_base = sq_reg_base;
+        ch.sq_depth = static_cast<uint32_t>(sq_depth);
+        if (channel_idx < 4 || channel_idx + 1 == channel_count) {
+            LOG_INFO(
+                "SDMA prefetch: host HAL channel[%u] sid=%u sq=%u cq=%u dev=%u ts=%u type=%d base=0x%llx reg=0x%llx depth=%u",
+                channel_idx, ch.stream_id, ch.sq_id, ch.cq_id, ch.dev_id, ts_id, static_cast<int>(DRV_NORMAL_TYPE),
+                static_cast<unsigned long long>(ch.sq_base), static_cast<unsigned long long>(ch.sq_reg_base), ch.sq_depth
+            );
+        }
+        return true;
+    }
+
+    LOG_INFO(
+        "SDMA prefetch: host HAL query failed for channel[%u] sid=%u sq=%u cq=%u dev=%u", channel_idx, ch.stream_id,
+        ch.sq_id, ch.cq_id, ch.dev_id
+    );
+    return false;
+}
 
 static bool sdma_prefetch_enabled_by_env()
 {
@@ -229,10 +321,18 @@ void* host_prefetch_setup(int channel_count)
             LOG_INFO("SDMA prefetch: get cqid failed for stream %d/%d (rc=%d)", i, channel_count, rc);
             goto fail_streams;
         }
+        if (!populate_channel_with_hal(ch, static_cast<uint32_t>(i), static_cast<uint32_t>(channel_count))) {
+            setup_timer.outcome = "host_hal_query_failed";
+            goto fail_streams;
+        }
 
         if (i < 4 || i == channel_count - 1) {
-            LOG_INFO("SDMA prefetch: stream[%d/%d] created (sid=%d sq=%u cq=%u)",
-                     i, channel_count, stream_id, ch.sq_id, ch.cq_id);
+            LOG_INFO(
+                "SDMA prefetch: stream[%d/%d] created (sid=%d sq=%u cq=%u base=0x%llx reg=0x%llx depth=%u)",
+                i, channel_count, stream_id, ch.sq_id, ch.cq_id,
+                static_cast<unsigned long long>(ch.sq_base),
+                static_cast<unsigned long long>(ch.sq_reg_base), ch.sq_depth
+            );
         }
     }
     (void)ctx;
