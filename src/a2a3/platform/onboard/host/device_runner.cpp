@@ -1451,6 +1451,13 @@ int DeviceRunner::init_dep_gen(int num_threads, int device_id) {
 }
 
 void DeviceRunner::finalize_collectors() {
+    LOG_INFO_V0(
+        "finalize_collectors begin: l2=%d dump=%d pmu=%d dep_gen=%d",
+        l2_perf_collector_.is_initialized() ? 1 : 0,
+        dump_collector_.is_initialized() ? 1 : 0,
+        pmu_collector_.is_initialized() ? 1 : 0,
+        dep_gen_collector_.is_initialized() ? 1 : 0
+    );
     auto unregister_cb = [](void *host_ptr, int device_id) -> int {
         HalHostUnregisterFn fn = get_halHostUnregister();
         if (fn != nullptr) {
@@ -1474,4 +1481,11 @@ void DeviceRunner::finalize_collectors() {
     if (dep_gen_collector_.is_initialized()) {
         dep_gen_collector_.finalize(unregister_cb, free_cb);
     }
+    LOG_INFO_V0(
+        "finalize_collectors complete: l2=%d dump=%d pmu=%d dep_gen=%d",
+        l2_perf_collector_.is_initialized() ? 1 : 0,
+        dump_collector_.is_initialized() ? 1 : 0,
+        pmu_collector_.is_initialized() ? 1 : 0,
+        dep_gen_collector_.is_initialized() ? 1 : 0
+    );
 }

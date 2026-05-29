@@ -786,8 +786,9 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
 
     // Stop mgmt + collector threads if the caller didn't already (idempotent).
     stop();
+    reset_release_stats();
 
-    LOG_DEBUG("Cleaning up performance profiling resources");
+    LOG_INFO_V0("L2PerfCollector::finalize begin: num_aicore=%d", num_aicore_);
 
     // Every release site below goes through release_one_buffer so the
     // unregister and free are an inseparable pair — each dev_ptr that
@@ -872,8 +873,18 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     core_to_thread_.clear();
     has_phase_data_ = false;
     total_perf_collected_ = 0;
+    const auto &stats = release_stats();
+    LOG_INFO_V0(
+        "L2PerfCollector::finalize release stats: releases=%llu unregister_attempts=%llu "
+        "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu",
+        static_cast<unsigned long long>(stats.release_calls),
+        static_cast<unsigned long long>(stats.unregister_attempts),
+        static_cast<unsigned long long>(stats.unregister_skipped),
+        static_cast<unsigned long long>(stats.unregister_failed),
+        static_cast<unsigned long long>(stats.free_attempts)
+    );
     clear_memory_context();
 
-    LOG_DEBUG("Performance profiling cleanup complete");
+    LOG_INFO_V0("L2PerfCollector::finalize complete");
     return 0;
 }

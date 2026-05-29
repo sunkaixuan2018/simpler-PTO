@@ -125,6 +125,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <functional>
 #include <optional>
 #include <thread>
@@ -416,6 +417,18 @@ public:
     const Manager &manager() const { return manager_; }
 
 protected:
+    struct ReleaseStats {
+        uint64_t release_calls{0};
+        uint64_t unregister_attempts{0};
+        uint64_t unregister_skipped{0};
+        uint64_t unregister_failed{0};
+        uint64_t free_attempts{0};
+    };
+
+    void reset_release_stats() { release_stats_ = {}; }
+
+    const ReleaseStats &release_stats() const { return release_stats_; }
+
     Manager manager_;
     std::atomic<bool> execution_complete_{false};
     std::thread collector_thread_;
@@ -429,6 +442,7 @@ protected:
     ProfFreeCallback free_cb_{nullptr};
     void *shm_host_{nullptr};
     int device_id_{-1};
+    ReleaseStats release_stats_;
 
     /**
      * RAII counterpart of ``alloc_single_buffer``: unregister the host
@@ -449,18 +463,23 @@ protected:
         void *host_ptr_override = nullptr
     ) {
         if (dev_ptr == nullptr) return;
+        release_stats_.release_calls++;
         if (unregister_cb != nullptr) {
             void *host_ptr = host_ptr_override != nullptr ? host_ptr_override : manager_.find_host_ptr(dev_ptr);
             if (host_ptr == nullptr) {
+                release_stats_.unregister_skipped++;
                 LOG_ERROR("halHostUnregister skipped for dev_ptr %p: no host mapping", dev_ptr);
             } else {
+                release_stats_.unregister_attempts++;
                 int rc = unregister_cb(host_ptr, device_id_);
                 if (rc != 0) {
+                    release_stats_.unregister_failed++;
                     LOG_ERROR("halHostUnregister failed for host_ptr %p (dev_ptr %p): %d", host_ptr, dev_ptr, rc);
                 }
             }
         }
         if (free_cb) {
+            release_stats_.free_attempts++;
             free_cb(dev_ptr);
         }
     }
