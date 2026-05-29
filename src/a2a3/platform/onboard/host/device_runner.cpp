@@ -325,6 +325,10 @@ int DeviceRunner::attach_current_thread(int device_id) {
         LOG_ERROR("rtSetDevice(%d) failed: %d", device_id, rc);
         return rc;
     }
+    LOG_ERROR(
+        "DeviceRunner attach_current_thread: requested_device=%d previous_device=%d allocations=%zu",
+        device_id, device_id_, mem_alloc_.get_allocation_count()
+    );
 
     if (device_id_ == -1) {
         configure_aicore_op_timeout();
@@ -416,6 +420,10 @@ int DeviceRunner::prepare_run_context(int device_id) {
     }
 
     if (stream_aicpu_ != nullptr && stream_aicore_ != nullptr) {
+        LOG_ERROR(
+            "DeviceRunner prepare_run_context reuse: device=%d aicpu_stream=%p aicore_stream=%p allocations=%zu",
+            device_id, stream_aicpu_, stream_aicore_, mem_alloc_.get_allocation_count()
+        );
         return 0;
     }
 
@@ -436,20 +444,37 @@ int DeviceRunner::prepare_run_context(int device_id) {
         return rc;
     }
 
-    LOG_INFO_V0("DeviceRunner: device=%d set, streams created", device_id);
+    LOG_ERROR(
+        "DeviceRunner prepare_run_context created: device=%d aicpu_stream=%p aicore_stream=%p allocations=%zu",
+        device_id, stream_aicpu_, stream_aicore_, mem_alloc_.get_allocation_count()
+    );
     return 0;
 }
 
 void DeviceRunner::release_run_context() {
+    LOG_ERROR(
+        "DeviceRunner release_run_context begin: device=%d aicpu_stream=%p aicore_stream=%p allocations=%zu",
+        device_id_, stream_aicpu_, stream_aicore_, mem_alloc_.get_allocation_count()
+    );
     // Destroy streams (they belong to the current thread's CANN context)
     if (stream_aicpu_ != nullptr) {
-        rtStreamDestroy(stream_aicpu_);
+        int rc = rtStreamDestroy(stream_aicpu_);
+        if (rc != 0) {
+            LOG_ERROR("rtStreamDestroy(AICPU) failed during release_run_context: %d", rc);
+        }
         stream_aicpu_ = nullptr;
     }
     if (stream_aicore_ != nullptr) {
-        rtStreamDestroy(stream_aicore_);
+        int rc = rtStreamDestroy(stream_aicore_);
+        if (rc != 0) {
+            LOG_ERROR("rtStreamDestroy(AICore) failed during release_run_context: %d", rc);
+        }
         stream_aicore_ = nullptr;
     }
+    LOG_ERROR(
+        "DeviceRunner release_run_context complete: device=%d allocations=%zu",
+        device_id_, mem_alloc_.get_allocation_count()
+    );
 }
 
 int DeviceRunner::ensure_binaries_loaded() {
@@ -1097,6 +1122,13 @@ int DeviceRunner::finalize() {
         return 0;
     }
 
+    LOG_ERROR(
+        "DeviceRunner finalize begin: device=%d acl_ready=%d aicpu_stream=%p aicore_stream=%p allocations=%zu "
+        "device_wall=%p",
+        device_id_, acl_ready_ ? 1 : 0, stream_aicpu_, stream_aicore_, mem_alloc_.get_allocation_count(),
+        device_wall_dev_ptr_
+    );
+
     int rc = attach_current_thread(device_id_);
     if (rc != 0) {
         LOG_ERROR("Failed to attach finalize thread to device %d: %d", device_id_, rc);
@@ -1161,7 +1193,9 @@ int DeviceRunner::finalize() {
     cached_gm_sm_size_ = 0;
 
     // Free all remaining allocations (including handshake buffer and binGmAddr)
+    LOG_ERROR("DeviceRunner before mem_alloc_.finalize: allocations=%zu", mem_alloc_.get_allocation_count());
     mem_alloc_.finalize();
+    LOG_ERROR("DeviceRunner after mem_alloc_.finalize: allocations=%zu", mem_alloc_.get_allocation_count());
 
     // Reset device and finalize ACL AFTER all device memory is freed.
     // Gated on acl_ready_ so rt-only runtimes that never called
@@ -1171,13 +1205,19 @@ int DeviceRunner::finalize() {
         if (reset_rc != 0) {
             LOG_ERROR("aclrtResetDevice(%d) failed during finalize: %d", device_id_, reset_rc);
             rc = reset_rc;
+        } else {
+            LOG_ERROR("aclrtResetDevice(%d) succeeded during finalize", device_id_);
         }
         int finalize_rc = aclFinalize();
         if (finalize_rc != 0) {
             LOG_ERROR("aclFinalize failed during finalize: %d", finalize_rc);
             if (rc == 0) rc = finalize_rc;
+        } else {
+            LOG_ERROR("aclFinalize succeeded during finalize");
         }
         acl_ready_ = false;
+    } else {
+        LOG_ERROR("DeviceRunner finalize skipped ACL reset/finalize: acl_ready=%d device=%d", acl_ready_ ? 1 : 0, device_id_);
     }
 
     // Free the 8-byte device_wall buffer (allocated lazily in run()).
@@ -1190,7 +1230,7 @@ int DeviceRunner::finalize() {
     worker_count_ = 0;
     aicore_kernel_binary_.clear();
 
-    LOG_INFO_V0("DeviceRunner finalized");
+    LOG_ERROR("DeviceRunner finalized: rc=%d allocations=%zu", rc, mem_alloc_.get_allocation_count());
     return rc;
 }
 
