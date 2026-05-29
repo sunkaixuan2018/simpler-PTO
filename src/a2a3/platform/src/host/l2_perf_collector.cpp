@@ -788,7 +788,7 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     stop();
     reset_release_stats();
 
-    LOG_INFO_V0("L2PerfCollector::finalize begin: num_aicore=%d", num_aicore_);
+    LOG_ERROR("L2PerfCollector::finalize begin: num_aicore=%d", num_aicore_);
 
     // Every release site below goes through release_one_buffer so the
     // unregister and free are an inseparable pair — each dev_ptr that
@@ -874,7 +874,7 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     has_phase_data_ = false;
     total_perf_collected_ = 0;
     const auto &stats = release_stats();
-    LOG_INFO_V0(
+    LOG_ERROR(
         "L2PerfCollector::finalize release stats: releases=%llu unregister_attempts=%llu "
         "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu",
         static_cast<unsigned long long>(stats.release_calls),
@@ -885,6 +885,6 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     );
     clear_memory_context();
 
-    LOG_INFO_V0("L2PerfCollector::finalize complete");
+    LOG_ERROR("L2PerfCollector::finalize complete");
     return 0;
 }
