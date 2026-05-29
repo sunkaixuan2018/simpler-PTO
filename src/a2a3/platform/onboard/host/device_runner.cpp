@@ -1218,6 +1218,13 @@ int DeviceRunner::finalize() {
         acl_ready_ = false;
     } else {
         LOG_ERROR("DeviceRunner finalize skipped ACL reset/finalize: acl_ready=%d device=%d", acl_ready_ ? 1 : 0, device_id_);
+        int reset_rc = rtDeviceReset(device_id_);
+        if (reset_rc != 0) {
+            LOG_ERROR("rtDeviceReset(%d) failed during finalize: %d", device_id_, reset_rc);
+            if (rc == 0) rc = reset_rc;
+        } else {
+            LOG_ERROR("rtDeviceReset(%d) succeeded during finalize", device_id_);
+        }
     }
 
     // Free the 8-byte device_wall buffer (allocated lazily in run()).
