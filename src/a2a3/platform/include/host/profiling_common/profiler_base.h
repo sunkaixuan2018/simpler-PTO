@@ -148,7 +148,7 @@ namespace profiling_common {
 // so the captureless C-callback shape matches their actual nature.
 using ProfAllocCallback = std::function<void *(size_t size)>;
 using ProfRegisterCallback = int (*)(void *dev_ptr, size_t size, int device_id, void **host_ptr_out);
-using ProfUnregisterCallback = int (*)(void *dev_ptr, int device_id);
+using ProfUnregisterCallback = int (*)(void *host_ptr, int device_id);
 using ProfFreeCallback = std::function<int(void *dev_ptr)>;
 
 // Result of Module::resolve_entry. Carries everything the unified
@@ -444,12 +444,20 @@ protected:
      * by passing nullptr for ``unregister_cb`` when no registration was
      * installed at init.
      */
-    void release_one_buffer(void *dev_ptr, ProfUnregisterCallback unregister_cb, const ProfFreeCallback &free_cb) {
+    void release_one_buffer(
+        void *dev_ptr, ProfUnregisterCallback unregister_cb, const ProfFreeCallback &free_cb,
+        void *host_ptr_override = nullptr
+    ) {
         if (dev_ptr == nullptr) return;
         if (unregister_cb != nullptr) {
-            int rc = unregister_cb(dev_ptr, device_id_);
-            if (rc != 0) {
-                LOG_ERROR("halHostUnregister failed for dev_ptr %p: %d", dev_ptr, rc);
+            void *host_ptr = host_ptr_override != nullptr ? host_ptr_override : manager_.find_host_ptr(dev_ptr);
+            if (host_ptr == nullptr) {
+                LOG_ERROR("halHostUnregister skipped for dev_ptr %p: no host mapping", dev_ptr);
+            } else {
+                int rc = unregister_cb(host_ptr, device_id_);
+                if (rc != 0) {
+                    LOG_ERROR("halHostUnregister failed for host_ptr %p (dev_ptr %p): %d", host_ptr, dev_ptr, rc);
+                }
             }
         }
         if (free_cb) {

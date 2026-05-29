@@ -341,7 +341,7 @@ void PmuCollector::finalize(PmuUnregisterCallback unregister_cb, const PmuFreeCa
 
     // Free shared header region via the shared RAII helper.
     if (shm_dev_ != nullptr) {
-        release_one_buffer(shm_dev_, shm_registered_ ? unregister_cb : nullptr, free_cb);
+        release_one_buffer(shm_dev_, shm_registered_ ? unregister_cb : nullptr, free_cb, shm_host_);
         shm_dev_ = nullptr;
         shm_host_ = nullptr;
     }

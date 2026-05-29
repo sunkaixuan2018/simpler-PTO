@@ -614,7 +614,7 @@ int TensorDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Du
     // Free arenas through the shared RAII helper.
     for (auto &ai : arenas_) {
         if (ai.dev_ptr) {
-            release_one_buffer(ai.dev_ptr, unregister_cb, free_cb);
+            release_one_buffer(ai.dev_ptr, unregister_cb, free_cb, ai.host_ptr);
             ai.dev_ptr = nullptr;
             ai.host_ptr = nullptr;
         }
@@ -623,7 +623,7 @@ int TensorDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Du
 
     // Free shared memory through the same helper.
     if (dump_shared_mem_dev_) {
-        release_one_buffer(dump_shared_mem_dev_, was_registered_ ? unregister_cb : nullptr, free_cb);
+        release_one_buffer(dump_shared_mem_dev_, was_registered_ ? unregister_cb : nullptr, free_cb, shm_host_);
         dump_shared_mem_dev_ = nullptr;
         shm_host_ = nullptr;
     }

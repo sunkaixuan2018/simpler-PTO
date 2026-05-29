@@ -253,7 +253,7 @@ void DepGenCollector::finalize(DepGenUnregisterCallback unregister_cb, const Dep
     manager_.clear_mappings();
 
     if (shm_dev_ != nullptr) {
-        release_one_buffer(shm_dev_, shm_registered_ ? unregister_cb : nullptr, free_cb);
+        release_one_buffer(shm_dev_, shm_registered_ ? unregister_cb : nullptr, free_cb, shm_host_);
         shm_dev_ = nullptr;
         shm_host_ = nullptr;
     }

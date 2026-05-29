@@ -858,7 +858,7 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     // ProfilerBase's set_memory_context handed register_cb == nullptr iff the
     // caller doesn't intend to register, so checking unregister_cb inside
     // release_one_buffer is sufficient — no separate ``was_registered_`` flag.
-    release_one_buffer(perf_shared_mem_dev_, unregister_cb, free_cb);
+    release_one_buffer(perf_shared_mem_dev_, unregister_cb, free_cb, shm_host_);
     LOG_DEBUG("Main shm released");
 
     perf_shared_mem_dev_ = nullptr;

@@ -1451,10 +1451,10 @@ int DeviceRunner::init_dep_gen(int num_threads, int device_id) {
 }
 
 void DeviceRunner::finalize_collectors() {
-    auto unregister_cb = [](void *dev_ptr, int device_id) -> int {
+    auto unregister_cb = [](void *host_ptr, int device_id) -> int {
         HalHostUnregisterFn fn = get_halHostUnregister();
         if (fn != nullptr) {
-            return fn(dev_ptr, device_id);
+            return fn(host_ptr, device_id);
         }
         return 0;
     };

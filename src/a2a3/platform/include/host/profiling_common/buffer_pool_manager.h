@@ -268,6 +268,11 @@ public:
         return nullptr;
     }
 
+    void *find_host_ptr(void *dev_ptr) const {
+        auto it = dev_to_host_.find(dev_ptr);
+        return it != dev_to_host_.end() ? it->second : nullptr;
+    }
+
     /**
      * Register an externally-allocated mapping. Used by the Collector during
      * initialize() when it pre-allocates buffers and wants the mgmt thread to
