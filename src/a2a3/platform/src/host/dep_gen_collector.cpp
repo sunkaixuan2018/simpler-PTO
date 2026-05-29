@@ -215,6 +215,7 @@ void DepGenCollector::finalize(DepGenUnregisterCallback unregister_cb, const Dep
     if (!initialized_) return;
 
     stop();
+    reset_release_stats();
 
     {
         std::scoped_lock lock(records_mutex_);
@@ -263,6 +264,17 @@ void DepGenCollector::finalize(DepGenUnregisterCallback unregister_cb, const Dep
     shm_registered_ = false;
     shm_size_ = 0;
     total_collected_ = 0;
+    const auto &stats = release_stats();
+    LOG_ERROR(
+        "DepGenCollector::finalize release stats: releases=%llu unregister_attempts=%llu "
+        "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu free_failed=%llu",
+        static_cast<unsigned long long>(stats.release_calls),
+        static_cast<unsigned long long>(stats.unregister_attempts),
+        static_cast<unsigned long long>(stats.unregister_skipped),
+        static_cast<unsigned long long>(stats.unregister_failed),
+        static_cast<unsigned long long>(stats.free_attempts),
+        static_cast<unsigned long long>(stats.free_failed)
+    );
     clear_memory_context();
     LOG_INFO_V0("DepGen collector finalized");
 }

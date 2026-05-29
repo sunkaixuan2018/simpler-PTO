@@ -423,6 +423,7 @@ protected:
         uint64_t unregister_skipped{0};
         uint64_t unregister_failed{0};
         uint64_t free_attempts{0};
+        uint64_t free_failed{0};
     };
 
     void reset_release_stats() { release_stats_ = {}; }
@@ -480,7 +481,11 @@ protected:
         }
         if (free_cb) {
             release_stats_.free_attempts++;
-            free_cb(dev_ptr);
+            int rc = free_cb(dev_ptr);
+            if (rc != 0) {
+                release_stats_.free_failed++;
+                LOG_ERROR("profiler free failed for dev_ptr %p: %d", dev_ptr, rc);
+            }
         }
     }
 

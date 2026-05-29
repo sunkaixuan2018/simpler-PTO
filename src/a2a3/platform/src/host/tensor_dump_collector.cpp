@@ -567,6 +567,7 @@ int TensorDumpCollector::export_dump_files() {
 int TensorDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const DumpFreeCallback &free_cb) {
     // Stop mgmt + collector threads if the caller didn't already (idempotent).
     stop();
+    reset_release_stats();
 
     // DumpMetaBuffers appear in multiple lists (per-thread free_queues,
     // recycled pool); dedup so each dev_ptr funnels through the shared
@@ -636,6 +637,17 @@ int TensorDumpCollector::finalize(DumpUnregisterCallback unregister_cb, const Du
     total_truncated_count_ = 0;
     total_overwrite_count_ = 0;
     writer_started_ = false;
+    const auto &stats = release_stats();
+    LOG_ERROR(
+        "TensorDumpCollector::finalize release stats: releases=%llu unregister_attempts=%llu "
+        "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu free_failed=%llu",
+        static_cast<unsigned long long>(stats.release_calls),
+        static_cast<unsigned long long>(stats.unregister_attempts),
+        static_cast<unsigned long long>(stats.unregister_skipped),
+        static_cast<unsigned long long>(stats.unregister_failed),
+        static_cast<unsigned long long>(stats.free_attempts),
+        static_cast<unsigned long long>(stats.free_failed)
+    );
     clear_memory_context();
 
     return 0;

@@ -66,7 +66,11 @@ void *L2PerfCollector::alloc_single_buffer(size_t size, void **host_ptr_out) {
         void *host_ptr = nullptr;
         int rc = register_cb_(dev_ptr, size, device_id_, &host_ptr);
         if (rc != 0 || host_ptr == nullptr) {
-            LOG_ERROR("Buffer registration failed: %d", rc);
+            LOG_ERROR(
+                "L2PerfCollector::alloc_single_buffer register failed: size=%zu dev_ptr=%p host_ptr=%p rc=%d "
+                "device_id=%d",
+                size, dev_ptr, host_ptr, rc, device_id_
+            );
             *host_ptr_out = nullptr;
             return nullptr;
         }
@@ -876,12 +880,13 @@ int L2PerfCollector::finalize(L2PerfUnregisterCallback unregister_cb, const L2Pe
     const auto &stats = release_stats();
     LOG_ERROR(
         "L2PerfCollector::finalize release stats: releases=%llu unregister_attempts=%llu "
-        "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu",
+        "unregister_skipped=%llu unregister_failed=%llu free_attempts=%llu free_failed=%llu",
         static_cast<unsigned long long>(stats.release_calls),
         static_cast<unsigned long long>(stats.unregister_attempts),
         static_cast<unsigned long long>(stats.unregister_skipped),
         static_cast<unsigned long long>(stats.unregister_failed),
-        static_cast<unsigned long long>(stats.free_attempts)
+        static_cast<unsigned long long>(stats.free_attempts),
+        static_cast<unsigned long long>(stats.free_failed)
     );
     clear_memory_context();
 
