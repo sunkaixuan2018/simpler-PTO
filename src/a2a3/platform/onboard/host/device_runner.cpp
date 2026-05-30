@@ -65,13 +65,30 @@ using HalHostUnregisterFn = int (*)(void *host_ptr, int device_id);
 
 int load_hal_if_needed() {
     if (g_hal_handle != nullptr) {
+        LOG_ERROR("ascend_hal already loaded: handle=%p", g_hal_handle);
         return 0;
     }
     g_hal_handle = dlopen("libascend_hal.so", RTLD_NOW | RTLD_LOCAL);
     if (g_hal_handle == nullptr) {
         return -1;
     }
+    LOG_ERROR("ascend_hal loaded: handle=%p", g_hal_handle);
     return 0;
+}
+
+void unload_hal_if_loaded() {
+    if (g_hal_handle == nullptr) {
+        LOG_ERROR("ascend_hal unload skipped: no cached handle");
+        return;
+    }
+    void *handle = g_hal_handle;
+    g_hal_handle = nullptr;
+    int rc = dlclose(handle);
+    if (rc != 0) {
+        LOG_ERROR("ascend_hal dlclose failed: handle=%p err=%s", handle, dlerror());
+    } else {
+        LOG_ERROR("ascend_hal unloaded: handle=%p", handle);
+    }
 }
 
 HalHostRegisterFn get_halHostRegister() {
@@ -1226,6 +1243,7 @@ int DeviceRunner::finalize() {
             LOG_ERROR("rtDeviceReset(%d) succeeded during finalize", device_id_);
         }
     }
+    unload_hal_if_loaded();
 
     // Free the 8-byte device_wall buffer (allocated lazily in run()).
     if (device_wall_dev_ptr_ != nullptr) {
