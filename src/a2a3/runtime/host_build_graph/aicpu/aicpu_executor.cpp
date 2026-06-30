@@ -44,6 +44,11 @@ struct CoreInfo {
     CoreType core_type;
 };
 
+static int task_kernel_id(Runtime &runtime, int task_id) {
+    Task *task = runtime.get_task(task_id);
+    return task != nullptr ? task->func_id : -1;
+}
+
 struct AicpuExecutor {
     // ===== Thread management state =====
     std::atomic<int> thread_idx_{0};
@@ -767,7 +772,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime &runtime, int thread_idx, const 
                     if (prev_running_id != AICPU_TASK_INVALID) {
                         if (l2_swimlane_aicpu_complete_task(
                                 core_id, thread_idx, static_cast<uint32_t>(prev_running_id),
-                                dispatch_timestamps_[core_id], finish_ts
+                                task_kernel_id(runtime, prev_running_id), dispatch_timestamps_[core_id], finish_ts
                             ) != 0) {
                             LOG_ERROR(
                                 "Core %d: l2_swimlane_aicpu_complete_task failed for implicit task %d", core_id,
@@ -778,7 +783,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime &runtime, int thread_idx, const 
 
                     if (l2_swimlane_aicpu_complete_task(
                             core_id, thread_idx, static_cast<uint32_t>(completed_task_id),
-                            dispatch_timestamps_[core_id], finish_ts
+                            task_kernel_id(runtime, completed_task_id), dispatch_timestamps_[core_id], finish_ts
                         ) != 0) {
                         LOG_ERROR(
                             "Core %d: l2_swimlane_aicpu_complete_task failed for task %d", core_id, completed_task_id
@@ -863,7 +868,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime &runtime, int thread_idx, const 
                     if (l2_swimlane_enabled && l2_swimlane_level >= L2SwimlaneLevel::AICPU_TIMING) {
                         if (l2_swimlane_aicpu_complete_task(
                                 core_id, thread_idx, static_cast<uint32_t>(prev_running_id),
-                                dispatch_timestamps_[core_id], finish_ts
+                                task_kernel_id(runtime, prev_running_id), dispatch_timestamps_[core_id], finish_ts
                             ) != 0) {
                             LOG_ERROR(
                                 "Core %d: l2_swimlane_aicpu_complete_task failed for implicit task %d", core_id,
@@ -906,7 +911,7 @@ int AicpuExecutor::resolve_and_dispatch(Runtime &runtime, int thread_idx, const 
                 if (l2_swimlane_enabled && l2_swimlane_level >= L2SwimlaneLevel::AICPU_TIMING) {
                     if (l2_swimlane_aicpu_complete_task(
                             core_id, thread_idx, static_cast<uint32_t>(completed_task_id),
-                            dispatch_timestamps_[core_id], finish_ts
+                            task_kernel_id(runtime, completed_task_id), dispatch_timestamps_[core_id], finish_ts
                         ) != 0) {
                         LOG_ERROR(
                             "Core %d: l2_swimlane_aicpu_complete_task failed for task %d", core_id, completed_task_id

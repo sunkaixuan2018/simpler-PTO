@@ -445,7 +445,8 @@ void l2_swimlane_aicpu_on_aicore_dispatch(int core_id, int thread_idx) {
 }
 
 int l2_swimlane_aicpu_complete_task(
-    int core_id, int thread_idx, uint32_t reg_task_id, uint64_t dispatch_time, uint64_t finish_time
+    int core_id, int thread_idx, uint32_t reg_task_id, int32_t kernel_id, uint64_t dispatch_time,
+    uint64_t finish_time
 ) {
     if (core_id < 0 || core_id >= PLATFORM_MAX_CORES) {
         return -1;
@@ -478,6 +479,7 @@ int l2_swimlane_aicpu_complete_task(
     // joins by reg_task_id. See L2SwimlaneAicpuTaskRecord header comment.
     L2SwimlaneAicpuTaskRecord *record = &l2_swimlane_buf->records[count];
     record->reg_task_id = reg_task_id;
+    record->kernel_id = kernel_id;
     record->dispatch_time = dispatch_time;
     record->finish_time = finish_time;
 

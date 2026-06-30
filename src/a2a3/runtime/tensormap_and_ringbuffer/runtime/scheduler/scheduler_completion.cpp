@@ -204,7 +204,8 @@ void SchedulerContext::complete_slot_task(
 #endif
 
         if (l2_swimlane_aicpu_complete_task(
-                core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id), dispatch_ts, finish_ts
+                core_id, thread_idx, static_cast<uint32_t>(expected_reg_task_id),
+                slot_state.task->kernel_id[static_cast<int32_t>(subslot)], dispatch_ts, finish_ts
             ) != 0) {
             LOG_ERROR(
                 "Core %d: l2_swimlane_aicpu_complete_task failed for task 0x%" PRIx64, core_id,

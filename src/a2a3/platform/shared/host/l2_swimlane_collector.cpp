@@ -765,7 +765,7 @@ int L2SwimlaneCollector::export_swimlane_json() {
     // of swimlane_converter.py's v2 reader.
     //
     //   aicore_tasks: [core_id, task_token_raw, reg_task_id, start_cycles, end_cycles]
-    //   aicpu_tasks:  [core_id, reg_task_id, dispatch_cycles, finish_cycles]
+    //   aicpu_tasks:  [core_id, reg_task_id, kernel_id, dispatch_cycles, finish_cycles]
     {
         // copy_aicore_buffer already drops r.start_time == 0 slots when
         // collecting from the device side, so no defensive filter here.
@@ -792,8 +792,8 @@ int L2SwimlaneCollector::export_swimlane_json() {
         for (size_t core_idx = 0; core_idx < collected_perf_records_.size(); core_idx++) {
             for (const auto &r : collected_perf_records_[core_idx]) {
                 if (!first) outfile << ",";
-                outfile << "\n    [" << core_idx << ", " << r.reg_task_id << ", " << r.dispatch_time << ", "
-                        << r.finish_time << "]";
+                outfile << "\n    [" << core_idx << ", " << r.reg_task_id << ", " << r.kernel_id << ", "
+                        << r.dispatch_time << ", " << r.finish_time << "]";
                 first = false;
                 total++;
             }

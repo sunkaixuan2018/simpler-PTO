@@ -101,7 +101,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             "core_to_thread": [<int>, ...]      # optional (level >= 3)
           },
           "aicore_tasks": [[core_id, task_token_raw, reg_task_id, start_cycles, end_cycles], ...],
-          "aicpu_tasks":  [[core_id, reg_task_id, dispatch_cycles, finish_cycles], ...],
+          "aicpu_tasks":  [[core_id, reg_task_id, kernel_id, dispatch_cycles, finish_cycles], ...],
           "aicpu_scheduler_phases":     [ [ {kind, start_cycles, end_cycles, ...}, ... ], ... ],
           "aicpu_orchestrator_phases":  [ [ {submit_idx, task_id, start_cycles, end_cycles}, ... ], ... ]
         }
@@ -173,7 +173,11 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
     for _, _, _, s, e in aicore_rows:
         _track(int(s))
         _track(int(e))
-    for _, _, d, f in aicpu_rows:
+    for row in aicpu_rows:
+        if len(row) == 5:
+            _, _, _, d, f = row
+        else:
+            _, _, d, f = row
         _track(int(d))
         _track(int(f))
     for thread_records in sched_phases_raw:
@@ -205,9 +209,14 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
 
     if aicpu_rows:
         for row in aicpu_rows:
-            core_id, reg_task_id, dispatch_cycles, finish_cycles = row
+            if len(row) == 5:
+                core_id, reg_task_id, kernel_id, dispatch_cycles, finish_cycles = row
+            else:
+                core_id, reg_task_id, dispatch_cycles, finish_cycles = row
+                kernel_id = -1
             core_id = int(core_id)
             reg_task_id = int(reg_task_id)
+            kernel_id = int(kernel_id)
             ac = aicore_lookup.get((core_id, reg_task_id))
             if ac is None:
                 unmatched_per_core[core_id] += 1
@@ -218,7 +227,7 @@ def read_perf_data(filepath):  # noqa: PLR0912, PLR0915
             tasks.append(
                 {
                     "task_id": task_token_raw,
-                    "func_id": -1,
+                    "func_id": kernel_id,
                     "core_id": core_id,
                     "core_type": _core_type(core_id),
                     "ring_id": (task_token_raw >> 32) & 0xFFFFFFFF,

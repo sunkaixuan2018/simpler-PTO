@@ -121,6 +121,7 @@ struct L2SwimlaneAicpuTaskRecord {
     uint64_t dispatch_time;  // AICPU timestamp: when task was dispatched to AICore
     uint64_t finish_time;    // AICPU timestamp: when AICPU observed task completion
     uint32_t reg_task_id;    // Per-core dispatch token; host join key vs AICore record
+    int32_t kernel_id;       // Kernel function id for this completed subslot
 } __attribute__((aligned(32)));
 
 static_assert(sizeof(L2SwimlaneAicpuTaskRecord) == 32, "L2SwimlaneAicpuTaskRecord must be 32B");

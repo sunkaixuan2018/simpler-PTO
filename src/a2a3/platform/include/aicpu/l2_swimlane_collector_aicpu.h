@@ -128,7 +128,8 @@ void l2_swimlane_aicpu_on_aicore_dispatch(int core_id, int thread_idx);
  * @param finish_time           AICPU timestamp when task completion was observed
  */
 int l2_swimlane_aicpu_complete_task(
-    int core_id, int thread_idx, uint32_t reg_task_id, uint64_t dispatch_time, uint64_t finish_time
+    int core_id, int thread_idx, uint32_t reg_task_id, int32_t kernel_id, uint64_t dispatch_time,
+    uint64_t finish_time
 );
 
 /**
