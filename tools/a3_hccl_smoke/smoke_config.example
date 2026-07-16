@@ -1,0 +1,32 @@
+# Copy this file outside the repository and replace every placeholder.
+# Values are plain KEY=VALUE entries. Do not add shell commands.
+
+MPI_IMPLEMENTATION=<openmpi-or-mpich>
+MPI_RUN=<master-mpirun-path>
+MPI_TIMEOUT_SECONDS=600
+RANKS_PER_HOST=16
+ROOTINFO_COUNT=16
+OPENMPI_OVERSUBSCRIBE=0
+OPENMPI_TCP_IF_INCLUDE=
+
+MASTER_HOST=<master-management-ip>
+MASTER_SCRIPT_DIR=<master-smoke-directory>
+MASTER_MPI_CXX=<master-mpicxx-path>
+MASTER_ASCEND_HOME_PATH=<master-cann-root>
+MASTER_SHMEM_HOME=<master-aclshmem-install-root>
+MASTER_PTO_ISA_ROOT=<master-pto-isa-root>
+MASTER_DRIVER_LIB=<master-driver-lib64-directory>
+MASTER_PTO_ENABLE_FLAG=<master-bisheng-pto-enable-flag>
+MASTER_CCE_AICORE_ARCH=<master-aicore-arch>
+MASTER_LOG_DIR=<master-device-log-directory>
+
+SLAVE_HOST=<slave-management-ip>
+SLAVE_SCRIPT_DIR=<slave-smoke-directory>
+SLAVE_MPI_CXX=<slave-mpicxx-path>
+SLAVE_ASCEND_HOME_PATH=<slave-cann-root>
+SLAVE_SHMEM_HOME=<slave-aclshmem-install-root>
+SLAVE_PTO_ISA_ROOT=<slave-pto-isa-root>
+SLAVE_DRIVER_LIB=<slave-driver-lib64-directory>
+SLAVE_PTO_ENABLE_FLAG=<slave-bisheng-pto-enable-flag>
+SLAVE_CCE_AICORE_ARCH=<slave-aicore-arch>
+SLAVE_LOG_DIR=<slave-device-log-directory>
