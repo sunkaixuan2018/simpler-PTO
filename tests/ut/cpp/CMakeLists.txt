@@ -479,6 +479,7 @@ add_common_utils_test(test_runtime_timeout_config_a5 common/test_runtime_timeout
 target_include_directories(test_runtime_timeout_config_a5 PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../src/a5/platform/include
 )
+add_common_utils_test(test_dma_workspace_state common/test_dma_workspace_state.cpp)
 
 # The PTO2_ERROR_* codes the name table switches on live in the runtime's status header;
 # a2a3's and a5's copies are identical, so compiling against one covers both.

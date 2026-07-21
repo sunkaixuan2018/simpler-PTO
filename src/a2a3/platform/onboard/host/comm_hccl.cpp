@@ -33,6 +33,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -104,9 +105,6 @@ struct CommHandle_ {
     std::vector<VmmWindow> base_peer_windows;
     std::vector<CommContext *> derived_contexts;
     std::unordered_map<uint64_t, std::unique_ptr<DomainAllocation>> domain_allocations;
-#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> sdma_workspace;
-#endif
 };
 
 // ============================================================================
@@ -954,27 +952,6 @@ static std::string domain_ipc_announce_path(
            std::to_string(domain_rank) + ".ready";
 }
 
-// Idempotently provision the process-global PTO-ISA async-SDMA scratch
-// workspace on the comm handle and mirror its address into host_ctx.  Both
-// the base-window path and the dynamic per-domain path call this; only the
-// first call allocates.  CANN 9.0+ feature: on 8.5 the aclnn dlsym fails by
-// design, so we leave workSpace == 0 and SDMA demos self-skip.  No-op when
-// the build-time PTO-ISA dependency is absent.
-static void ensure_sdma_workspace(CommHandle h) {
-#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
-    if (h->sdma_workspace) return;
-    h->sdma_workspace = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
-    if (h->sdma_workspace->Init()) {
-        h->host_ctx.workSpace = reinterpret_cast<uint64_t>(h->sdma_workspace->GetWorkspaceAddr());
-        h->host_ctx.workSpaceSize = 16 * 1024;
-    } else {
-        h->sdma_workspace.reset();
-    }
-#else
-    (void)h;
-#endif
-}
-
 static int domain_alloc_via_ipc(
     CommHandle h, uint64_t allocation_id, const uint32_t *, size_t rank_count, uint32_t domain_rank, uint64_t win_size,
     DomainAllocation *out
@@ -1043,13 +1020,10 @@ static int domain_alloc_via_ipc(
         return -1;
     }
 
-    ensure_sdma_workspace(h);
     CommContext ctx{};
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(subset_n);
     ctx.winSize = local_window.size;
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
     ctx.windowsIn[local_rank] = reinterpret_cast<uint64_t>(local_window.base);
 
     std::vector<VmmWindow> peer_windows;
@@ -1086,6 +1060,76 @@ static int domain_alloc_via_ipc(
     out->peer_windows = std::move(peer_windows);
     out->device_ctx = reinterpret_cast<CommContext *>(new_dev_mem);
     return 0;
+}
+
+// Process-local cache keyed by device. Device reset invalidates every stream
+// and allocation in an entry, so DeviceRunner::finalize explicitly removes it
+// through dma_workspace_invalidate_after_reset even when this DSO stays loaded.
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+static std::mutex dma_workspace_mutex;
+static std::unordered_map<int32_t, std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager>> dma_workspace_managers;
+#endif
+
+extern "C" uint32_t dma_workspace_supported_mask(void) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    return uint32_t{1} << DMA_WORKSPACE_SDMA;
+#else
+    return 0;
+#endif
+}
+
+// Provision the PTO-ISA async-SDMA scratch workspace on the first run of a
+// callable that declares SDMA. The DeviceRunner publishes the address to the
+// resident AICPU config, which injects it into each kernel's GlobalContext.
+// A failed Init is discarded so a later run can retry. The caller has already
+// attached this thread to the target device.
+extern "C" int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_out, int count) {
+    if (!addr_out) return -1;
+    for (int i = 0; i < count; ++i)
+        addr_out[i] = 0;
+    const uint32_t supported = dma_workspace_supported_mask();
+    if ((required_mask & ~supported) != 0) return -1;
+    if (required_mask == 0) return 0;
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    if (count > DMA_WORKSPACE_SDMA && (required_mask & (1U << DMA_WORKSPACE_SDMA)) != 0) {
+        int32_t device_id = -1;
+        if (aclrtGetDevice(&device_id) != ACL_SUCCESS) return -1;
+        std::lock_guard<std::mutex> lock(dma_workspace_mutex);
+        auto it = dma_workspace_managers.find(device_id);
+        if (it == dma_workspace_managers.end()) {
+            auto manager = std::make_unique<pto::comm::sdma::SdmaWorkspaceManager>();
+            if (!manager->Init()) return -1;
+            it = dma_workspace_managers.emplace(device_id, std::move(manager)).first;
+        }
+        addr_out[DMA_WORKSPACE_SDMA] = reinterpret_cast<uint64_t>(it->second->GetWorkspaceAddr());
+        return addr_out[DMA_WORKSPACE_SDMA] != 0 ? 0 : -1;
+    }
+#endif
+    return -1;
+}
+
+extern "C" void dma_workspace_invalidate_after_reset(int device_id, int reset_confirmed) {
+#ifdef SIMPLER_ENABLE_PTO_SDMA_WORKSPACE
+    std::unique_ptr<pto::comm::sdma::SdmaWorkspaceManager> stale;
+    {
+        std::lock_guard<std::mutex> lock(dma_workspace_mutex);
+        auto it = dma_workspace_managers.find(device_id);
+        if (it == dma_workspace_managers.end()) return;
+        stale = std::move(it->second);
+        dma_workspace_managers.erase(it);
+    }
+    if (reset_confirmed == 0) {
+        // The device resources cannot be touched safely, but retaining this
+        // entry would hand stale SQ/workspace handles to the next Worker. This
+        // terminal path intentionally leaks the small host manager and its
+        // dlopen references; the OS reclaims both when the worker exits.
+        (void)stale.release();
+        LOG_ERROR("DMA workspace provider quarantined device %d after an unconfirmed reset", device_id);
+    }
+#else
+    (void)device_id;
+    (void)reset_confirmed;
+#endif
 }
 
 // Performs the per-allocation Fabric V2 exchange for one subset rank. rank_ids
@@ -1171,19 +1215,12 @@ static FabricAttempt domain_alloc_via_fabric(
     out->rank = my_dr;
     out->nranks = subset_n;
     // Build a host-side CommContext for the subset and upload it as device_ctx.
-    // PTO-ISA async SDMA ops (SdmaTget) read the scratch workspace off
-    // CommContext::workSpace.  The dynamic-domain path does not go through
-    // comm_alloc_windows, so provision the workspace here; without it a
-    // freshly zero-initialized per-domain ctx would leave workSpace == 0 and
-    // those kernels early-return on the workSpace guard.
-    ensure_sdma_workspace(h);
-
+    // Async-engine workspaces are runtime-owned and injected through each
+    // kernel's GlobalContext, independent of this communication domain.
     CommContext ctx{};
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(subset_n);
     ctx.winSize = out->local_window.size;
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
     ctx.windowsIn[my_dr] = reinterpret_cast<uint64_t>(out->local_window.base);
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) continue;
@@ -1236,10 +1273,6 @@ extern "C" int comm_alloc_windows(CommHandle h, size_t win_size, uint64_t *devic
         LOG_INFO_V0("[comm rank %d] Fabric V2 unsupported; using VMM IPC windows", h->rank);
         if (alloc_windows_via_ipc(h, effective_win_size) != 0) return -1;
     }
-
-    // Optional PTO-ISA async SDMA workspace pre-allocation (overlays the comm
-    // backend's output; comm-side flow does not care about workSpace).
-    ensure_sdma_workspace(h);
 
     void *newDevMem = nullptr;
     aclError aRet = aclrtMalloc(&newDevMem, sizeof(CommContext), ACL_MEM_MALLOC_HUGE_FIRST);
@@ -1306,8 +1339,6 @@ extern "C" int comm_derive_context(
     }
 
     CommContext ctx{};
-    ctx.workSpace = h->host_ctx.workSpace;
-    ctx.workSpaceSize = h->host_ctx.workSpaceSize;
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(rank_count);
     ctx.winSize = window_size;

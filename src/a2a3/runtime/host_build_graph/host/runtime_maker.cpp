@@ -593,9 +593,17 @@ register_callable_impl(const ChipCallable *callable, uint64_t (*upload_fn)(const
 
     LOG_INFO_V0("Registering %d kernel(s) in register_callable_impl", callable->child_count());
     if (upload_and_collect_child_addrs(
-            callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash
+            callable, upload_fn, &out->kernel_addrs, &out->chip_buffer_dev, &out->chip_buffer_hash,
+            &out->required_dma_workspace_mask
         ) != 0) {
         LOG_ERROR("Failed to upload ChipCallable buffer");
+        return -1;
+    }
+    if (out->required_dma_workspace_mask != 0) {
+        LOG_ERROR(
+            "host_build_graph does not inject async-DMA workspaces (required mask=0x%x)",
+            out->required_dma_workspace_mask
+        );
         return -1;
     }
     for (const ChildKernelAddr &c : out->kernel_addrs) {

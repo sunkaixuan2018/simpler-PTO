@@ -30,6 +30,7 @@
 #include <vector>
 #include "acl/acl.h"
 #include "host/acl_error_log.h"
+#include "platform_comm/comm.h"
 
 // Include HAL constants from CANN (header only, library loaded dynamically)
 #include "ascend_hal.h"
@@ -790,9 +791,11 @@ int DeviceRunner::finalize() {
     //   missing the rt-path reset, which is the root cause of the chronic
     //   "test_dedup_shared_so_independent_unregister → 507899 cascade"
     //   pattern seen across PR CI all session.
+    bool reset_confirmed = false;
     if (device_id_ >= 0) {
         if (acl_ready_) {
             int reset_rc = aclrtResetDevice(device_id_);
+            reset_confirmed = reset_rc == 0;
             if (reset_rc != 0) {
                 LOG_ERROR("aclrtResetDevice(%d) failed during finalize: %d", device_id_, reset_rc);
                 if (rc == 0) rc = reset_rc;
@@ -805,6 +808,7 @@ int DeviceRunner::finalize() {
             acl_ready_ = false;
         } else {
             int reset_rc = rtDeviceReset(device_id_);
+            reset_confirmed = reset_rc == 0;
             if (reset_rc != 0) {
                 LOG_ERROR("rtDeviceReset(%d) failed during finalize: %d", device_id_, reset_rc);
                 if (rc == 0) rc = reset_rc;
@@ -822,6 +826,9 @@ int DeviceRunner::finalize() {
     // so it cannot disturb other devices/users.
     int reset_rc = 0;
     if (device_unusable_) {
+        // A successful soft reset does not prove that this sticky-error path
+        // recovered; only force_reset_device's post-reset probes do.
+        reset_confirmed = false;
         // Bounded retry: a single force reset normally clears the op-timeout
         // sticky-error (verified 5/5 on a2a3), but the poison occasionally needs
         // a drain-then-reset cycle, so retry up to kMaxResetAttempts.
@@ -832,6 +839,7 @@ int DeviceRunner::finalize() {
         for (int attempt = 1; attempt <= kMaxResetAttempts; ++attempt) {
             reset_rc = force_reset_device();
             if (reset_rc == 0) {
+                reset_confirmed = true;
                 if (attempt > 1) {
                     LOG_WARN(
                         "DeviceRunner finalize: device %d recovered on force-reset attempt %d/%d", device_id_, attempt,
@@ -854,6 +862,11 @@ int DeviceRunner::finalize() {
         }
     }
 
+    // The provider cache lives at DSO scope and may outlive this runner. A
+    // device reset invalidates its SQ/workspace handles, so remove the entry
+    // before a same-process Worker can reuse it. This runs after reset: moving
+    // manager destruction before reset does not avoid #1425's CANN timeout.
+    dma_workspace_invalidate_after_reset(device_id_, reset_confirmed ? 1 : 0);
     device_id_ = -1;
     // Clear the poison flag only if the force reset actually recovered the card,
     // so a still-poisoned card stays flagged: a reused DeviceRunner then fails

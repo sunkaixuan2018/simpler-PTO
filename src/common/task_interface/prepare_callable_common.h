@@ -57,6 +57,10 @@ struct ChildKernelAddr {
  */
 struct CallableArtifacts {
     std::vector<ChildKernelAddr> kernel_addrs;
+    // Union of CoreCallable::required_dma_workspace_mask() across every
+    // child. The DeviceRunner acquires these device-global engines on the
+    // first run of this callable, not while the callable is merely registered.
+    uint32_t required_dma_workspace_mask{0};
     // Chip-level entry-tensor directions, copied from ChipCallable::signature_[].
     // Scalars are also present (ArgDirection::SCALAR) and follow the tensor
     // entries. Consumed at bind time to decide H2D/D2H per tensor — see
@@ -90,7 +94,8 @@ struct CallableArtifacts {
  */
 inline int upload_and_collect_child_addrs(
     const ChipCallable *callable, uint64_t (*upload_fn)(const void *), std::vector<ChildKernelAddr> *out,
-    uint64_t *out_chip_dev = nullptr, uint64_t *out_chip_hash = nullptr
+    uint64_t *out_chip_dev = nullptr, uint64_t *out_chip_hash = nullptr,
+    uint32_t *out_required_dma_workspace_mask = nullptr
 ) {
     if (callable == nullptr || upload_fn == nullptr || out == nullptr) return -1;
     out->clear();
@@ -101,10 +106,15 @@ inline int upload_and_collect_child_addrs(
     if (out_chip_dev != nullptr) *out_chip_dev = chip_dev;
     if (out_chip_hash != nullptr) *out_chip_hash = layout.content_hash;
 
+    uint32_t required_dma_workspace_mask = 0;
     out->reserve(static_cast<size_t>(callable->child_count()));
     for (int32_t i = 0; i < callable->child_count(); ++i) {
         uint64_t child_dev = chip_dev + layout.header_size + callable->child_offset(i);
         out->push_back({callable->child_func_id(i), child_dev});
+        required_dma_workspace_mask |= callable->child(i).required_dma_workspace_mask();
+    }
+    if (out_required_dma_workspace_mask != nullptr) {
+        *out_required_dma_workspace_mask = required_dma_workspace_mask;
     }
     return 0;
 }

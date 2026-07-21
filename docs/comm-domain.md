@@ -111,10 +111,23 @@ symmetric window is realized:
 | Window memory | POSIX shm + `ftruncate`, mmap'd per rank | VMM physical allocation + shareable-handle import; peer access via `aclrtDeviceEnablePeerAccess` |
 | Subset barrier | shm-header atomic, `allocation_id`-scoped | file barriers, `allocation_id`-scoped |
 | Window init | window zeroed after handshake (`memset`) | window zeroed after handshake (`aclrtMemset`) |
-| SDMA workspace | n/a | provisioned once per handle (`ensure_sdma_workspace`); inherited into each domain `CommContext` |
+| Async-DMA workspace | n/a | a2a3: callable-declared and provisioned on first use; a5: optional communication overlay, gated off by default |
 
 The window is zero-initialized on both backends so scratch/signal protocols see
 a known starting state (matching the historical static-path contract).
+
+On a2a3, async-DMA resources are a callable contract, not a
+communication-domain property. A `CoreCallable` that submits SDMA work declares
+`required_dma_workspaces=[DmaWorkspaceKind.SDMA]`. The runtime unions the child
+declarations, provisions the workspace immediately before the first run that
+needs it, and injects its address into the kernels' `GlobalContext`.
+Communication-domain allocation does not create SDMA streams or carry the
+workspace through `CommContext`; merely registering an SDMA-capable callable
+does not provision it either. This declaration is currently supported only by
+the a2a3 onboard `tensormap_and_ringbuffer` runtime; host-build-graph,
+simulation, a5, and provider-disabled builds reject it at registration. The a5
+communication overlay remains isolated behind its default-off gate; see
+[a5-sdma-overlay.md](a5-sdma-overlay.md).
 
 ---
 
@@ -233,4 +246,5 @@ the child — allocate it with `create_host_buffer` instead.
 - `examples/workers/l3/dual_domain_overlap/` — overlapping domains where one
   worker participates in both.
 - `examples/a2a3/tensormap_and_ringbuffer/sdma_async_completion_demo/` — host
-  staging via `copy_to` + cross-rank `SdmaTget` (needs the SDMA workspace).
+  staging via `copy_to` + cross-rank `SdmaTget`; its producer `CoreCallable`
+  declares the SDMA workspace requirement.

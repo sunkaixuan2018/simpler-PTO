@@ -52,6 +52,7 @@
 #include "callable_protocol.h"
 #include "chip_worker.h"
 #include "data_type.h"
+#include "dma_workspace.h"
 #include "l3_l2_orch_comm.h"
 #include "l3_l2_orch_region_access.h"
 #include "worker_bind.h"
@@ -892,6 +893,10 @@ NB_MODULE(_task_interface, m) {
         .value("OUT", ArgDirection::OUT)
         .value("INOUT", ArgDirection::INOUT);
 
+    nb::enum_<DmaWorkspaceKind>(m, "DmaWorkspaceKind")
+        .value("SDMA", DMA_WORKSPACE_SDMA)
+        .value("URMA", DMA_WORKSPACE_URMA);
+
     m.def(
         "arg_direction_name",
         [](ArgDirection d) -> std::string {
@@ -909,17 +914,31 @@ NB_MODULE(_task_interface, m) {
     nb::class_<PyCoreCallable>(m, "CoreCallable")
         .def_static(
             "build",
-            [](std::vector<ArgDirection> signature, nb::bytes binary) -> PyCoreCallable {
+            [](std::vector<ArgDirection> signature, nb::bytes binary,
+               std::vector<DmaWorkspaceKind> required_dma_workspaces) -> PyCoreCallable {
                 auto bin_ptr = reinterpret_cast<const void *>(binary.c_str());
                 auto bin_size = static_cast<uint32_t>(binary.size());
+                uint32_t required_dma_workspace_mask = 0;
+                for (DmaWorkspaceKind kind : required_dma_workspaces) {
+                    int32_t kind_index = static_cast<int32_t>(kind);
+                    if (kind_index < 0 || kind_index >= DMA_WORKSPACE_KIND_COUNT) {
+                        throw std::invalid_argument("CoreCallable.build: invalid DmaWorkspaceKind");
+                    }
+                    required_dma_workspace_mask |= uint32_t{1} << static_cast<uint32_t>(kind_index);
+                }
                 auto buf = make_callable<CORE_MAX_TENSOR_ARGS>(
-                    signature.data(), static_cast<int32_t>(signature.size()), bin_ptr, bin_size
+                    signature.data(), static_cast<int32_t>(signature.size()), bin_ptr, bin_size,
+                    required_dma_workspace_mask
                 );
                 return PyCoreCallable{std::move(buf)};
             },
             nb::arg("signature"), nb::arg("binary"),
+            nb::arg("required_dma_workspaces") = std::vector<DmaWorkspaceKind>{},
             "Build a CoreCallable from a signature list and binary bytes. The dump "
-            "maps signature entry i to payload slot i positionally."
+            "maps signature entry i to payload slot i positionally. Required DMA "
+            "workspaces are serialized as a bit mask on the kernel. Currently only "
+            "SDMA on a2a3 onboard tensormap_and_ringbuffer is supported; other "
+            "platform/runtime combinations reject non-empty requirements."
         )
 
         .def(
@@ -944,6 +963,14 @@ NB_MODULE(_task_interface, m) {
                 return self.get().binary_size();
             },
             "Size of the binary payload in bytes."
+        )
+
+        .def_prop_ro(
+            "required_dma_workspace_mask",
+            [](const PyCoreCallable &self) -> uint32_t {
+                return self.get().required_dma_workspace_mask();
+            },
+            "Bit mask of DmaWorkspaceKind values required by this kernel."
         )
 
         .def(

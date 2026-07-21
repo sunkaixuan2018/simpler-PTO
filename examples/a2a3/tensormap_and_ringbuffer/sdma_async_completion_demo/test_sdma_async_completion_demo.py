@@ -31,6 +31,7 @@ from simpler.task_interface import (
     CommBufferSpec,
     CoreCallable,
     DataType,
+    DmaWorkspaceKind,
     TaskArgs,
     Tensor,
     TensorArgType,
@@ -82,6 +83,7 @@ def build_chip_callable(platform: str) -> ChipCallable:
                 CoreCallable.build(
                     signature=[ArgDirection.IN, ArgDirection.OUT, ArgDirection.OUT, ArgDirection.IN],
                     binary=kernel,
+                    required_dma_workspaces=[DmaWorkspaceKind.SDMA] if func_id == 0 else [],
                 ),
             )
         )

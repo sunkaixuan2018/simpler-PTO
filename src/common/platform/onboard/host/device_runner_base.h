@@ -51,7 +51,9 @@
 #include "arg_direction.h"
 #include "callable.h"
 #include "common/device_phase.h"
+#include "common/dma_workspace.h"
 #include "common/l2_swimlane_profiling.h"
+#include "host/dma_workspace_state.h"
 #include "utils/device_arena.h"
 #include "device_runner_helpers.h"
 #include "aicpu_loader/host/load_aicpu_op.h"
@@ -304,7 +306,8 @@ public:
     int record_device_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, uint64_t chip_dev, const void *orch_so_data,
         size_t orch_so_size, const char *func_name, const char *config_name,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature,
+        uint32_t required_dma_workspace_mask
     );
 
     /**
@@ -319,7 +322,8 @@ public:
      */
     int record_host_orch_callable(
         int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+        std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature,
+        uint32_t required_dma_workspace_mask
     );
 
     /**
@@ -337,6 +341,18 @@ public:
      * calls without a matching `simpler_register_callable`.
      */
     bool has_callable(int32_t callable_id) const;
+
+    /**
+     * Acquire and publish the async-DMA workspaces declared by a callable's
+     * leaf kernels. A callable with no requirements is a strict no-op, so
+     * registering or running ordinary kernels never creates SDMA streams.
+     * Required engines are cached per runner and published to the resident
+     * AICPU config before the caller constructs or launches a Runtime.
+     *
+     * @return 0 on success, non-zero if the callable is unknown or a required
+     *         engine cannot be provisioned/published.
+     */
+    int ensure_callable_dma_workspaces(int32_t callable_id);
 
     /**
      * Content-derived stable identity for a registered callable: the
@@ -412,6 +428,14 @@ public:
     // through these virtuals. Each arch's `DeviceRunner` overrides
     // `run` and `finalize`; a2a3 and a5 both override `set_dep_gen_enabled`
     // (an arch without dep_gen keeps the base no-op default).
+
+    /**
+     * Whether this runner may start another run without first being finalized.
+     * The shared c_api checks this before attaching the thread or provisioning
+     * optional resources, so a poisoned runner cannot create SDMA streams on
+     * its way to the arch-specific run() fail-fast guard.
+     */
+    virtual bool can_accept_run() const = 0;
 
     /**
      * Execute a Runtime. Each arch implements its own `run()` — the bodies
@@ -562,14 +586,17 @@ protected:
     int ensure_binaries_loaded();
 
     /**
-     * Per-device one-shot launch of `simpler_aicpu_init`, latching the
-     * invariants (orch device id, log config) into the resident AICPU SO
-     * globals. Idempotent via `aicpu_init_launched_`; called from
+     * Initial launch of `simpler_aicpu_init`, latching the invariants (orch
+     * device id, log config) into the resident AICPU SO globals. Idempotent via
+     * `aicpu_init_launched_`; called from
      * `ensure_device_initialized()` after the binaries are loaded.
      *
      * @return 0 on success, error code on failure.
      */
     int ensure_aicpu_init_launched();
+
+    /** Publish the current invariant + DMA-workspace config to the AICPU SO. */
+    int publish_aicpu_config();
 
     /**
      * Query the maximum block_dim the stream can host.
@@ -775,6 +802,7 @@ protected:
         // common
         std::vector<std::pair<int, uint64_t>> kernel_addrs;
         std::vector<ArgDirection> signature;
+        uint32_t required_dma_workspace_mask{0};
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
@@ -891,8 +919,12 @@ protected:
 
     // True after AICPU SO loaded; reset by the subclass's `finalize()`.
     bool binaries_loaded_{false};
-    // Per-device one-shot guard for the simpler_aicpu_init launch.
+    // Per-device guard for the initial simpler_aicpu_init launch.
     bool aicpu_init_launched_{false};
+    // Device-global engine workspaces acquired on first callable use. The
+    // state advances its published mask only after simpler_aicpu_init
+    // acknowledges the current addresses, so a failed publish is retried.
+    DmaWorkspaceState dma_workspace_state_;
 
     // Shared diagnostics collectors. Each subclass initializes its own
     // (a2a3 wraps `halHostRegister`/`Unregister` callbacks, a5 uses

@@ -44,6 +44,7 @@
 #include "host_log.h"
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
+#include "platform_comm/comm.h"
 
 // Forward-declared (rather than `#include "dlog_pub.h"`) so this TU does not
 // require CANN's toolchain include path on the host build. Resolved at link
@@ -412,6 +413,14 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         if (rc != 0) {
             return rc;
         }
+        const uint32_t unsupported = artifacts.required_dma_workspace_mask & ~dma_workspace_supported_mask();
+        if (unsupported != 0) {
+            LOG_ERROR(
+                "simpler_register_callable: required async-DMA mask=0x%x is unsupported on this platform",
+                artifacts.required_dma_workspace_mask
+            );
+            return -1;
+        }
         auto host_dlopen_guard = RAIIScopeGuard([&artifacts]() {
             if (artifacts.host_dlopen_handle != nullptr) {
                 dlclose(artifacts.host_dlopen_handle);
@@ -434,7 +443,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
         if (artifacts.host_dlopen_handle != nullptr) {
             rc = runner->record_host_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.host_dlopen_handle, artifacts.host_orch_func_ptr,
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                std::move(kernel_addrs), std::move(artifacts.signature), artifacts.required_dma_workspace_mask
             );
             if (rc != 0) return rc;
             host_dlopen_guard.dismiss();
@@ -443,7 +452,7 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
             rc = runner->record_device_orch_callable(
                 callable_id, artifacts.chip_buffer_hash, artifacts.chip_buffer_dev, artifacts.orch_so_data,
                 artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
-                std::move(kernel_addrs), std::move(artifacts.signature)
+                std::move(kernel_addrs), std::move(artifacts.signature), artifacts.required_dma_workspace_mask
             );
             if (rc != 0) return rc;
             chip_buffer_guard.dismiss();
@@ -554,6 +563,14 @@ int simpler_run(
         LOG_ERROR("simpler_run: callable_id=%d not registered", callable_id);
         return -1;
     }
+    if (!runner->can_accept_run()) {
+        LOG_ERROR(
+            "simpler_run: runner is unusable after a prior device failure; refusing callable_id=%d before resource "
+            "provisioning",
+            callable_id
+        );
+        return -1;
+    }
 
     pthread_once(&g_runner_key_once, create_runner_key);
     pthread_setspecific(g_runner_key, ctx);
@@ -567,6 +584,13 @@ int simpler_run(
 
     try {
         int rc = runner->attach_current_thread(runner->device_id());
+        if (rc != 0) return rc;
+
+        // Resource demand is carried by the registered callable's leaf kernels.
+        // Acquire before constructing/binding the Runtime so ordinary callables
+        // never create CP-process SDMA streams and a marked callable cannot run
+        // with a null workspace.
+        rc = runner->ensure_callable_dma_workspaces(callable_id);
         if (rc != 0) return rc;
 
         Runtime *r = new (runtime) Runtime();

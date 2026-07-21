@@ -23,6 +23,7 @@ from _task_interface import (  # pyright: ignore[reportMissingImports]
     ChipStorageTaskArgs,
     CoreCallable,
     DataType,
+    DmaWorkspaceKind,
     TaskArgs,
     TaskState,
     Tensor,
@@ -761,6 +762,15 @@ class TestArgDirection:
         assert arg_direction_name(direction) == expected
 
 
+class TestDmaWorkspaceKind:
+    def test_enum_values(self):
+        assert DmaWorkspaceKind.SDMA.value == 0
+        assert DmaWorkspaceKind.URMA.value == 1
+
+    def test_public_module_reexports_enum(self):
+        assert task_interface_module.DmaWorkspaceKind is DmaWorkspaceKind
+
+
 # ============================================================================
 # CoreCallable
 # ============================================================================
@@ -776,6 +786,23 @@ class TestCoreCallable:
         assert cc.sig(1) == ArgDirection.OUT
         assert cc.sig(2) == ArgDirection.SCALAR
         assert cc.binary_size == 4
+        assert cc.required_dma_workspace_mask == 0
+
+    def test_required_dma_workspaces_are_encoded_as_mask(self):
+        cc = CoreCallable.build(
+            signature=[ArgDirection.IN],
+            binary=b"\x01",
+            required_dma_workspaces=[DmaWorkspaceKind.SDMA, DmaWorkspaceKind.URMA],
+        )
+        assert cc.required_dma_workspace_mask == (1 << DmaWorkspaceKind.SDMA.value) | (1 << DmaWorkspaceKind.URMA.value)
+
+    def test_duplicate_required_dma_workspace_is_idempotent(self):
+        cc = CoreCallable.build(
+            signature=[],
+            binary=b"\x01",
+            required_dma_workspaces=[DmaWorkspaceKind.SDMA, DmaWorkspaceKind.SDMA],
+        )
+        assert cc.required_dma_workspace_mask == 1 << DmaWorkspaceKind.SDMA.value
 
     def test_empty_signature(self):
         cc = CoreCallable.build(signature=[], binary=b"\xab")
@@ -877,6 +904,24 @@ class TestChipCallable:
         assert retrieved.sig(0) == ArgDirection.IN
         assert retrieved.sig(1) == ArgDirection.OUT
         assert retrieved.binary_size == 8
+
+    def test_required_dma_workspace_mask_survives_serialization_round_trip(self):
+        child = CoreCallable.build(
+            signature=[ArgDirection.IN],
+            binary=b"\xdd" * 8,
+            required_dma_workspaces=[DmaWorkspaceKind.SDMA],
+        )
+        chip = ChipCallable.build(
+            signature=[ArgDirection.IN],
+            func_name="test_func",
+            binary=b"\xee" * 4,
+            children=[(42, child)],
+        )
+
+        raw = ctypes.string_at(chip.buffer_ptr(), chip.buffer_size())
+        restored = ChipCallable.from_bytes(raw)
+
+        assert restored.child(0).required_dma_workspace_mask == 1 << DmaWorkspaceKind.SDMA.value
 
     def test_child_out_of_range(self):
         chip = ChipCallable.build(

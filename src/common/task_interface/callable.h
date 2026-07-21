@@ -18,6 +18,9 @@
  *
  * CoreCallable includes resolved_addr_ — a platform-resolved dispatch address
  * (binary code addr on onboard, func_ptr on sim) used by AICPU dispatch.
+ * It also records the async-DMA workspaces required by the kernel binary as a
+ * bit mask keyed by DmaWorkspaceKind. Resource acquisition remains a runtime
+ * concern; the callable only carries the declaration through serialization.
  * Binary data is placed at CALLABLE_ALIGN boundary within storage_ for
  * device-optimal alignment; binary_data() accounts for this automatically.
  *
@@ -60,6 +63,10 @@ struct Callable<void, MaxSig, 0> {
     int32_t sig_count_;
     uint32_t binary_size_;
     uint64_t resolved_addr_;
+    // Bit k declares that the kernel requires DmaWorkspaceKind k. Keep this
+    // after resolved_addr_: it occupies legacy header padding without moving
+    // resolved_addr_ or the CALLABLE_ALIGN-aligned binary payload.
+    uint32_t required_dma_workspace_mask_;
     char storage_[];
 
     ArgDirection sig(int32_t i) const {
@@ -70,6 +77,7 @@ struct Callable<void, MaxSig, 0> {
     uint32_t binary_size() const { return binary_size_; }
     uint64_t resolved_addr() const { return resolved_addr_; }
     void set_resolved_addr(uint64_t addr) { resolved_addr_ = addr; }
+    uint32_t required_dma_workspace_mask() const { return required_dma_workspace_mask_; }
 
     // Binary data is placed at the next CALLABLE_ALIGN boundary after the fixed fields.
     // storage_ sits between the fixed fields and the aligned binary; binary_data()
@@ -85,8 +93,10 @@ private:
     Callable() = default;
 
     template <int MS>
-    friend std::vector<uint8_t>
-    make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size);
+    friend std::vector<uint8_t> make_callable(
+        const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size,
+        uint32_t required_dma_workspace_mask
+    );
 };
 
 // ============================================================================
@@ -161,6 +171,16 @@ private:
 using CoreCallable = Callable<void, CORE_MAX_TENSOR_ARGS, 0>;
 using ChipCallable = Callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>;
 
+// CoreCallable is a raw host/device serialization format. The workspace mask
+// deliberately consumes bytes that were padding in the legacy 192-byte header,
+// so existing fields and the kernel binary retain their ABI offsets.
+static_assert(offsetof(CoreCallable, resolved_addr_) == 136, "CoreCallable.resolved_addr_ ABI offset changed");
+static_assert(
+    offsetof(CoreCallable, required_dma_workspace_mask_) == 144,
+    "CoreCallable.required_dma_workspace_mask_ must occupy legacy header padding"
+);
+static_assert(CoreCallable::binary_data_offset() == 192, "CoreCallable kernel binary ABI offset changed");
+
 // storage_ holds CoreCallable children at CALLABLE_ALIGN-aligned offsets; the
 // child kernel binary's device address is offsetof(storage_) + child_offset +
 // CoreCallable::binary_data_offset(). The latter two are CALLABLE_ALIGN (64)
@@ -181,8 +201,10 @@ static_assert(
 // ============================================================================
 
 template <int MaxSig>
-std::vector<uint8_t>
-make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size) {
+std::vector<uint8_t> make_callable(
+    const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size,
+    uint32_t required_dma_workspace_mask
+) {
     if (sig_count > MaxSig) throw std::invalid_argument("make_callable: sig_count exceeds MaxSig");
     if (sig_count > 0 && sig == nullptr)
         throw std::invalid_argument("make_callable: sig is required when sig_count > 0");
@@ -199,9 +221,18 @@ make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, ui
     obj->sig_count_ = sig_count;
     obj->binary_size_ = binary_size;
     obj->resolved_addr_ = 0;
+    obj->required_dma_workspace_mask_ = required_dma_workspace_mask;
     if (binary_size > 0) std::memcpy(buf.data() + aligned_header, binary, binary_size);
 
     return buf;
+}
+
+// Source-compatible overload for call sites whose kernels require no
+// runtime-owned async-DMA workspace.
+template <int MaxSig>
+std::vector<uint8_t>
+make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, uint32_t binary_size) {
+    return make_callable<MaxSig>(sig, sig_count, binary, binary_size, 0);
 }
 
 // ============================================================================

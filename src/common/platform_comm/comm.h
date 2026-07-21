@@ -29,11 +29,47 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common/dma_workspace.h"
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 typedef struct CommHandle_ *CommHandle;
+
+/** Bit mask of DmaWorkspaceKind values this platform can provision. */
+uint32_t dma_workspace_supported_mask(void);
+
+/**
+ * Provision the requested async-DMA engine scratch workspaces for this device
+ * and write each engine's device address into addr_out[kind] (0 where
+ * unavailable), for kind in [0, count). Bit `1u << kind` in required_mask
+ * requests that engine; unrequested engines are not acquired.
+ *
+ * Comm-independent and cached once per device: the DeviceRunner calls this on
+ * first use and forwards the addresses to the AICPU, which injects them into
+ * every kernel's GlobalContext (get_dma_workspace). Kernels bind the workspace to
+ * pto.tprefetch_async / SDMA / URMA sessions without a comm handle or a threaded
+ * user arg. The workspace is always the host-initialized manager buffer -- never
+ * a plain allocation, which would hang the kernel.
+ *
+ * The caller must reject bits outside dma_workspace_supported_mask() before
+ * calling. A requested workspace is mandatory: success guarantees a non-zero
+ * address for every requested bit.
+ *
+ * @return 0 on success, non-zero on invalid/unsupported input or provisioning
+ *         failure.
+ */
+int dma_workspace_provision(uint32_t required_mask, uint64_t *addr_out, int count);
+
+/**
+ * Invalidate any cached provider state for device_id after the DeviceRunner has
+ * reset that device. A confirmed reset permits normal host-object destruction;
+ * an unconfirmed reset quarantines the entry so stale SQ/workspace handles are
+ * never returned to a later Worker and cleanup cannot add another blocking
+ * device call on an already unrecoverable path.
+ */
+void dma_workspace_invalidate_after_reset(int device_id, int reset_confirmed);
 
 /**
  * Initialize a communicator for the given rank.

@@ -36,6 +36,7 @@
 #include <gtest/gtest.h>
 
 #include "callable.h"
+#include "prepare_callable_common.h"
 #include "utils/fnv1a_64.h"
 
 namespace {
@@ -62,6 +63,8 @@ std::vector<uint8_t> build_test_chip_callable() {
         nullptr, 0, "orch_fn", fake_orch_so, sizeof(fake_orch_so), child_ids, children, 2, "cfg_name"
     );
 }
+
+uint64_t fake_upload(const void *) { return 0x10000ULL; }
 
 }  // namespace
 
@@ -134,4 +137,39 @@ TEST(ChipCallableUploadImmutable, ChildOffsetsAreCallableAligned) {
             << "child_offset(" << i << ") = " << callable->child_offset(i)
             << " is not a multiple of CALLABLE_ALIGN=" << CALLABLE_ALIGN;
     }
+}
+
+TEST(ChipCallableUploadImmutable, ResolvedAddressFixupPreservesDmaWorkspaceMask) {
+    ArgDirection core_sig[] = {ArgDirection::IN};
+    const uint8_t kernel[] = {0xde, 0xad, 0xbe, 0xef};
+    constexpr uint32_t kRequiredMask = (1u << 0) | (1u << 1);
+    auto core_buf = make_callable<CORE_MAX_TENSOR_ARGS>(core_sig, 1, kernel, sizeof(kernel), kRequiredMask);
+    auto *core = reinterpret_cast<CoreCallable *>(core_buf.data());
+
+    ASSERT_EQ(core->required_dma_workspace_mask(), kRequiredMask);
+    core->set_resolved_addr(0x12345678ULL);
+
+    EXPECT_EQ(core->resolved_addr(), 0x12345678ULL);
+    EXPECT_EQ(core->required_dma_workspace_mask(), kRequiredMask);
+    EXPECT_EQ(CoreCallable::binary_data_offset(), 192u);
+}
+
+TEST(ChipCallableUploadImmutable, ChildDmaWorkspaceRequirementsAreUnioned) {
+    const uint8_t kernel[] = {0x01};
+    auto core0 = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, kernel, sizeof(kernel), 1u << 0);
+    auto core1 = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, kernel, sizeof(kernel), 1u << 1);
+    int32_t child_ids[] = {0, 1};
+    std::vector<uint8_t> children[] = {std::move(core0), std::move(core1)};
+    const uint8_t orch[] = {0x7f, 'E', 'L', 'F'};
+    auto chip_buf = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+        nullptr, 0, "orch", orch, sizeof(orch), child_ids, children, 2, ""
+    );
+    const auto *chip = reinterpret_cast<const ChipCallable *>(chip_buf.data());
+
+    std::vector<ChildKernelAddr> addrs;
+    uint32_t required_mask = 0;
+    ASSERT_EQ(upload_and_collect_child_addrs(chip, fake_upload, &addrs, nullptr, nullptr, &required_mask), 0);
+
+    EXPECT_EQ(addrs.size(), 2u);
+    EXPECT_EQ(required_mask, (1u << 0) | (1u << 1));
 }

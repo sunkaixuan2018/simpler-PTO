@@ -46,6 +46,7 @@
 #include "host/acl_error_log.h"
 #include "host/raii_scope_guard.h"
 #include "host_log.h"
+#include "platform_comm/comm.h"
 #include "pto_runtime_c_api.h"
 #include "task_args.h"
 #include "utils/elf_build_id.h"
@@ -398,14 +399,19 @@ int DeviceRunnerBase::ensure_device_initialized() {
 }
 
 int DeviceRunnerBase::ensure_aicpu_init_launched() {
-    // Per-device one-shot: latch the invariants (orch device id, log config)
-    // into the resident AICPU SO globals via simpler_aicpu_init, so exec /
-    // record_device_orch_callable launches no longer carry them. The inner SO stays
-    // dlopen'd across launches, so a single init holds for the runner's life.
+    // Publish the baseline invariants before any callable is registered or run.
+    // DMA workspaces remain zero until a callable that declares one is first
+    // executed; publish_aicpu_config is deliberately reusable for that update.
     if (aicpu_init_launched_) {
         return 0;
     }
 
+    int rc = publish_aicpu_config();
+    if (rc == 0) aicpu_init_launched_ = true;
+    return rc;
+}
+
+int DeviceRunnerBase::publish_aicpu_config() {
     InitArgs init_args{};
     init_args.device_id = static_cast<uint32_t>(device_id_);
     init_args.log_level = static_cast<uint32_t>(HostLogger::get_instance().level());
@@ -413,23 +419,24 @@ int DeviceRunnerBase::ensure_aicpu_init_launched() {
     // Per-device scheduler watchdog override, resolved once at attach into
     // timeout_config_. 0 -> the AICPU scheduler keeps its compile-time default.
     init_args.scheduler_timeout_ms = timeout_config_.scheduler_timeout_ms;
+    for (int k = 0; k < DMA_WORKSPACE_KIND_COUNT; ++k) {
+        init_args.dma_workspace_addr[k] = dma_workspace_state_.address(k);
+    }
 
     LOG_INFO_V0("=== launch_aicpu_payload %s ===", host::KernelNames::InitName);
     int rc = launch_aicpu_payload(
         stream_aicpu_, &init_args, sizeof(init_args), host::KernelNames::InitName, /*aicpu_num=*/1
     );
     if (rc != 0) {
-        LOG_ERROR("ensure_aicpu_init_launched: launch_aicpu_payload failed: %d", rc);
+        LOG_ERROR("publish_aicpu_config: launch_aicpu_payload failed: %d", rc);
         return rc;
     }
 
     rc = aclrtSynchronizeStreamWithTimeout(stream_aicpu_, PLATFORM_STREAM_SYNC_TIMEOUT_MS);
     if (rc != 0) {
-        LOG_ERROR("ensure_aicpu_init_launched: stream sync failed: %d (device_id=%d)", rc, device_id_);
+        LOG_ERROR("publish_aicpu_config: stream sync failed: %d (device_id=%d)", rc, device_id_);
         return rc;
     }
-
-    aicpu_init_launched_ = true;
     return 0;
 }
 
@@ -748,7 +755,7 @@ int DeviceRunnerBase::launch_device_register(int32_t callable_id) {
 int DeviceRunnerBase::record_device_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, uint64_t chip_dev, const void *orch_so_data, size_t orch_so_size,
     const char *func_name, const char *config_name, std::vector<std::pair<int, uint64_t>> kernel_addrs,
-    std::vector<ArgDirection> signature
+    std::vector<ArgDirection> signature, uint32_t required_dma_workspace_mask
 ) {
     // The AICPU executor reserves `orch_so_table_[MAX_REGISTERED_CALLABLE_IDS]`
     // (declared in src/common/task_interface/callable_protocol.h) and indexes
@@ -784,6 +791,7 @@ int DeviceRunnerBase::record_device_orch_callable(
     state.config_name = (config_name != nullptr) ? config_name : "";
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
+    state.required_dma_workspace_mask = required_dma_workspace_mask;
     callables_.emplace(callable_id, std::move(state));
     LOG_INFO_V0(
         "record_device_orch_callable: cid=%d orch_hash=0x%lx chip_hash=0x%lx %zu bytes", callable_id, hash,
@@ -794,7 +802,8 @@ int DeviceRunnerBase::record_device_orch_callable(
 
 int DeviceRunnerBase::record_host_orch_callable(
     int32_t callable_id, uint64_t chip_buffer_hash, void *host_dlopen_handle, void *host_orch_func_ptr,
-    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature
+    std::vector<std::pair<int, uint64_t>> kernel_addrs, std::vector<ArgDirection> signature,
+    uint32_t required_dma_workspace_mask
 ) {
     if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) {
         LOG_ERROR(
@@ -821,6 +830,7 @@ int DeviceRunnerBase::record_host_orch_callable(
     state.host_orch_func_ptr = host_orch_func_ptr;
     state.kernel_addrs = std::move(kernel_addrs);
     state.signature = std::move(signature);
+    state.required_dma_workspace_mask = required_dma_workspace_mask;
     callables_.emplace(callable_id, std::move(state));
     ++host_dlopen_total_;
     LOG_INFO_V0("record_host_orch_callable: cid=%d (host dlopen #%zu)", callable_id, host_dlopen_total_);
@@ -846,6 +856,40 @@ int DeviceRunnerBase::unregister_callable(int32_t callable_id) {
 }
 
 bool DeviceRunnerBase::has_callable(int32_t callable_id) const { return callables_.count(callable_id) != 0; }
+
+int DeviceRunnerBase::ensure_callable_dma_workspaces(int32_t callable_id) {
+    auto it = callables_.find(callable_id);
+    if (it == callables_.end()) {
+        LOG_ERROR("ensure_callable_dma_workspaces: callable_id=%d not registered", callable_id);
+        return -1;
+    }
+
+    const uint32_t required = it->second.required_dma_workspace_mask;
+    if (required == 0) return 0;
+
+    const uint32_t supported = dma_workspace_supported_mask();
+    if ((required & ~supported) != 0) {
+        LOG_ERROR(
+            "ensure_callable_dma_workspaces: callable_id=%d requires unsupported mask=0x%x (supported=0x%x)",
+            callable_id, required, supported
+        );
+        return -1;
+    }
+
+    int rc = dma_workspace_state_.ensure(
+        required, supported,
+        [](uint32_t mask, uint64_t *addresses, int count) {
+            return dma_workspace_provision(mask, addresses, count);
+        },
+        [this]() {
+            return publish_aicpu_config();
+        }
+    );
+    if (rc != 0) {
+        LOG_ERROR("ensure_callable_dma_workspaces: callable_id=%d mask=0x%x failed: %d", callable_id, required, rc);
+    }
+    return rc;
+}
 
 uint64_t DeviceRunnerBase::callable_hash(int32_t callable_id) const {
     auto it = callables_.find(callable_id);
@@ -992,6 +1036,7 @@ int DeviceRunnerBase::finalize_common() {
     // globals are gone too — clear the one-shot guard so a reused runner
     // re-launches simpler_aicpu_init after the next ensure_binaries_loaded().
     aicpu_init_launched_ = false;
+    dma_workspace_state_.reset();
 
     // Release any chip callable buffers callers forgot to unregister.
     for (auto &kv : chip_callable_buffers_) {

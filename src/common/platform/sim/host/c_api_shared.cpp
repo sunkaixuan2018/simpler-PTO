@@ -382,6 +382,14 @@ int simpler_register_callable(DeviceContextHandle ctx, int32_t callable_id, cons
             pthread_setspecific(g_runner_key, nullptr);
             return rc;
         }
+        if (artifacts.required_dma_workspace_mask != 0) {
+            LOG_ERROR(
+                "simpler_register_callable: simulation does not provide async-DMA workspaces (required mask=0x%x)",
+                artifacts.required_dma_workspace_mask
+            );
+            pthread_setspecific(g_runner_key, nullptr);
+            return -1;
+        }
         auto host_dlopen_guard = RAIIScopeGuard([&artifacts]() {
             if (artifacts.host_dlopen_handle != nullptr) {
                 dlclose(artifacts.host_dlopen_handle);

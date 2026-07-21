@@ -21,7 +21,7 @@ import os
 import time
 
 import pytest
-from simpler.task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable
+from simpler.task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, CoreCallable, DmaWorkspaceKind
 from simpler.worker import Worker
 
 from simpler_setup.elf_parser import extract_text_section
@@ -36,7 +36,7 @@ AIC_SRC = os.path.join(HERE, "kernels/aic/kernel_hang.cpp")
 FUNC_AIC_HANG = 0
 
 
-def _build_chip_callable(platform: str) -> ChipCallable:
+def _build_chip_callable(platform: str, *, requires_sdma: bool = False) -> ChipCallable:
     kc = KernelCompiler(platform=platform)
     pto_isa_root = ensure_pto_isa_root()
     inc_dirs = kc.get_orchestration_include_dirs(RUNTIME)
@@ -47,7 +47,8 @@ def _build_chip_callable(platform: str) -> ChipCallable:
     if not platform.endswith("sim"):
         aic_bytes = extract_text_section(aic_bytes)
 
-    aic_core = CoreCallable.build(signature=[], binary=aic_bytes)
+    required_dma_workspaces = [DmaWorkspaceKind.SDMA] if requires_sdma else []
+    aic_core = CoreCallable.build(signature=[], binary=aic_bytes, required_dma_workspaces=required_dma_workspaces)
     return ChipCallable.build(
         signature=[],
         func_name="aicpu_orchestration_entry",
@@ -69,7 +70,11 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
     chip_callable = _build_chip_callable(st_platform)
     worker = Worker(level=2, platform=st_platform, runtime=RUNTIME, device_id=int(st_device_ids[0]))
     handle = worker.register(chip_callable)
+    sdma_handle = None
+    if st_platform == "a2a3":
+        sdma_handle = worker.register(_build_chip_callable(st_platform, requires_sdma=True))
     worker.init()
+    t0 = time.monotonic()
     try:
         config = CallConfig()
         config.block_dim = 1
@@ -77,7 +82,6 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
         # for a single AICPU; smaller configs may not dispatch the AIC task.
         config.aicpu_thread_num = 2
 
-        t0 = time.monotonic()
         # Acceptable error codes for the STARS-killed AICore op. Which one
         # surfaces is timing-dependent — it's whichever stream sync sees the
         # AIC failure first:
@@ -86,20 +90,35 @@ def test_aicore_op_timeout_surfaces_as_runtime_error(st_platform, st_device_ids,
         #   507018 = ACL_ERROR_RT_AICPU_EXCEPTION — AICPU stream sync surfaces
         #            the AICore failure as an AICPU exception when the
         #            orchestration kernel detects the dead AIC task first.
+        #   507015 = ACL_ERROR_RT_AICORE_EXCEPTION — the AICore stream reports
+        #            the STARS-reaped kernel fault directly.
         #   507000 = ACL_ERROR_RT_INTERNAL_ERROR — same detection on a5,
         #            mapped through a different code path.
-        # All three are valid on both a2a3 and a5: the timing race is between
+        # All four are valid on both a2a3 and a5: the timing race is between
         # AICPU and AICore stream sync on host, not arch-specific. The
         # regression we care about is that the timeout chain reaps the hang
         # in single-digit seconds and surfaces *some* 507xxx code rather than
         # deadlocking.
-        with pytest.raises(RuntimeError, match=r"run failed with code 507(046|018|000)"):
+        with pytest.raises(RuntimeError, match=r"run failed with code 507(046|018|015|000)"):
             worker.run(handle, ChipStorageTaskArgs(), config)
-        elapsed = time.monotonic() - t0
+        run_elapsed = time.monotonic() - t0
 
-        # CI-tight env keeps the timeout chain short; default local values are
-        # intentionally larger for production workloads.
-        # If this fires, the timeout chain is broken (or absent).
-        assert elapsed < 10, f"run() took {elapsed:.1f}s — timeout chain did not fire"
+        if sdma_handle is not None:
+            # The failed AICore marks this runner unusable. On a2a3, a later
+            # SDMA-declaring callable must be refused before first-use
+            # provisioning; otherwise it can create the 48 CP-process streams
+            # on the poisoned context and restore #1425's five-minute delay.
+            with pytest.raises(RuntimeError, match=r"run failed with code -1\b"):
+                worker.run(sdma_handle, ChipStorageTaskArgs(), config)
     finally:
         worker.close()
+    elapsed = time.monotonic() - t0
+
+    assert run_elapsed < 10, f"run() took {run_elapsed:.1f}s — op timeout did not surface promptly"
+
+    # Include Worker.close(): #1425 made reset/stream teardown take ~306 s when
+    # SDMA resources were provisioned for this ordinary, non-SDMA callable.
+    # The CI-tight timeout chain plus healthy cleanup remains single-digit on
+    # a2a3; leave headroom for loaded runners while staying far below that stall.
+    if st_platform == "a2a3":
+        assert elapsed < 20, f"run() plus cleanup took {elapsed:.1f}s — timeout recovery did not complete promptly"
