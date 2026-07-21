@@ -10,16 +10,15 @@
 # Load one host's configured runtime and execute the selected smoke binary.
 set -euo pipefail
 
-if [ "$#" -lt 4 ]; then
-    echo "Usage: $0 <shmem|rootinfo> <cann-root> <shmem-root> <log-dir> [program-args...]" >&2
+if [ "$#" -lt 3 ]; then
+    echo "Usage: $0 <fabric|rootinfo> <cann-root> <log-dir> [program-args...]" >&2
     exit 2
 fi
 
 MODE="$1"
 CANN_ROOT="$2"
-SHMEM_ROOT="$3"
-LOG_DIR="$4"
-shift 4
+LOG_DIR="$3"
+shift 3
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -41,17 +40,12 @@ set -euo pipefail
 export LD_LIBRARY_PATH="${SCRIPT_DIR}:${CANN_ROOT}/lib64:${CANN_ROOT}/runtime/lib64:${LD_LIBRARY_PATH:-}"
 
 case "${MODE}" in
-    shmem)
-        if [ ! -f "${SHMEM_ROOT}/lib/libshmem.so" ]; then
-            echo "[run_local] libshmem.so not found under ${SHMEM_ROOT}" >&2
+    fabric)
+        if [ ! -x "${SCRIPT_DIR}/fabric_tload_smoke" ]; then
+            echo "[run_local] fabric_tload_smoke is missing under ${SCRIPT_DIR}" >&2
             exit 1
         fi
-        export LD_LIBRARY_PATH="${SHMEM_ROOT}/lib:${LD_LIBRARY_PATH}"
-        if [ ! -x "${SCRIPT_DIR}/shmem_tload_smoke" ]; then
-            echo "[run_local] shmem_tload_smoke is missing under ${SCRIPT_DIR}" >&2
-            exit 1
-        fi
-        exec "${SCRIPT_DIR}/shmem_tload_smoke" "$@"
+        exec "${SCRIPT_DIR}/fabric_tload_smoke" "$@"
         ;;
     rootinfo)
         if [ ! -x "${SCRIPT_DIR}/hccl_rootinfo_smoke" ]; then

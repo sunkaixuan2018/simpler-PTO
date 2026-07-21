@@ -10,12 +10,12 @@
 set -euo pipefail
 
 if [ "$#" -lt 1 ] || [ "$#" -gt 2 ]; then
-    echo "Usage: $0 <config-file> [shmem|rootinfo]" >&2
+    echo "Usage: $0 <config-file> [fabric|rootinfo]" >&2
     exit 2
 fi
 
 CONFIG_FILE="$1"
-MODE="${2:-shmem}"
+MODE="${2:-fabric}"
 
 if [ ! -f "${CONFIG_FILE}" ]; then
     echo "[a3-smoke] config file not found: ${CONFIG_FILE}" >&2
@@ -33,7 +33,6 @@ MASTER_HOST=
 MASTER_SCRIPT_DIR=
 MASTER_MPI_CXX=
 MASTER_ASCEND_HOME_PATH=
-MASTER_SHMEM_HOME=
 MASTER_PTO_ISA_ROOT=
 MASTER_DRIVER_LIB=
 MASTER_PTO_ENABLE_FLAG=
@@ -43,7 +42,6 @@ SLAVE_HOST=
 SLAVE_SCRIPT_DIR=
 SLAVE_MPI_CXX=
 SLAVE_ASCEND_HOME_PATH=
-SLAVE_SHMEM_HOME=
 SLAVE_PTO_ISA_ROOT=
 SLAVE_DRIVER_LIB=
 SLAVE_PTO_ENABLE_FLAG=
@@ -76,10 +74,10 @@ while IFS= read -r raw_line || [ -n "${raw_line}" ]; do
     case "${key}" in
         MPI_IMPLEMENTATION|MPI_RUN|MPI_TIMEOUT_SECONDS|RANKS_PER_HOST|ROOTINFO_COUNT|\
         OPENMPI_OVERSUBSCRIBE|OPENMPI_TCP_IF_INCLUDE|\
-        MASTER_HOST|MASTER_SCRIPT_DIR|MASTER_MPI_CXX|MASTER_ASCEND_HOME_PATH|MASTER_SHMEM_HOME|\
+        MASTER_HOST|MASTER_SCRIPT_DIR|MASTER_MPI_CXX|MASTER_ASCEND_HOME_PATH|\
         MASTER_PTO_ISA_ROOT|MASTER_DRIVER_LIB|MASTER_PTO_ENABLE_FLAG|MASTER_CCE_AICORE_ARCH|\
         MASTER_LOG_DIR|SLAVE_HOST|SLAVE_SCRIPT_DIR|SLAVE_MPI_CXX|SLAVE_ASCEND_HOME_PATH|\
-        SLAVE_SHMEM_HOME|SLAVE_PTO_ISA_ROOT|SLAVE_DRIVER_LIB|SLAVE_PTO_ENABLE_FLAG|\
+        SLAVE_PTO_ISA_ROOT|SLAVE_DRIVER_LIB|SLAVE_PTO_ENABLE_FLAG|\
         SLAVE_CCE_AICORE_ARCH|SLAVE_LOG_DIR)
             ;;
         *)
@@ -113,23 +111,23 @@ require_config() {
 }
 
 for key in MPI_IMPLEMENTATION MPI_RUN MPI_TIMEOUT_SECONDS RANKS_PER_HOST ROOTINFO_COUNT \
-    MASTER_HOST MASTER_SCRIPT_DIR MASTER_MPI_CXX MASTER_ASCEND_HOME_PATH MASTER_SHMEM_HOME \
+    MASTER_HOST MASTER_SCRIPT_DIR MASTER_MPI_CXX MASTER_ASCEND_HOME_PATH \
     MASTER_PTO_ISA_ROOT MASTER_DRIVER_LIB MASTER_PTO_ENABLE_FLAG MASTER_CCE_AICORE_ARCH \
     MASTER_LOG_DIR SLAVE_HOST SLAVE_SCRIPT_DIR SLAVE_MPI_CXX SLAVE_ASCEND_HOME_PATH \
-    SLAVE_SHMEM_HOME SLAVE_PTO_ISA_ROOT SLAVE_DRIVER_LIB SLAVE_PTO_ENABLE_FLAG \
+    SLAVE_PTO_ISA_ROOT SLAVE_DRIVER_LIB SLAVE_PTO_ENABLE_FLAG \
     SLAVE_CCE_AICORE_ARCH SLAVE_LOG_DIR; do
     require_config "${key}"
 done
 
 case "${MODE}" in
-    shmem)
+    fabric)
         MODE_ARGS=()
         ;;
     rootinfo)
         MODE_ARGS=("${ROOTINFO_COUNT}")
         ;;
     *)
-        echo "Usage: $0 <config-file> [shmem|rootinfo]" >&2
+        echo "Usage: $0 <config-file> [fabric|rootinfo]" >&2
         exit 2
         ;;
 esac
@@ -242,12 +240,12 @@ if [ "${MPI_IMPLEMENTATION}" = "openmpi" ]; then
         -np "${RANKS_PER_HOST}" --host "${MASTER_HOST}:${RANKS_PER_HOST}" \
         --wdir "${MASTER_SCRIPT_DIR}" \
         bash "${MASTER_SCRIPT_DIR}/run_local.sh" "${MODE}" "${MASTER_ASCEND_HOME_PATH}" \
-        "${MASTER_SHMEM_HOME}" "${MASTER_LOG_DIR}" "${MODE_ARGS[@]}" \
+        "${MASTER_LOG_DIR}" "${MODE_ARGS[@]}" \
         : \
         -np "${RANKS_PER_HOST}" --host "${SLAVE_HOST}:${RANKS_PER_HOST}" \
         --wdir "${SLAVE_SCRIPT_DIR}" \
         bash "${SLAVE_SCRIPT_DIR}/run_local.sh" "${MODE}" "${SLAVE_ASCEND_HOME_PATH}" \
-        "${SLAVE_SHMEM_HOME}" "${SLAVE_LOG_DIR}" "${MODE_ARGS[@]}"
+        "${SLAVE_LOG_DIR}" "${MODE_ARGS[@]}"
 else
     MPICH_DISPATCH='rank="${PMI_RANK:-${PMIX_RANK:-}}"
 if ! [[ "${rank}" =~ ^[0-9]+$ ]]; then
@@ -260,21 +258,18 @@ slave_dir="$3"
 mode="$4"
 master_cann="$5"
 slave_cann="$6"
-master_shmem="$7"
-slave_shmem="$8"
-master_log="$9"
-slave_log="${10}"
-shift 10
+master_log="$7"
+slave_log="$8"
+shift 8
 if [ "${rank}" -lt "${ranks_per_host}" ]; then
-    exec bash "${master_dir}/run_local.sh" "${mode}" "${master_cann}" "${master_shmem}" "${master_log}" "$@"
+    exec bash "${master_dir}/run_local.sh" "${mode}" "${master_cann}" "${master_log}" "$@"
 fi
-exec bash "${slave_dir}/run_local.sh" "${mode}" "${slave_cann}" "${slave_shmem}" "${slave_log}" "$@"'
+exec bash "${slave_dir}/run_local.sh" "${mode}" "${slave_cann}" "${slave_log}" "$@"'
 
     timeout "${MPI_TIMEOUT_SECONDS}" "${MPI_RUN}" -f "${HOSTFILE}" \
         -ppn "${RANKS_PER_HOST}" -np "${TOTAL_RANKS}" \
         bash -c "${MPICH_DISPATCH}" _ "${RANKS_PER_HOST}" \
         "${MASTER_SCRIPT_DIR}" "${SLAVE_SCRIPT_DIR}" "${MODE}" \
         "${MASTER_ASCEND_HOME_PATH}" "${SLAVE_ASCEND_HOME_PATH}" \
-        "${MASTER_SHMEM_HOME}" "${SLAVE_SHMEM_HOME}" \
         "${MASTER_LOG_DIR}" "${SLAVE_LOG_DIR}" "${MODE_ARGS[@]}"
 fi
