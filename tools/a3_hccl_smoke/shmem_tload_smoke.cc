@@ -9,41 +9,26 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#include "a3_fabric_window.h"
-
 #include <acl/acl.h>
 #include <mpi.h>
+#include <shmem.h>
 
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
-#include <limits>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
 
-extern "C" void LaunchFabricTload(float *remote_src, float *local_dst, void *stream);
+extern "C" void LaunchShmemTload(float *remote_src, float *local_dst, void *stream);
 
 namespace {
 
 constexpr size_t kElementCount = 64;
-constexpr size_t kWindowBytes = 2U * 1024U * 1024U;
-constexpr int kSingleHostRankCount = 16;
-constexpr int kSingleHostPeerOffset = 8;
-
-enum class PeerLayout {
-    kTwoHost,
-    kSingleHost16,
-};
-
-const char *PeerLayoutName(PeerLayout layout) {
-    return layout == PeerLayout::kSingleHost16 ? "single-host-16" : "two-host";
-}
-
-const char *PeerScopeName(PeerLayout layout) {
-    return layout == PeerLayout::kSingleHost16 ? "single-host-16" : "cross-host";
-}
+// ACLSHMEM adds a 6 MiB internal region, while the resulting allocation must
+// remain 2 MiB aligned. A 2 MiB user heap produces an aligned 8 MiB total.
+constexpr int64_t kSymmetricHeapBytes = 2LL * 1024 * 1024;
 
 [[noreturn]] void AbortJob(int rank, const std::string &message, int error_code = 1) {
     std::cerr << "[rank " << rank << "] ERROR: " << message << std::endl;
@@ -59,10 +44,10 @@ void CheckAcl(int rank, aclError status, const char *operation) {
     }
 }
 
-void CheckMpi(int rank, int status, const char *operation) {
-    if (status != MPI_SUCCESS) {
+void CheckShmem(int rank, int status, const char *operation) {
+    if (status != ACLSHMEM_SUCCESS) {
         std::ostringstream os;
-        os << operation << " failed, MPI status=" << status;
+        os << operation << " failed, ACLSHMEM status=" << status;
         AbortJob(rank, os.str(), status);
     }
 }
@@ -75,7 +60,7 @@ struct Topology {
     std::string peer_hostname;
 };
 
-Topology DiscoverPeer(int rank, int world_size, PeerLayout layout, MPI_Comm *local_comm) {
+Topology DiscoverTwoHostPeer(int rank, int world_size, MPI_Comm *local_comm) {
     if (MPI_Comm_split_type(MPI_COMM_WORLD, MPI_COMM_TYPE_SHARED, rank, MPI_INFO_NULL, local_comm) != MPI_SUCCESS) {
         AbortJob(rank, "MPI_Comm_split_type(MPI_COMM_TYPE_SHARED) failed");
     }
@@ -108,28 +93,6 @@ Topology DiscoverPeer(int rank, int world_size, PeerLayout layout, MPI_Comm *loc
     for (int candidate = 0; candidate < world_size; ++candidate) {
         nodes.emplace(all_node_leaders[static_cast<size_t>(candidate)]);
     }
-
-    if (layout == PeerLayout::kSingleHost16) {
-        if (nodes.size() != 1) {
-            std::ostringstream os;
-            os << "single-host-16 requires exactly one shared-memory node, discovered " << nodes.size();
-            AbortJob(rank, os.str());
-        }
-        if (world_size != kSingleHostRankCount || topo.local_size != kSingleHostRankCount) {
-            std::ostringstream os;
-            os << "single-host-16 requires 16 ranks on one host, world_size=" << world_size
-               << " local_size=" << topo.local_size;
-            AbortJob(rank, os.str());
-        }
-        if (topo.local_rank != rank) {
-            AbortJob(rank, "single-host-16 requires MPI global rank and local rank to have the same ordering");
-        }
-
-        topo.peer_rank = rank < kSingleHostPeerOffset ? rank + kSingleHostPeerOffset : rank - kSingleHostPeerOffset;
-        topo.peer_hostname = topo.hostname;
-        return topo;
-    }
-
     if (nodes.size() != 2) {
         std::ostringstream os;
         os << "this smoke requires exactly two shared-memory nodes, discovered " << nodes.size();
@@ -172,17 +135,8 @@ int main(int argc, char **argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &world_size);
 
-    PeerLayout layout = PeerLayout::kTwoHost;
-    if (argc == 2 && std::string(argv[1]) == "single-host-16") {
-        layout = PeerLayout::kSingleHost16;
-    } else if (argc == 2 && std::string(argv[1]) == "two-host") {
-        layout = PeerLayout::kTwoHost;
-    } else if (argc != 1) {
-        AbortJob(rank, "usage: fabric_tload_smoke [two-host|single-host-16]");
-    }
-
     MPI_Comm local_comm = MPI_COMM_NULL;
-    const Topology topo = DiscoverPeer(rank, world_size, layout, &local_comm);
+    const Topology topo = DiscoverTwoHostPeer(rank, world_size, &local_comm);
 
     CheckAcl(rank, aclInit(nullptr), "aclInit");
     uint32_t device_count = 0;
@@ -194,68 +148,35 @@ int main(int argc, char **argv) {
     }
     CheckAcl(rank, aclrtSetDevice(topo.local_rank), "aclrtSetDevice");
 
-    std::cout << "[rank " << rank << "] layout=" << PeerLayoutName(layout) << " host=" << topo.hostname
-              << " local_rank=" << topo.local_rank << " device=" << topo.local_rank << " peer_rank=" << topo.peer_rank
-              << " peer_host=" << topo.peer_hostname << std::endl;
+    std::cout << "[rank " << rank << "] host=" << topo.hostname << " local_rank=" << topo.local_rank
+              << " device=" << topo.local_rank << " peer_rank=" << topo.peer_rank << " peer_host=" << topo.peer_hostname
+              << std::endl;
 
-    A3FabricWindow window;
-    CheckAcl(rank, window.CreateLocal(topo.local_rank, kWindowBytes), "A3FabricWindow::CreateLocal");
-
-    aclrtMemFabricHandle local_shareable_handle{};
-    CheckAcl(rank, window.Export(&local_shareable_handle), "aclrtMemExportToShareableHandleV2(FABRIC)");
-
-    const int local_fabric_handle_bytes = static_cast<int>(sizeof(aclrtMemFabricHandle));
-    int min_fabric_handle_bytes = 0;
-    int max_fabric_handle_bytes = 0;
-    CheckMpi(
-        rank, MPI_Allreduce(&local_fabric_handle_bytes, &min_fabric_handle_bytes, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD),
-        "MPI_Allreduce(min Fabric handle size)"
-    );
-    CheckMpi(
-        rank, MPI_Allreduce(&local_fabric_handle_bytes, &max_fabric_handle_bytes, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD),
-        "MPI_Allreduce(max Fabric handle size)"
-    );
-    if (min_fabric_handle_bytes != max_fabric_handle_bytes) {
-        AbortJob(rank, "CANN Fabric handle size differs between hosts");
+    aclshmemx_uniqueid_t unique_id = ACLSHMEM_UNIQUEID_INITIALIZER;
+    if (rank == 0) {
+        CheckShmem(rank, aclshmemx_get_uniqueid(&unique_id), "aclshmemx_get_uniqueid");
+    }
+    if (MPI_Bcast(&unique_id, sizeof(unique_id), MPI_BYTE, 0, MPI_COMM_WORLD) != MPI_SUCCESS) {
+        AbortJob(rank, "MPI_Bcast(unique_id) failed");
     }
 
-    std::vector<aclrtMemFabricHandle> all_shareable_handles(static_cast<size_t>(world_size));
-    CheckMpi(
-        rank,
-        MPI_Allgather(
-            &local_shareable_handle, local_fabric_handle_bytes, MPI_BYTE, all_shareable_handles.data(),
-            local_fabric_handle_bytes, MPI_BYTE, MPI_COMM_WORLD
-        ),
-        "MPI_Allgather(Fabric handles)"
+    aclshmemx_init_attr_t attributes{};
+    CheckShmem(
+        rank, aclshmemx_set_attr_uniqueid_args(rank, world_size, kSymmetricHeapBytes, &unique_id, &attributes),
+        "aclshmemx_set_attr_uniqueid_args"
     );
-
-    const uint64_t local_window_bytes = window.size();
-    std::vector<uint64_t> all_window_bytes(static_cast<size_t>(world_size), 0);
-    CheckMpi(
-        rank,
-        MPI_Allgather(&local_window_bytes, 1, MPI_UINT64_T, all_window_bytes.data(), 1, MPI_UINT64_T, MPI_COMM_WORLD),
-        "MPI_Allgather(Fabric window sizes)"
-    );
-    const uint64_t peer_window_bytes = all_window_bytes[static_cast<size_t>(topo.peer_rank)];
-    if (peer_window_bytes == 0 || peer_window_bytes > std::numeric_limits<size_t>::max()) {
-        AbortJob(rank, "peer Fabric window size is invalid");
+    CheckShmem(rank, aclshmemx_init_attr(ACLSHMEMX_INIT_WITH_UNIQUEID, &attributes), "aclshmemx_init_attr(UNIQUEID)");
+    if (aclshmem_my_pe() != rank || aclshmem_n_pes() != world_size) {
+        AbortJob(rank, "ACLSHMEM PE identity does not match MPI rank identity");
     }
-    CheckAcl(
-        rank,
-        window.ImportPeer(
-            all_shareable_handles[static_cast<size_t>(topo.peer_rank)], static_cast<size_t>(peer_window_bytes)
-        ),
-        "aclrtMemImportFromShareableHandleV2(FABRIC)"
-    );
-    CheckMpi(rank, MPI_Barrier(MPI_COMM_WORLD), "MPI_Barrier(Fabric mappings ready)");
-    std::cout << "[rank " << rank << "] CANN Fabric peer mapping OK" << std::endl;
+    std::cout << "[rank " << rank << "] ACLSHMEM unique-id init OK" << std::endl;
 
     const size_t payload_bytes = kElementCount * sizeof(float);
-    if (window.size() < 2 * payload_bytes) {
-        AbortJob(rank, "CANN Fabric window is smaller than the smoke payload");
+    auto *symmetric = static_cast<float *>(aclshmem_malloc(2 * payload_bytes));
+    if (symmetric == nullptr) {
+        AbortJob(rank, "aclshmem_malloc returned nullptr");
     }
-    auto *local_source = static_cast<float *>(window.local_base());
-    auto *local_output = local_source + kElementCount;
+    float *local_output = symmetric + kElementCount;
 
     std::vector<float> source(kElementCount);
     std::vector<float> zeros(kElementCount, 0.0F);
@@ -264,7 +185,7 @@ int main(int argc, char **argv) {
         source[i] = Pattern(rank, i);
     }
     CheckAcl(
-        rank, aclrtMemcpy(local_source, payload_bytes, source.data(), payload_bytes, ACL_MEMCPY_HOST_TO_DEVICE),
+        rank, aclrtMemcpy(symmetric, payload_bytes, source.data(), payload_bytes, ACL_MEMCPY_HOST_TO_DEVICE),
         "aclrtMemcpy(source H2D)"
     );
     CheckAcl(
@@ -273,19 +194,19 @@ int main(int argc, char **argv) {
     );
 
     // All source buffers must be initialized before any rank issues a remote TLOAD.
-    CheckMpi(rank, MPI_Barrier(MPI_COMM_WORLD), "MPI_Barrier(source ready)");
-    std::cout << "[rank " << rank << "] Fabric source ready" << std::endl;
+    aclshmem_barrier_all();
+    std::cout << "[rank " << rank << "] symmetric source ready" << std::endl;
 
-    auto *remote_source = static_cast<float *>(window.peer_base());
+    auto *remote_source = static_cast<float *>(aclshmem_ptr(symmetric, topo.peer_rank));
     if (remote_source == nullptr) {
-        AbortJob(rank, "CANN Fabric peer address is null");
+        AbortJob(rank, "aclshmem_ptr could not resolve the cross-host peer address");
     }
-    std::cout << "[rank " << rank << "] Fabric peer GVA(peer=" << topo.peer_rank << ") OK" << std::endl;
+    std::cout << "[rank " << rank << "] aclshmem_ptr(peer=" << topo.peer_rank << ") OK" << std::endl;
 
     aclrtStream stream = nullptr;
     CheckAcl(rank, aclrtCreateStream(&stream), "aclrtCreateStream");
 
-    LaunchFabricTload(remote_source, local_output, stream);
+    LaunchShmemTload(remote_source, local_output, stream);
     CheckAcl(rank, aclrtSynchronizeStream(stream), "aclrtSynchronizeStream");
     std::cout << "[rank " << rank << "] PTO TLOAD/TSTORE stream sync OK" << std::endl;
     CheckAcl(
@@ -307,19 +228,19 @@ int main(int argc, char **argv) {
     int global_ok = 0;
     MPI_Allreduce(&local_ok, &global_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     if (local_ok != 0) {
-        std::cout << "[rank " << rank << "] " << PeerScopeName(layout) << " CANN Fabric + PTO TLOAD/TSTORE verify OK"
-                  << std::endl;
+        std::cout << "[rank " << rank << "] cross-host aclshmem_ptr + PTO TLOAD/TSTORE verify OK" << std::endl;
     }
 
     // Keep all peer source buffers alive until every remote read has completed.
-    CheckMpi(rank, MPI_Barrier(MPI_COMM_WORLD), "MPI_Barrier(remote reads complete)");
+    aclshmem_barrier_all();
     int cleanup_ok = 1;
     if (aclrtDestroyStream(stream) != ACL_SUCCESS) {
         std::cerr << "[rank " << rank << "] aclrtDestroyStream failed" << std::endl;
         cleanup_ok = 0;
     }
-    if (window.Destroy() != ACL_SUCCESS) {
-        std::cerr << "[rank " << rank << "] CANN Fabric window cleanup failed" << std::endl;
+    aclshmem_free(symmetric);
+    if (aclshmem_finalize() != ACLSHMEM_SUCCESS) {
+        std::cerr << "[rank " << rank << "] aclshmem_finalize failed" << std::endl;
         cleanup_ok = 0;
     }
     if (aclrtResetDevice(topo.local_rank) != ACL_SUCCESS) {
@@ -335,9 +256,9 @@ int main(int argc, char **argv) {
     MPI_Allreduce(&cleanup_ok, &global_cleanup_ok, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
     if (rank == 0) {
         if (global_ok != 0 && global_cleanup_ok != 0) {
-            std::cout << "A3 CANN Fabric " << PeerScopeName(layout) << " PTO TLOAD smoke PASS" << std::endl;
+            std::cout << "A3 ACLSHMEM cross-host PTO TLOAD smoke PASS" << std::endl;
         } else {
-            std::cerr << "A3 CANN Fabric " << PeerScopeName(layout) << " PTO TLOAD smoke FAIL" << std::endl;
+            std::cerr << "A3 ACLSHMEM cross-host PTO TLOAD smoke FAIL" << std::endl;
         }
     }
 

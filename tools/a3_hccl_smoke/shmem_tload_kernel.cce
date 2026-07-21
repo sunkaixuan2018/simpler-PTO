@@ -1,0 +1,63 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+// The host resolves remote_src with aclshmem_ptr().  This kernel deliberately
+// knows nothing about ACLSHMEM internals: it only proves that the resulting
+// remote GVA is consumable by the same PTO TLOAD/TSTORE path used by L3.
+
+#include <pto/pto-inst.hpp>
+#include <pto/common/constants.hpp>
+
+using namespace pto;
+
+namespace {
+
+constexpr int kElementCount = 64;
+
+}  // namespace
+
+extern "C" __global__ AICORE void shmem_tload_kernel(__gm__ float *remote_src, __gm__ float *local_dst) {
+    using TileData = Tile<TileType::Vec, float, 1, kElementCount, BLayout::RowMajor, -1, -1>;
+    using TileDataP = Tile<TileType::Vec, float, 1, kElementCount, BLayout::RowMajor, -1, kElementCount>;
+    using GlobalData = GlobalTensor<
+        float,
+        Shape<1, 1, 1, 1, kElementCount>,
+        Stride<kElementCount, kElementCount, kElementCount, kElementCount, 1>>;
+
+    __ubuf__ float *ubaddr = 0x0;
+
+    TileData vec_tile(1, kElementCount);
+    TASSIGN(vec_tile, (uint64_t)ubaddr);
+
+    TileDataP vec_tile_p(1);
+    TASSIGN(vec_tile_p, (uint64_t)ubaddr);
+#ifdef __PTO_AUTO__
+    TRESHAPE(vec_tile_p, vec_tile);
+#endif
+
+    GlobalData src_global(remote_src);
+    GlobalData dst_global(local_dst);
+
+    TLOAD(vec_tile, src_global);
+#ifndef __PTO_AUTO__
+    set_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_MTE3, EVENT_ID0);
+#endif
+    TSTORE(dst_global, vec_tile_p);
+#ifndef __PTO_AUTO__
+    set_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+    wait_flag(PIPE_MTE2, PIPE_S, EVENT_ID0);
+#endif
+}
+
+extern "C" void LaunchShmemTload(float *remote_src, float *local_dst, void *stream) {
+    shmem_tload_kernel<<<1, nullptr, stream>>>(remote_src, local_dst);
+}

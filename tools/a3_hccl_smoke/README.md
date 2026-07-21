@@ -1,4 +1,4 @@
-# A3 Two-Host Communication Smoke
+# A3 Communication Smoke
 
 This directory contains three validation paths:
 
@@ -10,6 +10,8 @@ This directory contains three validation paths:
 The Fabric smoke does not depend on ACLSHMEM. It uses public CANN Runtime VMM
 APIs to allocate a 2 MiB huge-page HBM window, exchange Fabric handles through
 MPI, and map the matching peer rank's HBM into the local device address space.
+It supports both the original two-host layout and a single-host 16-device
+layout.
 
 ## Fabric Data Path
 
@@ -53,6 +55,7 @@ SHMEM functions.
 - `fabric_tload_kernel.cce`: one 64-float remote load and local store.
 - `hccl_rootinfo_smoke.cc`: RootInfo bootstrap and HCCL AllGather.
 - `hccl_allgather_smoke.cc`: existing rank-table HCCL baseline.
+- `run_1host_16rank.sh`: configuration-driven single-host 16-rank launcher.
 - `run_2host_32rank.sh`: configuration-driven two-host launcher.
 - `run_local.sh`: loads one host's CANN environment and runs one binary.
 - `smoke_config.example`: tracked configuration template.
@@ -94,6 +97,11 @@ Important fields include:
 The launcher verifies that `MPI_RUN --version` matches
 `MPI_IMPLEMENTATION`. The same configuration file is accepted by the
 Makefile, keeping build and runtime paths in one place.
+
+The single-host launcher uses the same configuration file but only requires
+the common MPI fields and these local fields: `MASTER_HOST`,
+`MASTER_SCRIPT_DIR`, `MASTER_ASCEND_HOME_PATH`, and `MASTER_LOG_DIR`. It does
+not use the `SLAVE_*` values. `RANKS_PER_HOST` must be `16`.
 
 Configurations created for the older ACLSHMEM smoke must remove
 `MASTER_SHMEM_HOME` and `SLAVE_SHMEM_HOME`; those fields are no longer used.
@@ -171,7 +179,7 @@ nm -D libfabric_tload_kernel.so | grep LaunchFabricTload
 The Host executable records `$ORIGIN` for the kernel library, so master and
 slave do not need to use the same absolute repository path.
 
-## Run
+## Run: Two Hosts, 32 Ranks
 
 Run from the master and pass the configuration file explicitly:
 
@@ -193,6 +201,39 @@ and `RANKS_PER_HOST`:
 smoke and CANN directories to `LD_LIBRARY_PATH`, and creates the configured
 device log directory before starting the binary.
 
+## Run: One Host, 16 Ranks
+
+Build the Fabric smoke on the host using its `MASTER_*` configuration:
+
+```bash
+cd <master-smoke-directory>
+make fabric CONFIG=smoke_config.conf ROLE=master
+```
+
+Then start all 16 ranks through the configured OpenMPI or MPICH `mpirun`:
+
+```bash
+bash run_1host_16rank.sh smoke_config.conf
+```
+
+The equivalent Make target is:
+
+```bash
+make run-1host CONFIG=smoke_config.conf ROLE=master
+```
+
+The launcher requires all 16 MPI ranks to run on the same shared-memory node.
+Each rank still binds to the device with the same local rank. Peer pairs are
+fixed as follows:
+
+```text
+0 <-> 8    1 <-> 9    2 <-> 10    3 <-> 11
+4 <-> 12   5 <-> 13   6 <-> 14    7 <-> 15
+```
+
+This path uses the same CANN Fabric mapping and PTO `TLOAD/TSTORE` kernel as
+the two-host smoke; only peer selection and MPI placement differ.
+
 ## Pass Criteria
 
 RootInfo succeeds when rank 0 prints:
@@ -211,6 +252,13 @@ and rank 0 prints:
 
 ```text
 A3 CANN Fabric cross-host PTO TLOAD smoke PASS
+```
+
+For the single-host 16-rank case, the corresponding messages are:
+
+```text
+single-host-16 CANN Fabric + PTO TLOAD/TSTORE verify OK
+A3 CANN Fabric single-host-16 PTO TLOAD smoke PASS
 ```
 
 ## Existing Rank-Table Baseline

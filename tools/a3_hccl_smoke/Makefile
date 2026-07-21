@@ -89,7 +89,7 @@ KERNEL_FLAGS := \
 	-mllvm -cce-aicore-dcci-insert-for-scalar=false \
 	-DMEMORY_BASE
 
-.PHONY: all baseline rootinfo fabric check-common-deps check-hccl-deps check-fabric-deps clean run run-rootinfo run-hccl
+.PHONY: all baseline rootinfo fabric check-common-deps check-hccl-deps check-fabric-deps clean run run-1host run-rootinfo run-hccl
 
 all: baseline rootinfo fabric
 
@@ -148,6 +148,10 @@ clean:
 run: fabric
 	test -n "$(CONFIG)" || { echo "CONFIG is required for two-host runs"; exit 1; }
 	bash run_2host_32rank.sh "$(CONFIG)" fabric
+
+run-1host: fabric
+	test -n "$(CONFIG)" || { echo "CONFIG is required for single-host runs"; exit 1; }
+	bash run_1host_16rank.sh "$(CONFIG)"
 
 run-rootinfo: $(ROOTINFO_TARGET)
 	test -n "$(CONFIG)" || { echo "CONFIG is required for two-host runs"; exit 1; }
