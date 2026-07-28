@@ -91,6 +91,7 @@ bool PTO2SchedulerState::RingSchedState::init_data_from_layout(void *sm_dev_base
     ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
+    advance_pending.store(0, std::memory_order_relaxed);
 #if SIMPLER_DFX
     dep_pool_snapshot_tail.store(1, std::memory_order_relaxed);
     dep_pool_snapshot_top.store(1, std::memory_order_relaxed);
@@ -110,6 +111,7 @@ void PTO2SchedulerState::RingSchedState::reset_for_reuse(
     ring = pto2_sm_layout::ring_header_addr(sm_dev_base, ring_id);
     last_task_alive = 0;
     advance_lock.store(0, std::memory_order_relaxed);
+    advance_pending.store(0, std::memory_order_relaxed);
     dep_pool.reset_for_reuse(orch_err);
 #if SIMPLER_DFX
     dep_pool_snapshot_tail.store(1, std::memory_order_relaxed);
