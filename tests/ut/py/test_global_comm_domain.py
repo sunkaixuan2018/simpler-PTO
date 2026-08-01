@@ -286,8 +286,6 @@ def _mpi_static_worker():
         MpiL3GroupSpec(
             hosts=("127.0.0.1", "127.0.0.1"),
             platform="a2a3sim",
-            command_port_base=21073,
-            health_port_base=22073,
             device_ids_by_rank=((0,), (0,)),
             comm_profile="sim",
             global_device_ranks_by_rank=((0,), (1,)),
@@ -396,9 +394,15 @@ def test_mpirun_group_global_domain_uses_mpi_prepare_commit_without_l4_import(mo
         assert handle.members[1].global_device_rank == 1
         counts = Counter(phase for phase, _worker_id in calls)
         assert counts["COMM_INIT"] == 2
-        assert counts[GlobalDomainPhase.PREPARE_EXPORT] == 2
-        assert counts[GlobalDomainPhase.COMMIT] == 2
+        assert counts[GlobalDomainPhase.PREPARE_EXPORT] == 1
+        assert counts[GlobalDomainPhase.COMMIT] == 1
         assert counts[GlobalDomainPhase.IMPORT] == 0
+        group_phases = [
+            worker_id
+            for phase, worker_id in calls
+            if phase in (GlobalDomainPhase.PREPARE_EXPORT, GlobalDomainPhase.COMMIT)
+        ]
+        assert group_phases == [node_ids[0], node_ids[0]]
         assert worker._live_global_domains["mpi-static"] is handle
         assert resources.live_global_domains["mpi-static"] is handle
     finally:
