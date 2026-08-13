@@ -2552,6 +2552,14 @@ NB_MODULE(_task_interface, m) {
         nb::arg("handle"), "Return the number of in-flight native operations holding this mapped region."
     );
     m.def(
+        "_worker_host_mapped_region_device_addr_for_test",
+        [](uint64_t handle) {
+            WorkerHostMappedRegionLease mapping = worker_host_mapped_region_registry().lease(handle);
+            return mapping->device_addr;
+        },
+        nb::arg("handle"), "Return an imported region's process-local device VA for cross-process mapping validation."
+    );
+    m.def(
         "_worker_host_mapped_region_take_cleanup_error",
         [](const std::string &owner_token) {
             if (owner_token.empty()) {

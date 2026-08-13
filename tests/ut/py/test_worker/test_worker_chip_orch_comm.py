@@ -1124,6 +1124,8 @@ def test_worker_host_mapped_sim_payload_and_counter_helpers_roundtrip():
         _task_interface_ext._worker_host_mapped_payload_write(handle, 16, ctypes.addressof(src), 8)
         _task_interface_ext._worker_host_mapped_payload_read(handle, 16, ctypes.addressof(dst), 8)
         assert bytes(dst) == bytes(range(10, 18))
+        device_addr = _task_interface_ext._worker_host_mapped_region_device_addr_for_test(handle)
+        assert ctypes.string_at(device_addr + 16, 8) == bytes(range(10, 18))
 
         _task_interface_ext._worker_host_mapped_counter_notify(handle, 64, 3, int(NotifyOp.Set))
         assert _task_interface_ext._worker_host_mapped_counter_test(handle, 64, 3, int(WaitCmp.EQ)) == (True, 3)
