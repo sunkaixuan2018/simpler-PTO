@@ -11,9 +11,7 @@
 
 #include <cstdint>
 
-#include "aicpu/cache_maintenance.h"
-#include "aicpu/device_time.h"
-#include "common/platform_config.h"
+#include "common/memory_barrier.h"
 #include "pto_orchestration_api.h"  // NOLINT(build/include_subdir)
 
 namespace {
@@ -24,12 +22,11 @@ constexpr uint64_t kTailOffset = 64;
 constexpr uint64_t kCompletionOffset = 128;
 constexpr uint32_t kTailTimeout = 0xFFFFFFFEU;
 constexpr uint32_t kPayloadMismatch = 0xFFFFFFFDU;
-constexpr uint64_t kTimeoutTicks = PLATFORM_PROF_SYS_CNT_FREQ * 5ULL;
 
 void publish_completion(uint64_t base, uint32_t value) {
     auto *completion = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(base + kCompletionOffset));
     *completion = value;
-    cache_flush_range(const_cast<uint32_t *>(completion), sizeof(*completion));
+    wmb();
 }
 
 }  // namespace
@@ -47,24 +44,13 @@ __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTask
     const uint64_t expected_payload = orch_args.scalar(1);
     const uint32_t expected_tail = static_cast<uint32_t>(orch_args.scalar(2));
     auto *tail = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(base + kTailOffset));
-    const uint64_t start = sys_cnt_now_ticks();
-
-    uint32_t observed_tail = 0;
-    do {
-        cache_invalidate_range(const_cast<uint32_t *>(tail), sizeof(*tail));
-        observed_tail = *tail;
-        if (observed_tail >= expected_tail) {
-            break;
-        }
-    } while (sys_cnt_now_ticks() - start < kTimeoutTicks);
-
+    const uint32_t observed_tail = *tail;
     if (observed_tail < expected_tail) {
         publish_completion(base, kTailTimeout);
         return;
     }
 
     auto *payload = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(base + kPayloadOffset));
-    cache_invalidate_range(const_cast<uint64_t *>(payload), sizeof(*payload));
     if (*payload != expected_payload) {
         publish_completion(base, kPayloadMismatch);
         return;
