@@ -352,6 +352,8 @@ def _run_fork_inherited(
                 os.kill(pid, signal.SIGKILL)
         _, wait_status = os.waitpid(pid, 0)
         if child_result["status"] != "pass":
+            child_result["child_status"] = _wait_status_description(wait_status)
+            child_result["child_worker_reinitialized"] = reinitialize_child_worker
             return child_result
         if not os.WIFEXITED(wait_status) or os.WEXITSTATUS(wait_status) != 0:
             return {"status": "fail", "reason": f"forked ChipWorker exit status {wait_status}"}
