@@ -111,6 +111,12 @@ def _write_publication(host_addr: int) -> None:
     _memory_wmb_for_test()
 
 
+def _publication_values(host_addr: int) -> tuple[int, int]:
+    payload = int(ctypes.c_uint64.from_address(host_addr + _PAYLOAD_OFFSET).value)
+    tail = int(ctypes.c_uint32.from_address(host_addr + _TAIL_OFFSET).value)
+    return payload, tail
+
+
 def _completion(host_addr: int) -> int:
     return int(ctypes.c_uint32.from_address(host_addr + _COMPLETION_OFFSET).value)
 
@@ -153,10 +159,44 @@ def _read_child_result(fd: int, timeout_s: float) -> dict[str, Any]:
 
 def _run_same_process(worker: ChipWorker, handle, args: ChipStorageTaskArgs, host_addr: int) -> dict[str, Any]:
     _write_publication(host_addr)
+    payload, tail = _publication_values(host_addr)
+    if payload != _EXPECTED_PAYLOAD or tail != _EXPECTED_TAIL:
+        return {
+            "status": "fail",
+            "reason": f"host self-read mismatch: payload={payload:#x} tail={tail}",
+            "host_mapping_visible": False,
+        }
+    config = CallConfig()
+    config.aicpu_thread_num = 2
+    try:
+        worker.run(handle, args, config)
+    except BaseException as exc:  # noqa: BLE001
+        return {
+            "status": "fail",
+            "reason": f"AICPU observer failed after host self-read passed: {type(exc).__name__}: {exc}",
+            "host_mapping_visible": True,
+            "aicpu_completion_visible": False,
+        }
+    result = _completion_result(_completion(host_addr))
+    result["host_mapping_visible"] = True
+    result["aicpu_completion_visible"] = result["status"] == "pass"
+    return result
+
+
+def _run_acl_copy_control(worker: ChipWorker, handle, args: ChipStorageTaskArgs, device_addr: int) -> dict[str, Any]:
+    publication = ctypes.create_string_buffer(_REGION_BYTES)
+    ctypes.c_uint64.from_buffer(publication, _PAYLOAD_OFFSET).value = _EXPECTED_PAYLOAD
+    ctypes.c_uint32.from_buffer(publication, _TAIL_OFFSET).value = _EXPECTED_TAIL
+    worker.copy_to(device_addr, ctypes.addressof(publication), _REGION_BYTES)
     config = CallConfig()
     config.aicpu_thread_num = 2
     worker.run(handle, args, config)
-    return _completion_result(_completion(host_addr))
+    readback = ctypes.create_string_buffer(_REGION_BYTES)
+    worker.copy_from(ctypes.addressof(readback), device_addr, _REGION_BYTES)
+    completion = int(ctypes.c_uint32.from_buffer(readback, _COMPLETION_OFFSET).value)
+    result = _completion_result(completion)
+    result["completion"] = completion
+    return result
 
 
 def _run_fork_inherited(
@@ -271,21 +311,26 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         device_addr = worker.malloc(_REGION_BYTES)
         zeros = ctypes.create_string_buffer(_REGION_BYTES)
         worker.copy_to(device_addr, ctypes.addressof(zeros), _REGION_BYTES)
-        mapping = _HalHostMapping(device_addr, _REGION_BYTES, int(args.device))
         observer_args = _observer_args(device_addr)
-        if args.case == "same-process-owner":
-            result = _run_same_process(worker, handle, observer_args, mapping.host_addr)
+        if args.case == "acl-copy-control":
+            result = _run_acl_copy_control(worker, handle, observer_args, device_addr)
         else:
+            mapping = _HalHostMapping(device_addr, _REGION_BYTES, int(args.device))
+        if args.case == "same-process-owner":
+            assert mapping is not None
+            result = _run_same_process(worker, handle, observer_args, mapping.host_addr)
+        elif args.case == "fork-inherited-owner":
+            assert mapping is not None
             result = _run_fork_inherited(worker, handle, observer_args, mapping.host_addr, float(args.timeout))
-        result.update(
-            {
-                "case": args.case,
-                "device_addr": device_addr,
-                "host_addr": mapping.host_addr,
-                "identity_mapping": device_addr == mapping.host_addr,
-                "completion": _completion(mapping.host_addr),
-            }
-        )
+        result.update({"case": args.case, "device_addr": device_addr})
+        if mapping is not None:
+            result.update(
+                {
+                    "host_addr": mapping.host_addr,
+                    "identity_mapping": device_addr == mapping.host_addr,
+                    "completion": _completion(mapping.host_addr),
+                }
+            )
         return result
     finally:
         if mapping is not None:
@@ -301,7 +346,9 @@ def main() -> int:
     parser.add_argument("--platform", default="a2a3", choices=("a2a3",))
     parser.add_argument("--runtime", default="tensormap_and_ringbuffer")
     parser.add_argument("--device", required=True, type=int)
-    parser.add_argument("--case", required=True, choices=("same-process-owner", "fork-inherited-owner"))
+    parser.add_argument(
+        "--case", required=True, choices=("acl-copy-control", "same-process-owner", "fork-inherited-owner")
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--output")
     cli_args = parser.parse_args()
