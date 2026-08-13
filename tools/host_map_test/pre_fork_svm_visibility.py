@@ -125,6 +125,17 @@ def _completion_result(value: int) -> dict[str, Any]:
     return {"status": "fail", "reason": f"unexpected completion value {value}"}
 
 
+def _wait_status_description(wait_status: int) -> str:
+    if os.WIFSIGNALED(wait_status):
+        signal_number = os.WTERMSIG(wait_status)
+        with contextlib.suppress(ValueError):
+            return f"signal {signal_number} ({signal.Signals(signal_number).name})"
+        return f"signal {signal_number}"
+    if os.WIFEXITED(wait_status):
+        return f"exit code {os.WEXITSTATUS(wait_status)}"
+    return f"wait status {wait_status}"
+
+
 def _read_child_result(fd: int, timeout_s: float) -> dict[str, Any]:
     ready, _, _ = select.select([fd], [], [], timeout_s)
     if not ready:
@@ -153,11 +164,13 @@ def _run_fork_inherited(
 ) -> dict[str, Any]:
     ready_read, ready_write = os.pipe()
     launch_read, launch_write = os.pipe()
+    mapping_read, mapping_write = os.pipe()
     result_read, result_write = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(ready_read)
         os.close(launch_write)
+        os.close(mapping_read)
         os.close(result_read)
         child_result: dict[str, Any]
         try:
@@ -169,10 +182,13 @@ def _run_fork_inherited(
             child_payload = int(ctypes.c_uint64.from_address(host_addr + _PAYLOAD_OFFSET).value)
             child_tail = int(ctypes.c_uint32.from_address(host_addr + _TAIL_OFFSET).value)
             if child_payload != _EXPECTED_PAYLOAD or child_tail != _EXPECTED_TAIL:
+                os.write(mapping_write, b"M")
                 raise RuntimeError(
                     "forked process did not observe the inherited host mapping publication: "
                     f"payload={child_payload:#x} tail={child_tail}"
                 )
+            os.write(mapping_write, b"V")
+            os.close(mapping_write)
             config = CallConfig()
             config.aicpu_thread_num = 2
             worker.run(handle, args, config)
@@ -191,6 +207,7 @@ def _run_fork_inherited(
 
     os.close(ready_write)
     os.close(launch_read)
+    os.close(mapping_write)
     os.close(result_write)
     try:
         ready, _, _ = select.select([ready_read], [], [], 10.0)
@@ -201,6 +218,27 @@ def _run_fork_inherited(
         _write_publication(host_addr)
         os.write(launch_write, b"G")
         os.close(launch_write)
+        mapping_ready, _, _ = select.select([mapping_read], [], [], 10.0)
+        if not mapping_ready:
+            os.kill(pid, signal.SIGKILL)
+            _, wait_status = os.waitpid(pid, 0)
+            return {
+                "status": "fail",
+                "reason": "forked process did not finish its inherited host VA read within 10s",
+                "child_status": _wait_status_description(wait_status),
+                "child_host_mapping_visible": False,
+            }
+        mapping_status = os.read(mapping_read, 1)
+        if mapping_status != b"V":
+            child_result = _read_child_result(result_read, 5.0)
+            _, wait_status = os.waitpid(pid, 0)
+            if not mapping_status:
+                child_result["reason"] = (
+                    f"forked process died while reading the inherited host VA: {_wait_status_description(wait_status)}"
+                )
+            child_result["child_status"] = _wait_status_description(wait_status)
+            child_result["child_host_mapping_visible"] = False
+            return child_result
         child_result = _read_child_result(result_read, timeout_s)
         if child_result["status"] != "pass":
             with contextlib.suppress(ProcessLookupError):
@@ -215,6 +253,7 @@ def _run_fork_inherited(
         return result
     finally:
         os.close(ready_read)
+        os.close(mapping_read)
         with contextlib.suppress(OSError):
             os.close(launch_write)
         os.close(result_read)
