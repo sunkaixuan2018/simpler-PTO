@@ -405,7 +405,7 @@ def _coordinator_role(args: argparse.Namespace) -> dict[str, Any]:
             "reason": (
                 "explicit VMM import preserved bidirectional L3/AICPU visibility"
                 if passed
-                else "explicit VMM import did not preserve bidirectional L3/AICPU visibility"
+                else "halHostRegister CPU stores on the imported VMM mapping were not visible to AICPU"
             ),
             "case": args.case,
             "l2_pid": l2_process.pid,
