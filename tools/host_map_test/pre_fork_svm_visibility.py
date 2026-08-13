@@ -96,6 +96,7 @@ def _build_observer(platform: str, runtime: str) -> ChipCallable:
     return ChipCallable.build(
         signature=[],
         func_name="pre_fork_svm_observer",
+        config_name="aicpu_orchestration_config",
         binary=binary,
         children=[],
     )
