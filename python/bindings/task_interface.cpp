@@ -57,6 +57,7 @@
 #include "chip_run_lane.h"
 #include "chip_worker.h"
 #include "common/host_span_scope.h"
+#include "common/memory_barrier.h"
 #include "data_type.h"
 #include "dma_workspace.h"
 #include "worker_chip_orch_comm.h"
@@ -952,6 +953,14 @@ void check_access_subset(uint8_t granted, TensorArgType tag) {
 
 NB_MODULE(_task_interface, m) {
     m.doc() = "Nanobind bindings for task_interface (DataType, Buffer/Tensor wire ABI, ChipTensor, TaskArgs variants)";
+
+    m.def(
+        "_memory_wmb_for_test",
+        []() {
+            wmb();
+        },
+        "Issue the host publication barrier used by memory tests."
+    );
 
     // Source commit this extension was compiled from; "" when git was
     // unavailable at build time. simpler.task_interface compares it against the
