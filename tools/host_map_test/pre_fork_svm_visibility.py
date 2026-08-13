@@ -152,19 +152,35 @@ def _run_fork_inherited(
     worker: ChipWorker, handle, args: ChipStorageTaskArgs, host_addr: int, timeout_s: float
 ) -> dict[str, Any]:
     ready_read, ready_write = os.pipe()
+    launch_read, launch_write = os.pipe()
     result_read, result_write = os.pipe()
     pid = os.fork()
     if pid == 0:
         os.close(ready_read)
+        os.close(launch_write)
         os.close(result_read)
         child_result: dict[str, Any]
         try:
             os.write(ready_write, b"R")
             os.close(ready_write)
+            if os.read(launch_read, 1) != b"G":
+                raise RuntimeError("parent did not publish the launch signal")
+            os.close(launch_read)
+            child_payload = int(ctypes.c_uint64.from_address(host_addr + _PAYLOAD_OFFSET).value)
+            child_tail = int(ctypes.c_uint32.from_address(host_addr + _TAIL_OFFSET).value)
+            if child_payload != _EXPECTED_PAYLOAD or child_tail != _EXPECTED_TAIL:
+                raise RuntimeError(
+                    "forked process did not observe the inherited host mapping publication: "
+                    f"payload={child_payload:#x} tail={child_tail}"
+                )
             config = CallConfig()
             config.aicpu_thread_num = 2
             worker.run(handle, args, config)
-            child_result = {"status": "pass", "reason": "forked ChipWorker run completed"}
+            child_result = {
+                "status": "pass",
+                "reason": "forked process observed the host VA and its inherited ChipWorker run completed",
+                "child_host_mapping_visible": True,
+            }
         except BaseException as exc:  # noqa: BLE001
             child_result = {"status": "fail", "reason": f"forked ChipWorker run failed: {type(exc).__name__}: {exc}"}
         try:
@@ -174,6 +190,7 @@ def _run_fork_inherited(
             os._exit(0 if child_result["status"] == "pass" else 1)
 
     os.close(ready_write)
+    os.close(launch_read)
     os.close(result_write)
     try:
         ready, _, _ = select.select([ready_read], [], [], 10.0)
@@ -182,6 +199,8 @@ def _run_fork_inherited(
             os.waitpid(pid, 0)
             return {"status": "fail", "reason": "forked ChipWorker did not reach its launch point"}
         _write_publication(host_addr)
+        os.write(launch_write, b"G")
+        os.close(launch_write)
         child_result = _read_child_result(result_read, timeout_s)
         if child_result["status"] != "pass":
             with contextlib.suppress(ProcessLookupError):
@@ -191,9 +210,13 @@ def _run_fork_inherited(
             return child_result
         if not os.WIFEXITED(wait_status) or os.WEXITSTATUS(wait_status) != 0:
             return {"status": "fail", "reason": f"forked ChipWorker exit status {wait_status}"}
-        return _completion_result(_completion(host_addr))
+        result = _completion_result(_completion(host_addr))
+        result["child_host_mapping_visible"] = bool(child_result["child_host_mapping_visible"])
+        return result
     finally:
         os.close(ready_read)
+        with contextlib.suppress(OSError):
+            os.close(launch_write)
         os.close(result_read)
 
 
