@@ -101,8 +101,9 @@ def _build_observer(platform: str, runtime: str) -> ChipCallable:
     )
 
 
-def _observer_args(device_addr: int) -> ChipStorageTaskArgs:
+def _observer_args(device_addr: int, *, observe_memory: bool = True) -> ChipStorageTaskArgs:
     args = ChipStorageTaskArgs()
+    args.add_scalar(int(observe_memory))
     args.add_scalar(int(device_addr))
     args.add_scalar(_EXPECTED_PAYLOAD)
     args.add_scalar(_EXPECTED_TAIL)
@@ -202,6 +203,13 @@ def _run_acl_copy_control(worker: ChipWorker, handle, args: ChipStorageTaskArgs,
     result = _completion_result(completion)
     result["completion"] = completion
     return result
+
+
+def _run_noop_control(worker: ChipWorker, handle, args: ChipStorageTaskArgs) -> dict[str, Any]:
+    config = CallConfig()
+    config.aicpu_thread_num = 2
+    worker.run(handle, args, config)
+    return {"status": "pass", "reason": "AICPU observer returned without accessing the candidate address"}
 
 
 def _run_fork_inherited(
@@ -321,8 +329,11 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
         _phase("device-allocation-done", device_addr=device_addr)
         zeros = ctypes.create_string_buffer(_REGION_BYTES)
         worker.copy_to(device_addr, ctypes.addressof(zeros), _REGION_BYTES)
-        observer_args = _observer_args(device_addr)
-        if args.case == "acl-copy-control":
+        observer_args = _observer_args(device_addr, observe_memory=args.case != "observer-noop-control")
+        if args.case == "observer-noop-control":
+            _phase("observer-noop-control-start")
+            result = _run_noop_control(worker, handle, observer_args)
+        elif args.case == "acl-copy-control":
             _phase("acl-copy-control-start")
             result = _run_acl_copy_control(worker, handle, observer_args, device_addr)
         else:
@@ -362,7 +373,9 @@ def main() -> int:
     parser.add_argument("--runtime", default="tensormap_and_ringbuffer")
     parser.add_argument("--device", required=True, type=int)
     parser.add_argument(
-        "--case", required=True, choices=("acl-copy-control", "same-process-owner", "fork-inherited-owner")
+        "--case",
+        required=True,
+        choices=("observer-noop-control", "acl-copy-control", "same-process-owner", "fork-inherited-owner"),
     )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--output")

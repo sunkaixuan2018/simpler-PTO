@@ -16,7 +16,8 @@
 
 namespace {
 
-constexpr int kExpectedArgCount = 3;
+constexpr int kExpectedArgCount = 4;
+constexpr uint64_t kModeNoop = 0;
 constexpr uint64_t kPayloadOffset = 0;
 constexpr uint64_t kTailOffset = 64;
 constexpr uint64_t kCompletionOffset = 128;
@@ -40,9 +41,13 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 }
 
 __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTaskArgs &orch_args) {
-    const uint64_t base = orch_args.scalar(0);
-    const uint64_t expected_payload = orch_args.scalar(1);
-    const uint32_t expected_tail = static_cast<uint32_t>(orch_args.scalar(2));
+    const uint64_t mode = orch_args.scalar(0);
+    if (mode == kModeNoop) {
+        return;
+    }
+    const uint64_t base = orch_args.scalar(1);
+    const uint64_t expected_payload = orch_args.scalar(2);
+    const uint32_t expected_tail = static_cast<uint32_t>(orch_args.scalar(3));
     auto *tail = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(base + kTailOffset));
     const uint32_t observed_tail = *tail;
     if (observed_tail < expected_tail) {
