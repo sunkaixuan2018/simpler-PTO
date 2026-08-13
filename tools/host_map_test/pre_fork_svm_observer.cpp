@@ -47,7 +47,7 @@ __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTask
     const uint64_t expected_payload = orch_args.scalar(1);
     const uint32_t expected_tail = static_cast<uint32_t>(orch_args.scalar(2));
     auto *tail = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(base + kTailOffset));
-    const uint64_t start = get_sys_cnt_aicpu();
+    const uint64_t start = sys_cnt_now_ticks();
 
     uint32_t observed_tail = 0;
     do {
@@ -56,7 +56,7 @@ __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTask
         if (observed_tail >= expected_tail) {
             break;
         }
-    } while (get_sys_cnt_aicpu() - start < kTimeoutTicks);
+    } while (sys_cnt_now_ticks() - start < kTimeoutTicks);
 
     if (observed_tail < expected_tail) {
         publish_completion(base, kTailTimeout);
