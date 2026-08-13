@@ -40,6 +40,11 @@ _DEV_SVM_MAP_HOST = 2
 _OBSERVER_SOURCE = Path(__file__).with_name("pre_fork_svm_observer.cpp")
 
 
+def _phase(name: str, **details: Any) -> None:
+    fields = " ".join(f"{key}={value}" for key, value in details.items())
+    print(f"[pre-fork-svm] phase={name}{' ' + fields if fields else ''}", flush=True)
+
+
 class _HalHostMapping:
     def __init__(self, device_addr: int, nbytes: int, device_id: int):
         self._device_addr = int(device_addr)
@@ -300,27 +305,37 @@ def _run_fork_inherited(
 
 
 def _run(args: argparse.Namespace) -> dict[str, Any]:
+    _phase("build-observer-start")
     observer = _build_observer(args.platform, args.runtime)
+    _phase("build-observer-done")
     binaries = RuntimeBuilder(args.platform).get_binaries(args.runtime)
     worker = ChipWorker()
     handle = worker.register_callable(observer)
     device_addr = 0
     mapping: _HalHostMapping | None = None
     try:
+        _phase("worker-init-start", device=args.device)
         worker.init(int(args.device), binaries)
+        _phase("worker-init-done", device=args.device)
         device_addr = worker.malloc(_REGION_BYTES)
+        _phase("device-allocation-done", device_addr=device_addr)
         zeros = ctypes.create_string_buffer(_REGION_BYTES)
         worker.copy_to(device_addr, ctypes.addressof(zeros), _REGION_BYTES)
         observer_args = _observer_args(device_addr)
         if args.case == "acl-copy-control":
+            _phase("acl-copy-control-start")
             result = _run_acl_copy_control(worker, handle, observer_args, device_addr)
         else:
+            _phase("hal-host-register-start")
             mapping = _HalHostMapping(device_addr, _REGION_BYTES, int(args.device))
+            _phase("hal-host-register-done", host_addr=mapping.host_addr)
         if args.case == "same-process-owner":
             assert mapping is not None
+            _phase("same-process-observer-start")
             result = _run_same_process(worker, handle, observer_args, mapping.host_addr)
         elif args.case == "fork-inherited-owner":
             assert mapping is not None
+            _phase("fork-inherited-observer-start")
             result = _run_fork_inherited(worker, handle, observer_args, mapping.host_addr, float(args.timeout))
         result.update({"case": args.case, "device_addr": device_addr})
         if mapping is not None:
