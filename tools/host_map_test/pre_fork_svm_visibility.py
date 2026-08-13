@@ -23,9 +23,11 @@ from pathlib import Path
 from typing import Any
 
 from _task_interface import _memory_wmb_for_test  # pyright: ignore[reportMissingImports]
-from simpler.task_interface import CallConfig, ChipCallable, ChipStorageTaskArgs, ChipWorker
+from simpler.task_interface import ArgDirection, CallConfig, ChipCallable, ChipStorageTaskArgs, ChipWorker, CoreCallable
 
+from simpler_setup.elf_parser import extract_text_section
 from simpler_setup.kernel_compiler import KernelCompiler
+from simpler_setup.pto_isa import ensure_pto_isa_root
 from simpler_setup.runtime_builder import RuntimeBuilder
 
 _REGION_BYTES = 192
@@ -38,6 +40,7 @@ _TAIL_TIMEOUT = 0xFFFFFFFE
 _PAYLOAD_MISMATCH = 0xFFFFFFFD
 _DEV_SVM_MAP_HOST = 2
 _OBSERVER_SOURCE = Path(__file__).with_name("pre_fork_svm_observer.cpp")
+_COMPLETION_SOURCE = Path(__file__).with_name("pre_fork_svm_completion.cpp")
 
 
 def _phase(name: str, **details: Any) -> None:
@@ -88,6 +91,16 @@ class _HalHostMapping:
 
 def _build_observer(platform: str, runtime: str) -> ChipCallable:
     compiler = KernelCompiler(platform=platform)
+    include_dirs = compiler.get_orchestration_include_dirs(runtime)
+    completion_binary = compiler.compile_incore(
+        source_path=str(_COMPLETION_SOURCE),
+        core_type="aiv",
+        pto_isa_root=ensure_pto_isa_root(),
+        extra_include_dirs=include_dirs,
+    )
+    if not platform.endswith("sim"):
+        completion_binary = extract_text_section(completion_binary)
+    completion = CoreCallable.build(signature=[ArgDirection.OUT], binary=completion_binary)
     binary = compiler.compile_orchestration(
         runtime_name=runtime,
         source_path=str(_OBSERVER_SOURCE),
@@ -98,7 +111,7 @@ def _build_observer(platform: str, runtime: str) -> ChipCallable:
         func_name="pre_fork_svm_observer",
         config_name="aicpu_orchestration_config",
         binary=binary,
-        children=[],
+        children=[(0, completion)],
     )
 
 

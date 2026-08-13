@@ -24,6 +24,14 @@ constexpr uint64_t kCompletionOffset = 128;
 constexpr uint32_t kTailTimeout = 0xFFFFFFFEU;
 constexpr uint32_t kPayloadMismatch = 0xFFFFFFFDU;
 
+void submit_completion_task() {
+    uint32_t shape[1] = {1};
+    TensorCreateInfo output_info(shape, 1, DataType::INT32);
+    CoreTaskArgs task_args;
+    task_args.add_output(output_info);
+    rt_submit_aiv_task(0, task_args);
+}
+
 void publish_completion(uint64_t base, uint32_t value) {
     auto *completion = reinterpret_cast<volatile uint32_t *>(static_cast<uintptr_t>(base + kCompletionOffset));
     *completion = value;
@@ -43,6 +51,7 @@ aicpu_orchestration_config(const ChipTaskArgs &orch_args) {
 __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTaskArgs &orch_args) {
     const uint64_t mode = orch_args.scalar(0);
     if (mode == kModeNoop) {
+        submit_completion_task();
         return;
     }
     const uint64_t base = orch_args.scalar(1);
@@ -52,15 +61,18 @@ __attribute__((visibility("default"))) void pre_fork_svm_observer(const ChipTask
     const uint32_t observed_tail = *tail;
     if (observed_tail < expected_tail) {
         publish_completion(base, kTailTimeout);
+        submit_completion_task();
         return;
     }
 
     auto *payload = reinterpret_cast<volatile uint64_t *>(static_cast<uintptr_t>(base + kPayloadOffset));
     if (*payload != expected_payload) {
         publish_completion(base, kPayloadMismatch);
+        submit_completion_task();
         return;
     }
     publish_completion(base, expected_tail);
+    submit_completion_task();
 }
 
 }  // extern "C"
