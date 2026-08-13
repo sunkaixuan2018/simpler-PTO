@@ -227,7 +227,13 @@ def _run_noop_control(worker: ChipWorker, handle, args: ChipStorageTaskArgs) -> 
 
 
 def _run_fork_inherited(
-    worker: ChipWorker, handle, args: ChipStorageTaskArgs, host_addr: int, timeout_s: float
+    worker: ChipWorker,
+    handle,
+    args: ChipStorageTaskArgs,
+    host_addr: int,
+    timeout_s: float,
+    *,
+    check_child_host_mapping: bool,
 ) -> dict[str, Any]:
     ready_read, ready_write = os.pipe()
     launch_read, launch_write = os.pipe()
@@ -246,23 +252,27 @@ def _run_fork_inherited(
             if os.read(launch_read, 1) != b"G":
                 raise RuntimeError("parent did not publish the launch signal")
             os.close(launch_read)
-            child_payload = int(ctypes.c_uint64.from_address(host_addr + _PAYLOAD_OFFSET).value)
-            child_tail = int(ctypes.c_uint32.from_address(host_addr + _TAIL_OFFSET).value)
-            if child_payload != _EXPECTED_PAYLOAD or child_tail != _EXPECTED_TAIL:
-                os.write(mapping_write, b"M")
-                raise RuntimeError(
-                    "forked process did not observe the inherited host mapping publication: "
-                    f"payload={child_payload:#x} tail={child_tail}"
-                )
-            os.write(mapping_write, b"V")
+            if check_child_host_mapping:
+                child_payload = int(ctypes.c_uint64.from_address(host_addr + _PAYLOAD_OFFSET).value)
+                child_tail = int(ctypes.c_uint32.from_address(host_addr + _TAIL_OFFSET).value)
+                if child_payload != _EXPECTED_PAYLOAD or child_tail != _EXPECTED_TAIL:
+                    os.write(mapping_write, b"M")
+                    raise RuntimeError(
+                        "forked process did not observe the inherited host mapping publication: "
+                        f"payload={child_payload:#x} tail={child_tail}"
+                    )
+                os.write(mapping_write, b"V")
+            else:
+                os.write(mapping_write, b"S")
             os.close(mapping_write)
             config = CallConfig()
             config.aicpu_thread_num = 2
             worker.run(handle, args, config)
             child_result = {
                 "status": "pass",
-                "reason": "forked process observed the host VA and its inherited ChipWorker run completed",
-                "child_host_mapping_visible": True,
+                "reason": "forked process inherited ChipWorker run completed",
+                "child_host_mapping_checked": check_child_host_mapping,
+                "child_host_mapping_visible": True if check_child_host_mapping else None,
             }
         except BaseException as exc:  # noqa: BLE001
             child_result = {"status": "fail", "reason": f"forked ChipWorker run failed: {type(exc).__name__}: {exc}"}
@@ -296,7 +306,7 @@ def _run_fork_inherited(
                 "child_host_mapping_visible": False,
             }
         mapping_status = os.read(mapping_read, 1)
-        if mapping_status != b"V":
+        if mapping_status not in (b"V", b"S"):
             child_result = _read_child_result(result_read, 5.0)
             _, wait_status = os.waitpid(pid, 0)
             if not mapping_status:
@@ -316,7 +326,8 @@ def _run_fork_inherited(
         if not os.WIFEXITED(wait_status) or os.WEXITSTATUS(wait_status) != 0:
             return {"status": "fail", "reason": f"forked ChipWorker exit status {wait_status}"}
         result = _completion_result(_completion(host_addr))
-        result["child_host_mapping_visible"] = bool(child_result["child_host_mapping_visible"])
+        result["child_host_mapping_checked"] = bool(child_result["child_host_mapping_checked"])
+        result["child_host_mapping_visible"] = child_result["child_host_mapping_visible"]
         return result
     finally:
         os.close(ready_read)
@@ -358,10 +369,17 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             assert mapping is not None
             _phase("same-process-observer-start")
             result = _run_same_process(worker, handle, observer_args, mapping.host_addr)
-        elif args.case == "fork-inherited-owner":
+        elif args.case in ("fork-inherited-owner", "fork-aicpu-only-owner"):
             assert mapping is not None
             _phase("fork-inherited-observer-start")
-            result = _run_fork_inherited(worker, handle, observer_args, mapping.host_addr, float(args.timeout))
+            result = _run_fork_inherited(
+                worker,
+                handle,
+                observer_args,
+                mapping.host_addr,
+                float(args.timeout),
+                check_child_host_mapping=args.case == "fork-inherited-owner",
+            )
         result.update({"case": args.case, "device_addr": device_addr})
         if mapping is not None:
             result.update(
@@ -389,7 +407,13 @@ def main() -> int:
     parser.add_argument(
         "--case",
         required=True,
-        choices=("observer-noop-control", "acl-copy-control", "same-process-owner", "fork-inherited-owner"),
+        choices=(
+            "observer-noop-control",
+            "acl-copy-control",
+            "same-process-owner",
+            "fork-inherited-owner",
+            "fork-aicpu-only-owner",
+        ),
     )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--output")
