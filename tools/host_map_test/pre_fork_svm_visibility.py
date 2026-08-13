@@ -226,14 +226,35 @@ def _run_noop_control(worker: ChipWorker, handle, args: ChipStorageTaskArgs) -> 
     return {"status": "pass", "reason": "AICPU observer returned without accessing the candidate address"}
 
 
+def _prepare_child_worker(
+    worker: ChipWorker,
+    handle,
+    observer: ChipCallable,
+    binaries,
+    device: int,
+    *,
+    reinitialize: bool,
+):
+    if not reinitialize:
+        return worker, handle
+    child_worker = ChipWorker()
+    child_handle = child_worker.register_callable(observer)
+    child_worker.init(device, binaries)
+    return child_worker, child_handle
+
+
 def _run_fork_inherited(
     worker: ChipWorker,
     handle,
+    observer: ChipCallable,
+    binaries,
+    device: int,
     args: ChipStorageTaskArgs,
     host_addr: int,
     timeout_s: float,
     *,
     check_child_host_mapping: bool,
+    reinitialize_child_worker: bool,
 ) -> dict[str, Any]:
     ready_read, ready_write = os.pipe()
     launch_read, launch_write = os.pipe()
@@ -265,14 +286,23 @@ def _run_fork_inherited(
             else:
                 os.write(mapping_write, b"S")
             os.close(mapping_write)
+            run_worker, run_handle = _prepare_child_worker(
+                worker,
+                handle,
+                observer,
+                binaries,
+                device,
+                reinitialize=reinitialize_child_worker,
+            )
             config = CallConfig()
             config.aicpu_thread_num = 2
-            worker.run(handle, args, config)
+            run_worker.run(run_handle, args, config)
             child_result = {
                 "status": "pass",
-                "reason": "forked process inherited ChipWorker run completed",
+                "reason": "forked process ChipWorker run completed",
                 "child_host_mapping_checked": check_child_host_mapping,
                 "child_host_mapping_visible": True if check_child_host_mapping else None,
+                "child_worker_reinitialized": reinitialize_child_worker,
             }
         except BaseException as exc:  # noqa: BLE001
             child_result = {"status": "fail", "reason": f"forked ChipWorker run failed: {type(exc).__name__}: {exc}"}
@@ -369,16 +399,20 @@ def _run(args: argparse.Namespace) -> dict[str, Any]:
             assert mapping is not None
             _phase("same-process-observer-start")
             result = _run_same_process(worker, handle, observer_args, mapping.host_addr)
-        elif args.case in ("fork-inherited-owner", "fork-aicpu-only-owner"):
+        elif args.case in ("fork-inherited-owner", "fork-aicpu-only-owner", "fork-child-reinit-owner"):
             assert mapping is not None
             _phase("fork-inherited-observer-start")
             result = _run_fork_inherited(
                 worker,
                 handle,
+                observer,
+                binaries,
+                int(args.device),
                 observer_args,
                 mapping.host_addr,
                 float(args.timeout),
                 check_child_host_mapping=args.case == "fork-inherited-owner",
+                reinitialize_child_worker=args.case == "fork-child-reinit-owner",
             )
         result.update({"case": args.case, "device_addr": device_addr})
         if mapping is not None:
@@ -413,6 +447,7 @@ def main() -> int:
             "same-process-owner",
             "fork-inherited-owner",
             "fork-aicpu-only-owner",
+            "fork-child-reinit-owner",
         ),
     )
     parser.add_argument("--timeout", type=float, default=60.0)
