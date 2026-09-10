@@ -615,12 +615,13 @@ int simpler_kernel_mode_init(
  *
  * `callable` points to a canonical ChipCallable image of exactly
  * `callable_size` bytes. Validating every flexible-array offset before the
- * image is hashed or uploaded is the implementation's obligation; the shared
- * entry validation checks only the image's alignment, its size floor, and the
- * callable id range. Preparation may allocate persistent state and enqueue
- * asynchronous device work on `caller_stream`, but never synchronizes a stream
- * or device - preparation errors surface through the caller's own warmup plus
- * synchronize. The stream is borrowed for this call only.
+ * image is hashed or uploaded is the implementation's obligation. Shared
+ * entry validation checks the canonical image bounds, signature counts,
+ * symbol names, alignment, and the callable id range. Preparation may
+ * allocate persistent state and enqueue asynchronous device work on
+ * `caller_stream`, but never synchronizes a stream or device - preparation
+ * errors surface through the caller's own warmup plus synchronize. The
+ * stream is borrowed for this call only.
  */
 int simpler_kernel_mode_prepare_callable(
     DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size,

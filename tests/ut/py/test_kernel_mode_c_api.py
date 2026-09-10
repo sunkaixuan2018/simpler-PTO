@@ -399,6 +399,9 @@ def test_kernel_entries_reject_a_context_with_no_kernel_claim(arch: str, runtime
         # errors, so the structural checks run before the ordering one.
         assert lib.simpler_kernel_mode_prepare_callable(ctx, -1, image, len(image), stream) == PTO_RUNTIME_ERR_INTERNAL
         assert lib.simpler_kernel_mode_prepare_callable(ctx, 0, image, 1, stream) == PTO_RUNTIME_ERR_INTERNAL
+        assert (
+            lib.simpler_kernel_mode_prepare_callable(ctx, 0, image, len(image) - 1, stream) == PTO_RUNTIME_ERR_INTERNAL
+        )
         assert lib.simpler_kernel_mode_launch(ctx, 0, image, None) == PTO_RUNTIME_ERR_INTERNAL
     finally:
         lib.destroy_device_context(ctx)
