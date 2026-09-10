@@ -30,6 +30,7 @@
 #include "device_runner_base.h"
 #include "host/dep_gen_collector.h"  // make_deps_json_path
 #include "host/kernel_entry_validation.h"
+#include "host/kernel_static_config.h"
 #include "host/kernel_pipeline_contract.h"
 #include "worker/pipeline_contract.h"
 #include "prepare_callable_common.h"
@@ -387,7 +388,8 @@ void destroy_device_context(DeviceContextHandle ctx) {
     // captured ACLGraph may reference. Destroying it would free them under the
     // graph, so the context is deliberately leaked instead: the caller closes
     // it explicitly, or the process ends.
-    if (runner != nullptr && runner->kernel_execution_state().has_live_resources()) {
+    if (runner != nullptr &&
+        (runner->kernel_execution_state().has_live_resources() || runner->has_persistent_kernel_args())) {
         LOG_ERROR("destroy_device_context: refusing to destroy an unclosed kernel context; leaving it alive");
         return;
     }
@@ -1271,6 +1273,8 @@ int simpler_kernel_mode_init(
 
     try {
         PipelineContract contract{};
+        const int config_rc = KernelStaticConfig::validate(config);
+        if (config_rc != 0) return config_rc;
         const int contract_rc = build_kernel_pipeline_contract_impl(config, &contract);
         if (contract_rc != 0) return contract_rc;
         if (!is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL) || !has_serviceable_arena_topology(contract) ||
@@ -1307,7 +1311,7 @@ int simpler_kernel_mode_init(
             std::vector<uint8_t> dispatcher_vec(dispatcher_binary, dispatcher_binary + dispatcher_size);
             runner->set_dispatcher_binary(std::move(dispatcher_vec));
         }
-        rc = runner->init_kernel_context(device_id);
+        rc = runner->init_kernel_context(device_id, *config, context_generation);
     } catch (...) {
         rc = PTO_RUNTIME_ERR_INTERNAL;
     }
