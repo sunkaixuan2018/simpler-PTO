@@ -1072,7 +1072,8 @@ int simpler_kernel_mode_init(
 }
 
 int simpler_kernel_mode_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size,
+    void *caller_stream
 ) {
     const int rc = validate_kernel_prepare_callable_args(ctx, callable_id, callable, callable_size, caller_stream);
     if (rc != 0) return rc;
