@@ -1084,7 +1084,9 @@ int simpler_kernel_mode_prepare_callable(
     return PTO_RUNTIME_ERR_INVALID_STATE;
 }
 
-int simpler_kernel_mode_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
+int simpler_kernel_mode_launch(
+    DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream
+) {
     const int rc = validate_kernel_launch_args(ctx, callable_id, args, caller_stream);
     if (rc != 0) return rc;
     LOG_ERROR("simpler_kernel_mode_launch: no live kernel context on this device context");

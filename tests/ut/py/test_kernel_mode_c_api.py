@@ -29,6 +29,10 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PTO_RUNTIME_ERR_INTERNAL = -1000
 PTO_RUNTIME_ERR_UNSUPPORTED = -1001
 PTO_RUNTIME_ERR_INVALID_STATE = -1003
+PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED = -1004
+PTO_RUNTIME_ERR_CALLABLE_BYTES_EXCEEDED = -1005
+PTO_RUNTIME_ERR_CALLABLE_NOT_RESIDENT = -1006
+PTO_RUNTIME_ERR_CALLABLE_STALE = -1007
 
 _ARCHES = ("a2a3", "a5")
 _RUNTIMES = ("host_build_graph", "tensormap_and_ringbuffer")
@@ -144,7 +148,6 @@ def _load(arch: str, variant: str, runtime: str) -> ctypes.CDLL:
     lib.simpler_kernel_mode_init.restype = ctypes.c_int
     lib.simpler_kernel_mode_prepare_callable.argtypes = [
         ctypes.c_void_p,
-        ctypes.c_int32,
         ctypes.c_void_p,
         ctypes.c_size_t,
         ctypes.c_void_p,
@@ -411,6 +414,9 @@ def _check_prepare_reuse(lib, ctx, arch, runtime):
     # reuses the context's persistent argument blocks, so neither adds GM.
     assert lib.simpler_kernel_mode_prepare_callable(ctx, 1, image, len(image), caller_stream) == 0
     assert lib.committed_device_memory_ctx(ctx) == prepared
+    lib.simpler_unregister_callable.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+    lib.simpler_unregister_callable.restype = ctypes.c_int
+    assert lib.simpler_unregister_callable(ctx, 0) == PTO_RUNTIME_ERR_INVALID_STATE
     assert lib.finalize_device(ctx) == 0
     assert lib.committed_device_memory_ctx(ctx) == 0
     assert (

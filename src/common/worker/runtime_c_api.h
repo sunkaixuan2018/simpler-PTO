@@ -72,6 +72,13 @@ struct CallConfig;
 extern "C" {
 #endif
 
+/* Context-local callable identity. Preserve both fields unchanged for launch.
+ * generation zero is invalid; slot reuse must issue a different generation. */
+typedef struct SimplerCallableHandle {
+    int32_t callable_id;
+    uint64_t generation;
+} SimplerCallableHandle;
+
 typedef void *RuntimeHandle;
 typedef void *DeviceContextHandle;
 
@@ -109,6 +116,10 @@ enum {
        context's lifecycle (e.g. launch on a context with no live kernel
        claim). */
     PTO_RUNTIME_ERR_INVALID_STATE = PTO_RUNTIME_ERR_BASE - 3,
+    PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED = PTO_RUNTIME_ERR_BASE - 4,
+    PTO_RUNTIME_ERR_CALLABLE_BYTES_EXCEEDED = PTO_RUNTIME_ERR_BASE - 5,
+    PTO_RUNTIME_ERR_CALLABLE_NOT_RESIDENT = PTO_RUNTIME_ERR_BASE - 6,
+    PTO_RUNTIME_ERR_CALLABLE_STALE = PTO_RUNTIME_ERR_BASE - 7,
 };
 
 /** Return values from simpler_poll_run(). */
@@ -613,6 +624,18 @@ int simpler_kernel_mode_init(
 /**
  * Stage one callable for kernel-mode launches, outside ACLGraph capture.
  *
+ * The caller serializes init/prepare/launch/finalize on each context, and
+ * chooses `callable_id` from [0, MAX_REGISTERED_CALLABLE_IDS). An id already
+ * staged on this context is a duplicate registration and is refused; ids are
+ * never evicted, unregistered, or reused before close. Two ids carrying
+ * byte-identical canonical content share one device upload, so the second is
+ * charged no arena bytes. The code arena holds 512 MiB of unique images,
+ * charged with 64-byte alignment, plus a fixed descriptor prefix indexed by
+ * id. COUNT_EXCEEDED / BYTES_EXCEEDED reject admission before upload. No
+ * error exits the process. A registration that fails on the device poisons
+ * the context and retains its storage until an explicit close after
+ * caller-established quiescence.
+ *
  * `callable` points to a canonical ChipCallable image of exactly
  * `callable_size` bytes. Validating every flexible-array offset before the
  * image is hashed or uploaded is the implementation's obligation. Shared
@@ -631,6 +654,13 @@ int simpler_kernel_mode_prepare_callable(
 /**
  * Enqueue one bounded asynchronous kernel-mode operator invocation.
  *
+ * `callable_id` names a callable staged on this context by prepare. The
+ * residency it resolves to carries the context generation it was staged
+ * under, so an id left over from a previous generation returns
+ * CALLABLE_STALE before dispatch rather than replaying recycled addresses;
+ * an id that was never staged returns CALLABLE_NOT_RESIDENT. The invocation
+ * carries the resolved generation to the device for the same check on replay.
+ *
  * `args` points to a ChipStorageTaskArgs POD whose tensor addresses are
  * caller-owned device addresses; they are passed through without ever being
  * dereferenced on the host. A launch performs no device malloc/free, no
@@ -640,7 +670,9 @@ int simpler_kernel_mode_prepare_callable(
  * implementation's obligation. A return of 0 means the sequence was enqueued;
  * device execution may still be in flight and may still fail asynchronously.
  */
-int simpler_kernel_mode_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream);
+int simpler_kernel_mode_launch(
+    DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream
+);
 
 #ifdef __cplusplus
 }
