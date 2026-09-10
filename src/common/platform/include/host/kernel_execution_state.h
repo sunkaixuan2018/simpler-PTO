@@ -97,21 +97,25 @@ enum class KernelStreamKind : size_t {
 };
 
 /**
- * One event per edge of the chained caller ↔ aicpu ↔ aicore synchronization,
- * plus the call tail. Caller and aicore are never adjacent, so no event joins
- * them directly.
+ * One event per edge of the launch's fork and join, plus the call tail.
  *
- * AicoreStart is recorded on the aicpu stream *before* the AICPU launch: the
- * AICPU orchestrator spins on AICore's handshake report, so an AicoreStart
- * recorded after the launch could only fire once the AICPU task completed,
- * which is a deadlock.
+ * Both device branches fork from the caller's Start and rejoin the caller
+ * directly, so the aicpu and aicore streams are siblings rather than a chain.
+ * AICore is submitted before AICPU: the AICPU orchestrator spins on AICore's
+ * handshake report, so AICore's SQE has to be on its stream before AICPU
+ * becomes resident, and until it is the launch can still cancel a waiting
+ * AICore without an AICPU having written the handshake.
+ *
+ * PrepareTail is recorded by preparation that enqueued device work of its own
+ * and is consumed by the next launch, which is the only ordering a launch
+ * needs against a prepare that did not stage on the caller's stream.
  */
 enum class KernelEventKind : size_t {
-    Start = 0,   /* caller → aicpu fork */
-    AicoreStart, /* aicpu → aicore fork */
-    AicoreDone,  /* aicore → aicpu join */
-    AicpuDone,   /* aicpu → caller join */
-    SerialTail,  /* caller-visible call tail; the stream-switch gate reads it */
+    Start = 0,  /* caller → aicpu and caller → aicore fork */
+    PrepareTail, /* preparation → first launch */
+    AicoreDone, /* aicore → caller join */
+    AicpuDone,  /* aicpu → caller join */
+    SerialTail, /* caller-visible call tail; the stream-switch gate reads it */
     Count,
 };
 

@@ -180,3 +180,144 @@ skipped.
 content. It runs in CI and on the Linux host used for hardware validation.
 
 **Affects.** Every commit on this branch.
+
+---
+
+## D6 - #2189 over #2180, taken as #2180's K4 chain plus #2189's K5 commit
+
+**Problem.** #2180 and #2189 must not both land: 14 conflicting files, and the
+handover records them as carrying the same K4 tree with no new content between
+them.
+
+**Finding.** #2189 is a strict superset in content but not in history. It
+rebuilt the whole stack under fresh commit ids -- its own K1 (`66156ed3`), its
+own 2a pair, its own K4 (`b5529c89`), a K2/K4 integration commit, and finally
+K5 (`b6435e48`). Cherry-picking #2189's commits after #2177 (2a) and #2176
+(K2) would replay two contributions this branch already carries.
+
+**Choice.** Take #2180's K4 chain (`3e822453`, `b0943525`), which is stacked
+directly on the 2a commits this branch already has, then cherry-pick only
+#2189's K5 commit (`b6435e48`) on top.
+
+**Reason.** It is the same end state with no duplicated contribution, and it is
+the second option the handover itself offers. #2180 is otherwise superseded.
+
+**Affects.** #2180 (K4 chain taken, PR otherwise superseded), #2189 (only K5
+taken; its K1/2a/K2/K4 commits are redundant against this branch).
+
+---
+
+## D7 - `launch` is id-based; #2190's handle collapses into it
+
+**Problem.** #2190 changes both entries to a `SimplerCallableHandle`
+`{callable_id, generation}`: prepare writes one out, launch takes one in. That
+is a third shape against K1's `int32_t callable_id`, and it arrives without a
+git conflict on the launch entry.
+
+**Choice.** Keep `int32_t callable_id` on both entries. Launch resolves the
+residency internally as `{callable_id, cache.generation()}`.
+
+**Reason.** The generation guard is the valuable half of #2190 and it survives
+intact: the cache stores the generation an entry was staged under, so a
+callable left from a previous context generation still resolves to
+`CALLABLE_STALE` rather than replaying a recycled address. What the handle
+added beyond that was a caller-held token, and an id-based ABI has no place to
+hold one -- the context generation is minted at init, so the check the caller
+would have armed is exactly the check the runtime now performs. Meanwhile
+#2185's entry layer, its nanobind binding and the Python wrapper are all
+id-based, as is K1.
+
+**Affects.** #2190. Its `_prepare` ctypes helper and `CallableHandle` struct
+are removed as dead; its two generation-staleness assertions are re-expressed
+against the id-based launch in the end-to-end test.
+
+---
+
+## D8 - #2190's callable cache takes a caller-supplied id
+
+**Problem.** `KernelCallableCache::stage` allocated its own sequential id
+(`entries_.size()`), because under #2190's ABI the runtime chose the id. Under
+D7 the caller chooses it.
+
+**Choice.** `stage` takes `requested_id`. An id already staged is refused as a
+duplicate registration. An image whose bytes match a resident entry is admitted
+under its own id, shares that entry's device address, and is charged zero arena
+bytes. `commit` and `rollback` find their entry by id instead of assuming it is
+the last one.
+
+**Reason.** It preserves every property the cache's own tests assert -- one
+upload per unique image, no eviction, arena accounting, descriptor table
+indexed by id -- while honouring the caller's id. The descriptor table was
+already indexed by id and the ABI already bounds the id to
+`[0, MAX_REGISTERED_CALLABLE_IDS)`, so a caller-supplied id indexes it safely.
+
+**Affects.** #2190. Its `test_kernel_callable_cache.cpp` needs the new
+parameter at each `stage` call site.
+
+---
+
+## D9 - The launch topology is the binder's AICore-first set
+
+**Problem.** Two five-event topologies are in the tree.
+`KernelEventKind` (from K2) is a chain: `Start, AicoreStart, AicoreDone,
+AicpuDone, SerialTail`, where the aicpu stream forks the aicore stream. The
+binder's `KernelLaunchHandles` is a fork-join:
+`prepare_tail, start, aicore_done, aicpu_done, serial_tail`, where both device
+streams fork from the caller's Start and rejoin the caller.
+
+The handover reports the binder as AICPU-first and leans toward K2's set. The
+binder's source says otherwise: its sequence waits `start` on the aicore
+stream, launches AICore, records `aicore_done`, and only then admits AICPU.
+Its comment gives the two v9 reasons verbatim -- the scheduler cycle when an
+AICPU startup waiter blocks a later AICore SQE, and the better failure
+closure, since AICore can still be cancelled while no AICPU has written the
+handshake.
+
+**Choice.** Adopt the binder's set. `KernelEventKind::AicoreStart` becomes
+`PrepareTail`; the count stays five and the storage is unchanged.
+
+**Reason.** The binder is the only implementation of a launch sequence in any
+of these PRs, and this integration wires launch onto it. Its topology is
+self-consistent, it is what v9 specifies, and K2's stated deadlock hazard is
+avoided by a different means: AICore's SQE is on its stream before AICPU
+becomes resident, so the orchestrator's spin on the AICore handshake always
+has a submitted AICore to wait for.
+
+`tests/st/a2a3/kernel_capture/native/driver.cpp` is reordered to match. It
+exercises the same capture primitives -- three streams, five events, one AICPU
+launch, three AICore launches -- so its capture evidence is preserved, and it
+now demonstrates the topology the product actually uses. Its two device
+branches touch disjoint buffers, so running them as siblings is safe.
+
+**Affects.** #2176 (event enum and capture ST), #2187 (unchanged, it was
+already the target).
+
+---
+
+## D10 - AICPU transport stays on the in-repo `rtsLaunchCpuKernel` path
+
+**Problem.** The binder's native layer, `launch_bound_kernel_native`, requires
+a `KernelNativeInvocation` carrying two `aclrtFuncHandle`s and drives
+`aclrtLaunchKernel` / `aclrtLaunchKernelWithHostArgs`. Nothing in any PR calls
+`aclrtBinaryLoad` or `aclrtBinaryGetFunction`, so nothing produces those
+handles. The TMR path in the repo launches AICPU work through
+`LoadAicpuOp::LaunchBuiltInOp`, which wraps `rtsLaunchCpuKernel`.
+
+**Finding.** The choice is not forced. `launch_bound_kernel` -- the generic
+entry -- takes `launch_aicpu` and `launch_aicore` as plain callbacks in
+`KernelLaunchOps`. Only the `_native` variant hard-codes the CANN family.
+
+**Choice.** Wire launch onto `launch_bound_kernel` with owner-supplied
+callbacks that reuse the existing `LaunchBuiltInOp` / AICore launch paths.
+Leave `launch_bound_kernel_native` in the tree, unused, as the migration
+target.
+
+**Reason.** It is the lowest-risk route to a first working launch and the one
+the handover recommends: the code already exists and is exercised on hardware,
+where the `WithHostArgs` family has no precedent in this repo. The binder's
+12-step sequence, its compensation ladder and its capture-safety guarantees
+are all in the generic entry, so nothing is given up. Switching the transport
+later changes two callbacks and no sequencing.
+
+**Affects.** #2187. The source guard covers only the three binder files, which
+this leaves untouched.
