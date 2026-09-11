@@ -53,7 +53,7 @@ struct FakeDevice {
 int prepare(KernelCallableCache &cache, FakeDevice &device, int id, const std::vector<uint8_t> &blob, bool &hit) {
     SimplerCallableHandle actual_id{99, 99};
     const int rc =
-        cache.stage(reinterpret_cast<const ChipCallable *>(blob.data()), blob.size(), device.ops(), actual_id, hit);
+        cache.stage(reinterpret_cast<const ChipCallable *>(blob.data()), blob.size(), device.ops(), id, actual_id, &hit);
     EXPECT_EQ(actual_id.callable_id, rc == 0 ? id : -1);
     if (rc == 0) EXPECT_NE(actual_id.generation, 0);
     else EXPECT_EQ(actual_id.generation, 0);
@@ -77,8 +77,9 @@ TEST(KernelCallableCache, SixtyFourResidentsThenCountErrorWithoutMutation) {
     EXPECT_EQ(cache.resident_bytes(), 64 * charge(image()));
     EXPECT_EQ(cache.host_bytes(), 64 * image().size());
     EXPECT_EQ(prepare(cache, device, -1, image(64, 255), hit), PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED);
-    ASSERT_EQ(prepare(cache, device, 0, image(64, 0), hit), 0);
-    EXPECT_TRUE(hit);
+    // An id already staged is a duplicate registration. The refusal uploads
+    // nothing and leaves the resident set as it was.
+    EXPECT_EQ(prepare(cache, device, 0, image(64, 0), hit), PTO_RUNTIME_ERR_INVALID_STATE);
     EXPECT_EQ(device.copies, 64);
     KernelCallableResidency found;
     ASSERT_EQ(cache.resolve({63, 7}, found), 0);
@@ -87,7 +88,7 @@ TEST(KernelCallableCache, SixtyFourResidentsThenCountErrorWithoutMutation) {
     EXPECT_EQ(cache.resident_count(), 64);
 }
 
-TEST(KernelCallableCache, IdenticalContentReusesIdAndDifferentContentGetsNewId) {
+TEST(KernelCallableCache, IdenticalContentSharesOneUploadAndDuplicateIdIsRefused) {
     KernelCallableCache cache;
     cache.set_generation(1);
     FakeDevice device;
@@ -95,15 +96,18 @@ TEST(KernelCallableCache, IdenticalContentReusesIdAndDifferentContentGetsNewId) 
     bool hit;
     ASSERT_EQ(prepare(cache, device, 0, blob, hit), 0);
     cache.commit(0);
-    ASSERT_EQ(prepare(cache, device, 0, blob, hit), 0);
-    EXPECT_TRUE(hit);
-    blob.back() = 2;
+    EXPECT_EQ(prepare(cache, device, 0, blob, hit), PTO_RUNTIME_ERR_INVALID_STATE);
+    // The same bytes under a different id are admitted and share the upload.
     ASSERT_EQ(prepare(cache, device, 1, blob, hit), 0);
-    EXPECT_FALSE(hit);
+    EXPECT_TRUE(hit);
     cache.commit(1);
+    blob.back() = 2;
+    ASSERT_EQ(prepare(cache, device, 2, blob, hit), 0);
+    EXPECT_FALSE(hit);
+    cache.commit(2);
     EXPECT_EQ(device.copies, 2);
     EXPECT_EQ(device.allocations, 1);
-    EXPECT_EQ(cache.resident_count(), 2);
+    EXPECT_EQ(cache.resident_count(), 3);
 }
 
 TEST(KernelCallableCache, ExactByteBoundaryAndOneByteOver) {
@@ -141,8 +145,11 @@ TEST(KernelCallableCache, AlignmentPaddingConsumesBudgetAndHitStillFits) {
     cache.set_generation(1);
     ASSERT_EQ(prepare(cache, device, 0, blob, hit), 0);
     cache.commit(0);
-    ASSERT_EQ(prepare(cache, device, 0, blob, hit), 0);
+    // The byte budget is spent, but identical bytes under a new id are charged
+    // nothing because they share the resident upload.
+    ASSERT_EQ(prepare(cache, device, 1, blob, hit), 0);
     EXPECT_TRUE(hit);
+    cache.commit(1);
     EXPECT_EQ(cache.resident_bytes(), charge(blob));
     EXPECT_EQ(cache.host_bytes(), blob.size());
     EXPECT_EQ(device.copies, 1);
@@ -224,8 +231,9 @@ TEST(KernelCallableCache, HostBackingIsImmutableAndResolveDoesNotAllocateOrUploa
     cache.commit(0);
     blob.back() = 2;
     auto original = image();
-    ASSERT_EQ(prepare(cache, device, 0, original, hit), 0);
+    ASSERT_EQ(prepare(cache, device, 1, original, hit), 0);
     EXPECT_TRUE(hit);
+    cache.commit(1);
     KernelCallableResidency found;
     for (int i = 0; i < 100; ++i)
         ASSERT_EQ(cache.resolve({0, 11}, found), 0);

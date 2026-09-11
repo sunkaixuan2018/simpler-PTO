@@ -74,39 +74,56 @@ TEST(KernelEntryValidation, InitRejectsEachStructuralViolation) {
     );
 }
 
-TEST(KernelEntryValidation, PrepareCallableChecksOutputPointerAndImageSize) {
-    SimplerCallableHandle id{-1, 0};
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, kCallableImage, sizeof(ChipCallable), &id), 0);
+TEST(KernelEntryValidation, PrepareCallableChecksPointersIdRangeAndImageSize) {
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, kCallableImage, sizeof(ChipCallable), kStream), 0);
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(nullptr, kCallableImage, sizeof(ChipCallable), &id),
+        validate_kernel_prepare_callable_args(
+            kCtx, MAX_REGISTERED_CALLABLE_IDS - 1, kCallableImage, sizeof(ChipCallable), kStream
+        ),
+        0
+    );
+    EXPECT_EQ(
+        validate_kernel_prepare_callable_args(nullptr, 0, kCallableImage, sizeof(ChipCallable), kStream),
         PTO_RUNTIME_ERR_INTERNAL
     );
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, nullptr, sizeof(ChipCallable), &id), PTO_RUNTIME_ERR_INTERNAL
+        validate_kernel_prepare_callable_args(kCtx, 0, nullptr, sizeof(ChipCallable), kStream),
+        PTO_RUNTIME_ERR_INTERNAL
     );
+    // Preparation stages on the caller's stream, so a null stream is an
+    // argument error rather than something the implementation substitutes for.
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, kCallableImage, sizeof(ChipCallable), nullptr),
+        validate_kernel_prepare_callable_args(kCtx, 0, kCallableImage, sizeof(ChipCallable), nullptr),
         PTO_RUNTIME_ERR_INTERNAL
     );
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, kCallableImage, sizeof(ChipCallable) - 1, &id),
+        validate_kernel_prepare_callable_args(kCtx, -1, kCallableImage, sizeof(ChipCallable), kStream),
         PTO_RUNTIME_ERR_INTERNAL
     );
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, kCallableImage + 1, sizeof(ChipCallable), &id),
+        validate_kernel_prepare_callable_args(
+            kCtx, MAX_REGISTERED_CALLABLE_IDS, kCallableImage, sizeof(ChipCallable), kStream
+        ),
+        PTO_RUNTIME_ERR_INTERNAL
+    );
+    EXPECT_EQ(
+        validate_kernel_prepare_callable_args(kCtx, 0, kCallableImage, sizeof(ChipCallable) - 1, kStream),
+        PTO_RUNTIME_ERR_INTERNAL
+    );
+    EXPECT_EQ(
+        validate_kernel_prepare_callable_args(kCtx, 0, kCallableImage + 1, sizeof(ChipCallable), kStream),
         PTO_RUNTIME_ERR_INTERNAL
     );
 }
 
 TEST(KernelEntryValidation, LaunchChecksPointersAndIdRange) {
-    EXPECT_EQ(validate_kernel_launch_args(kCtx, {0, 0}, kCallableImage, kStream), PTO_RUNTIME_ERR_INTERNAL);
-    EXPECT_EQ(validate_kernel_launch_args(kCtx, {0, 1}, kCallableImage, kStream), 0);
-    EXPECT_EQ(validate_kernel_launch_args(nullptr, {0, 1}, kCallableImage, kStream), PTO_RUNTIME_ERR_INTERNAL);
-    EXPECT_EQ(validate_kernel_launch_args(kCtx, {0, 1}, nullptr, kStream), PTO_RUNTIME_ERR_INTERNAL);
-    EXPECT_EQ(validate_kernel_launch_args(kCtx, {0, 1}, kCallableImage, nullptr), PTO_RUNTIME_ERR_INTERNAL);
-    EXPECT_EQ(validate_kernel_launch_args(kCtx, {-1, 1}, kCallableImage, kStream), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_launch_args(kCtx, 0, kCallableImage, kStream), 0);
+    EXPECT_EQ(validate_kernel_launch_args(nullptr, 0, kCallableImage, kStream), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_launch_args(kCtx, 0, nullptr, kStream), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_launch_args(kCtx, 0, kCallableImage, nullptr), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_launch_args(kCtx, -1, kCallableImage, kStream), PTO_RUNTIME_ERR_INTERNAL);
     EXPECT_EQ(
-        validate_kernel_launch_args(kCtx, {MAX_REGISTERED_CALLABLE_IDS, 1}, kCallableImage, kStream),
+        validate_kernel_launch_args(kCtx, MAX_REGISTERED_CALLABLE_IDS, kCallableImage, kStream),
         PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED
     );
 }
@@ -122,23 +139,23 @@ TEST(KernelEntryValidation, PrepareRejectsInvalidInvocationSignatureBeforeRegist
         );
     };
     set_count(offsetof(ChipCallable, sig_count_), -1);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), PTO_RUNTIME_ERR_INTERNAL);
     set_count(offsetof(ChipCallable, sig_count_), CHIP_MAX_TENSOR_ARGS + 1);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), PTO_RUNTIME_ERR_INTERNAL);
     set_count(offsetof(ChipCallable, sig_count_), 2);
     set_direction(0, ArgDirection::IN);
     set_direction(1, ArgDirection::SCALAR);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), 0);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), 0);
     set_count(offsetof(ChipCallable, scalar_count_), 1);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), 0);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), 0);
     set_count(offsetof(ChipCallable, scalar_count_), 2);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), PTO_RUNTIME_ERR_INTERNAL);
     set_count(offsetof(ChipCallable, scalar_count_), 0);
     set_direction(0, ArgDirection::SCALAR);
     set_direction(1, ArgDirection::OUT);
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), PTO_RUNTIME_ERR_INTERNAL);
     set_direction(0, static_cast<ArgDirection>(99));
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image)), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image, sizeof(image), kStream), PTO_RUNTIME_ERR_INTERNAL);
 }
 
 TEST(KernelEntryValidation, PrepareBoundsCanonicalImageBeforeHashOrUpload) {
@@ -148,13 +165,13 @@ TEST(KernelEntryValidation, PrepareBoundsCanonicalImageBeforeHashOrUpload) {
     const auto valid = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
         nullptr, 0, 0, "entry", binary, sizeof(binary), &func_id, &child, 1, "config"
     );
-    ASSERT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), valid.size()), 0);
+    ASSERT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), valid.size(), kStream), 0);
     const auto *header = reinterpret_cast<const ChipCallable *>(valid.data());
     const size_t child_start = offsetof(ChipCallable, storage_) + header->child_offset(0);
     auto reject_word = [&](size_t offset, uint32_t value) {
         auto image = valid;
         std::memcpy(image.data() + offset, &value, sizeof(value));
-        EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image.data(), image.size()), PTO_RUNTIME_ERR_INTERNAL);
+        EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, image.data(), image.size(), kStream), PTO_RUNTIME_ERR_INTERNAL);
     };
     reject_word(offsetof(ChipCallable, binary_size_), UINT32_MAX);
     reject_word(offsetof(ChipCallable, child_count_), UINT32_MAX);
@@ -169,18 +186,18 @@ TEST(KernelEntryValidation, PrepareBoundsCanonicalImageBeforeHashOrUpload) {
     auto unterminated = valid;
     std::memset(unterminated.data() + offsetof(ChipCallable, func_name_), 'x', CALLABLE_FUNC_NAME_MAX);
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, 0, unterminated.data(), unterminated.size()),
+        validate_kernel_prepare_callable_args(kCtx, 0, unterminated.data(), unterminated.size(), kStream),
         PTO_RUNTIME_ERR_INTERNAL
     );
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), child_start + sizeof(CoreCallable) - 1),
+        validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), child_start + sizeof(CoreCallable) - 1, kStream),
         PTO_RUNTIME_ERR_INTERNAL
     );
-    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), valid.size() - 1), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(validate_kernel_prepare_callable_args(kCtx, 0, valid.data(), valid.size() - 1, kStream), PTO_RUNTIME_ERR_INTERNAL);
     auto trailing = valid;
     trailing.push_back(0);
     EXPECT_EQ(
-        validate_kernel_prepare_callable_args(kCtx, 0, trailing.data(), trailing.size()), PTO_RUNTIME_ERR_INTERNAL
+        validate_kernel_prepare_callable_args(kCtx, 0, trailing.data(), trailing.size(), kStream), PTO_RUNTIME_ERR_INTERNAL
     );
 }
 
