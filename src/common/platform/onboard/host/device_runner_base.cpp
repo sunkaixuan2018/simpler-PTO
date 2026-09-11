@@ -628,7 +628,7 @@ KernelCallableCache::Ops DeviceRunnerBase::kernel_callable_cache_ops() {
     };
 }
 
-int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id) {
+int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id, const HostApi *api) {
     rtStream_t control_stream = static_cast<rtStream_t>(kernel_exec_state_.hidden_stream(KernelStreamKind::Aicpu));
     if (control_stream == nullptr) {
         LOG_ERROR("prepare_kernel_callable: no live kernel context");
@@ -643,6 +643,10 @@ int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id) {
         rc = prepare_aicpu_affinity(kernel_runtime_, kernel_static_config_.request().aicpu_thread_num, control_stream);
         if (rc != 0) return rc;
         rc = configure_kernel_runtime_impl(kernel_runtime_, kernel_static_config_.serial_orch_sched());
+        if (rc != 0) return rc;
+        // The context-static device regions are committed here, before the
+        // runtime image that names them is uploaded.
+        rc = prepare_kernel_runtime_impl(kernel_runtime_, api, &kernel_static_config_.request());
         if (rc != 0) return rc;
         rc = persistent_args_.prepare_once(kernel_runtime_, persistent_args_ops(), static_cast<uint64_t>(device_id_));
         if (rc != 0) return rc;

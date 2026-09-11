@@ -511,6 +511,17 @@ int configure_kernel_runtime_impl(Runtime &runtime, bool serial_orch_sched) {
     return 0;
 }
 
+// A kernel-mode launch needs three things this runtime does not yet have:
+// the pooled arena committed on the kernel path (prepare_kernel_callable
+// never reaches setup_static_arena, so kernel_runtime_ carries no heap, no
+// shared memory and no prebuilt arena), a device binding address published
+// from that arena, and a consume_kernel_invocation that reaches
+// admit/init/run_kernel_execution instead of the shared UnsupportedPayload
+// default. Until those land a launch cannot be serviced, and reporting
+// otherwise would let a caller that gates on this entry enlist a launch
+// that must fail.
+extern "C" int runtime_supports_kernel_launch_impl(void) { return 0; }
+
 extern "C" int build_kernel_pipeline_contract_impl(const CallConfig *config, PipelineContract *out) {
     if (config == nullptr || out == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
 
@@ -948,6 +959,22 @@ extern "C" int bind_callable_to_runtime_impl(
  *
  * @return 0 on success, -1 on failure
  */
+int prepare_kernel_runtime_impl(Runtime &runtime, const HostApi *api, const CallConfig *config) {
+    if (api == nullptr || config == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
+    ArenaSizingConfig sizing;
+    if (!resolve_arena_sizing(
+            config->runtime_env.ring_task_window, config->runtime_env.ring_heap, config->runtime_env.ring_dep_pool,
+            &sizing
+        ))
+        return PTO_RUNTIME_ERR_INTERNAL;
+    StaticArenaPtrs ptrs;
+    RuntimeArenaLayout layout;
+    if (!build_and_cache_prebuilt_arena(api, sizing, &ptrs, &layout)) return PTO_RUNTIME_ERR_INTERNAL;
+    runtime.set_gm_sm_ptr(ptrs.gm_sm);
+    runtime.set_prebuilt_arena(ptrs.runtime_arena_dev, layout.offsets.off_runtime);
+    return 0;
+}
+
 extern "C" int prewarm_config_impl(
     const HostApi *api, const uint64_t *ring_task_window, const uint64_t *ring_heap, const uint64_t *ring_dep_pool
 ) {
@@ -1084,7 +1111,7 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 // device, so it exports simpler_aicpu_register_callable; the common AICPU loader
 // queries this so it carries no runtime-specific symbol knowledge.
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
-    static const char *const kExtra[] = {"simpler_aicpu_register_callable", "simpler_aicpu_query_topology"};
+    static const char *const kExtra[] = {"simpler_aicpu_register_callable", "simpler_aicpu_query_topology", "simpler_aicpu_kernel_exec"};
     if (count != nullptr) {
         *count = sizeof(kExtra) / sizeof(kExtra[0]);
     }

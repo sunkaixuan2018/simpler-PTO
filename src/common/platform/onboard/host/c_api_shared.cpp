@@ -1260,7 +1260,10 @@ int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
  * kernel_entry_validation.h.
  * =========================================================================== */
 
-int simpler_kernel_mode_supported(DeviceContextHandle) { return 0; }
+// Reports the bound runtime's own verdict rather than a constant, so the
+// capability a caller gates on and the launch it would then make come from
+// one place.
+int simpler_kernel_mode_supported(DeviceContextHandle) { return runtime_supports_kernel_launch_impl(); }
 
 int simpler_kernel_mode_init(
     DeviceContextHandle ctx, int device_id, const uint8_t *aicpu_binary, size_t aicpu_size,
@@ -1373,7 +1376,8 @@ int simpler_kernel_mode_prepare_callable(
         // cannot be recycled until the caller establishes quiescence and closes.
         rollback.dismiss();
         try {
-            rc = runner->prepare_kernel_callable(prepared.callable_id);
+            const HostApi kernel_api(runner, 0, 0, &g_host_api_ops);
+            rc = runner->prepare_kernel_callable(prepared.callable_id, &kernel_api);
         } catch (...) {
             runner->kernel_execution_state().poison(PTO_RUNTIME_ERR_INTERNAL);
             throw;
@@ -1401,8 +1405,12 @@ int simpler_kernel_mode_launch(
     auto &cache = runner->kernel_callable_cache();
     const int residency_rc = cache.resolve({callable_id, cache.generation()}, residency);
     if (residency_rc != 0) return residency_rc;
-    LOG_ERROR("simpler_kernel_mode_launch: kernel launch binder is unavailable");
-    return PTO_RUNTIME_ERR_INVALID_STATE;
+    // Residency resolved, so the callable and its generation are good and the
+    // refusal below is about the runtime, not this call. simpler_kernel_mode_supported
+    // reports the same verdict from the same hook, so a caller that gates on it
+    // never reaches here.
+    LOG_ERROR("simpler_kernel_mode_launch: this runtime does not implement kernel-mode launch");
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
 
 }  // extern "C"

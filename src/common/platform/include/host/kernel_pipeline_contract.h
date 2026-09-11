@@ -21,3 +21,17 @@ extern "C" int build_kernel_pipeline_contract_impl(const CallConfig *config, Pip
 class Runtime;
 // Host-only preparation of runtime-specific static fields; no device work.
 int configure_kernel_runtime_impl(Runtime &runtime, bool serial_orch_sched);
+
+struct HostApi;
+// Commit this runtime's context-static device regions on a kernel context and
+// wire `runtime` to them. Runs once per context, before the runtime image is
+// uploaded, and allocates nothing afterwards: a kernel context's regions keep
+// their addresses for its whole life because a captured graph replays the
+// addresses of the run it captured.
+int prepare_kernel_runtime_impl(Runtime &runtime, const HostApi *api, const CallConfig *config);
+
+// Nonzero when this runtime implements the kernel-mode launch path: a device
+// entry the AICPU loader can resolve, and a payload consumer behind it. The
+// capability entry reports this, so a caller that gates on it never reaches a
+// launch the runtime cannot service.
+extern "C" int runtime_supports_kernel_launch_impl(void);

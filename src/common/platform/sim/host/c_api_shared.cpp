@@ -1045,6 +1045,8 @@ int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
  * argument this stub accepts is one the onboard path accepts too.
  * =========================================================================== */
 
+// Simulation has no kernel-mode execution path at all: init refuses before a
+// latch is taken, so no kernel context can exist here to launch on.
 int simpler_kernel_mode_supported(DeviceContextHandle) { return 0; }
 
 int simpler_kernel_mode_init(

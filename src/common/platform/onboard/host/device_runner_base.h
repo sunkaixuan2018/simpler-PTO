@@ -167,7 +167,7 @@ public:
      * context's persistent argument blocks exist. Idempotent in the part that
      * matters: only the first callable pays for the argument blocks.
      */
-    int prepare_kernel_callable(int32_t callable_id);
+    int prepare_kernel_callable(int32_t callable_id, const HostApi *api);
     KernelCallableCache &kernel_callable_cache() { return kernel_callable_cache_; }
     KernelCallableCache::Ops kernel_callable_cache_ops();
 

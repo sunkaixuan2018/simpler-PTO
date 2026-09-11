@@ -107,6 +107,12 @@ static_assert(
 
 int configure_kernel_runtime_impl(Runtime &, bool) { return PTO_RUNTIME_ERR_UNSUPPORTED; }
 
+int prepare_kernel_runtime_impl(Runtime &, const HostApi *, const CallConfig *) {
+    return PTO_RUNTIME_ERR_UNSUPPORTED;
+}
+
+extern "C" int runtime_supports_kernel_launch_impl(void) { return 0; }
+
 extern "C" int build_kernel_pipeline_contract_impl(const CallConfig *, PipelineContract *) {
     return PTO_RUNTIME_ERR_UNSUPPORTED;
 }
