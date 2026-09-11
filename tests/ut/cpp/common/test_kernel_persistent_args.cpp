@@ -162,22 +162,22 @@ struct FakeLifecycleOps {
     KernelContextOps context_ops() {
         return {
             this,
-            [](void *context, int *device) {
+            [](void *context, int *device) noexcept {
                 static_cast<FakeLifecycleOps *>(context)->calls().push_back("get_device");
                 *device = kDeviceId;
                 return 0;
             },
-            [](void *context, void **stream) {
+            [](void *context, void **stream) noexcept {
                 return create(context, stream, "stream");
             },
-            [](void *context, void *stream) {
+            [](void *context, void *stream) noexcept {
                 return destroy(context, stream, "stream");
             },
             0,
-            [](void *context, uint32_t, void **event) {
+            [](void *context, uint32_t, void **event) noexcept {
                 return create(context, event, "event");
             },
-            [](void *context, void *event) {
+            [](void *context, void *event) noexcept {
                 return destroy(context, event, "event");
             },
         };

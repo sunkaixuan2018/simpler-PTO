@@ -52,8 +52,9 @@ struct FakeDevice {
 };
 int prepare(KernelCallableCache &cache, FakeDevice &device, int id, const std::vector<uint8_t> &blob, bool &hit) {
     SimplerCallableHandle actual_id{99, 99};
-    const int rc =
-        cache.stage(reinterpret_cast<const ChipCallable *>(blob.data()), blob.size(), device.ops(), id, actual_id, &hit);
+    const int rc = cache.stage(
+        reinterpret_cast<const ChipCallable *>(blob.data()), blob.size(), device.ops(), id, actual_id, &hit
+    );
     EXPECT_EQ(actual_id.callable_id, rc == 0 ? id : -1);
     if (rc == 0) EXPECT_NE(actual_id.generation, 0);
     else EXPECT_EQ(actual_id.generation, 0);
@@ -86,6 +87,27 @@ TEST(KernelCallableCache, SixtyFourResidentsThenCountErrorWithoutMutation) {
     EXPECT_EQ(found.generation, 7);
     EXPECT_EQ(found.device_address, 0x10000000 + KernelCallableCache::kDescriptorBytes + 63 * charge(image()));
     EXPECT_EQ(cache.resident_count(), 64);
+}
+
+TEST(KernelCallableCache, HistoricalPaddingDoesNotOverrideSignatureCounts) {
+    auto blob = image();
+    auto *callable = reinterpret_cast<ChipCallable *>(blob.data());
+    callable->sig_count_ = 2;
+    callable->signature_[0] = ArgDirection::OUT;
+    callable->signature_[1] = ArgDirection::SCALAR;
+    constexpr size_t padding_begin = offsetof(ChipCallable, config_name_len_) + sizeof(uint32_t);
+    std::memset(blob.data() + padding_begin, 0xff, offsetof(ChipCallable, storage_) - padding_begin);
+    ASSERT_EQ(KernelCallableCache::validate_image(callable, blob.size()), 0);
+    KernelCallableCache cache;
+    cache.set_generation(7);
+    FakeDevice device;
+    bool hit;
+    ASSERT_EQ(prepare(cache, device, 0, blob, hit), 0);
+    cache.commit(0);
+    EXPECT_EQ(device.copies, 1);
+    EXPECT_EQ(device.descriptors, 1);
+    EXPECT_EQ(callable->scalar_count(), 1);
+    EXPECT_EQ(reinterpret_cast<const ChipCallable *>(device.last_upload.data())->scalar_count(), 1);
 }
 
 TEST(KernelCallableCache, IdenticalContentSharesOneUploadAndDuplicateIdIsRefused) {
@@ -221,6 +243,39 @@ TEST(KernelCallableCache, RejectsMalformedSpansBeforeHashOrDeviceOperations) {
     EXPECT_EQ(device.copies, 0);
 }
 
+TEST(KernelCallableCache, RejectsDuplicateAndOutOfRangeChildIdsBeforeDeviceOperations) {
+    const uint8_t code[] = {1, 2, 3};
+    const auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, code, sizeof(code));
+    const std::vector<uint8_t> children[] = {child, child};
+    KernelCallableCache cache;
+    cache.set_generation(7);
+    FakeDevice device;
+    bool hit;
+    for (int32_t invalid_id : {-1, 1024, INT32_MAX, 5}) {
+        const int32_t ids[] = {5, invalid_id};
+        const auto blob = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+            nullptr, 0, "orch", code, sizeof(code), ids, children, 2, ""
+        );
+        EXPECT_EQ(prepare(cache, device, 0, blob, hit), PTO_RUNTIME_ERR_INTERNAL);
+        EXPECT_EQ(cache.resident_count(), 0u);
+        EXPECT_EQ(cache.resident_bytes(), 0u);
+        EXPECT_EQ(device.allocations, 0);
+        EXPECT_EQ(device.copies, 0);
+        EXPECT_EQ(device.descriptors, 0);
+    }
+
+    const int32_t boundary_ids[] = {0, 1023};
+    const auto valid = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+        nullptr, 0, "orch", code, sizeof(code), boundary_ids, children, 2, ""
+    );
+    ASSERT_EQ(prepare(cache, device, 0, valid, hit), 0);
+    cache.commit(0);
+    EXPECT_EQ(cache.resident_count(), 1u);
+    EXPECT_EQ(device.allocations, 1);
+    EXPECT_EQ(device.copies, 1);
+    EXPECT_EQ(device.descriptors, 1);
+}
+
 TEST(KernelCallableCache, HostBackingIsImmutableAndResolveDoesNotAllocateOrUpload) {
     KernelCallableCache cache;
     cache.set_generation(11);
@@ -248,7 +303,7 @@ TEST(KernelCallableCache, ChildAddressesArePatchedOnlyInDeviceScratch) {
     auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, code, sizeof(code));
     const int32_t func_id = 5;
     auto blob = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
-        nullptr, 0, 0, "orch", code, sizeof(code), &func_id, &child, 1, ""
+        nullptr, 0, "orch", code, sizeof(code), &func_id, &child, 1, ""
     );
     const auto original = blob;
     KernelCallableCache cache;

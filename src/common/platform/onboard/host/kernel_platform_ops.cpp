@@ -24,7 +24,7 @@
 
 namespace {
 
-int get_current_device(void *, int *device_id) {
+int get_current_device(void *, int *device_id) noexcept {
     int32_t current = -1;
     const aclError rc = aclrtGetDevice(&current);
     if (rc != ACL_SUCCESS) {
@@ -36,7 +36,7 @@ int get_current_device(void *, int *device_id) {
     return 0;
 }
 
-int create_hidden_stream(void *, void **stream) {
+int create_hidden_stream(void *, void **stream) noexcept {
     rtStream_t created = nullptr;
     const rtError_t rc = rtStreamCreate(&created, 0);
     if (rc != RT_ERROR_NONE) {
@@ -48,7 +48,7 @@ int create_hidden_stream(void *, void **stream) {
     return 0;
 }
 
-int destroy_hidden_stream(void *, void *stream) {
+int destroy_hidden_stream(void *, void *stream) noexcept {
     const rtError_t rc = rtStreamDestroy(static_cast<rtStream_t>(stream));
     if (rc != RT_ERROR_NONE) {
         LOG_ERROR("kernel context: rtStreamDestroy failed: %d", static_cast<int>(rc));
@@ -58,7 +58,7 @@ int destroy_hidden_stream(void *, void *stream) {
     return 0;
 }
 
-int create_event(void *, uint32_t flag, void **event) {
+int create_event(void *, uint32_t flag, void **event) noexcept {
     aclrtEvent created = nullptr;
     const aclError rc = aclrtCreateEventExWithFlag(&created, flag);
     if (rc != ACL_SUCCESS) {
@@ -70,7 +70,7 @@ int create_event(void *, uint32_t flag, void **event) {
     return 0;
 }
 
-int destroy_event(void *, void *event) {
+int destroy_event(void *, void *event) noexcept {
     const aclError rc = aclrtDestroyEvent(static_cast<aclrtEvent>(event));
     if (rc != ACL_SUCCESS) {
         LOG_ERROR("kernel context: aclrtDestroyEvent failed: %d", static_cast<int>(rc));

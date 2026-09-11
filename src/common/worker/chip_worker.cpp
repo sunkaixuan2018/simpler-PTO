@@ -213,14 +213,6 @@ ChipWorker::GetPipelineContractFn ChipWorker::bind_runtime_symbols(void *handle)
     comm_global_domain_release_fn_ = load_symbol<CommGlobalDomainReleaseFn>(handle, "comm_global_domain_release");
     comm_barrier_fn_ = load_symbol<CommBarrierFn>(handle, "comm_barrier");
     comm_destroy_fn_ = load_symbol<CommDestroyFn>(handle, "comm_destroy");
-    // Kernel-mode lifecycle entries are part of the uniform host_runtime.so
-    // ABI like the ACL/comm group above: every runtime exports them, and
-    // variants without kernel-mode support ship validating stubs.
-    kernel_supported_fn_ = load_symbol<SimplerKernelSupportedFn>(handle, "simpler_kernel_mode_supported");
-    kernel_init_fn_ = load_symbol<SimplerKernelInitFn>(handle, "simpler_kernel_mode_init");
-    kernel_prepare_callable_fn_ =
-        load_symbol<SimplerKernelPrepareCallableFn>(handle, "simpler_kernel_mode_prepare_callable");
-    kernel_launch_fn_ = load_symbol<SimplerKernelLaunchFn>(handle, "simpler_kernel_mode_launch");
     return get_pipeline_contract_fn;
 }
 
@@ -312,6 +304,10 @@ void ChipWorker::init(
     bind_host_log_state(handle, "host runtime");
 
     const GetPipelineContractFn get_pipeline_contract_fn = bind_runtime_symbols(handle);
+    const auto kernel_supported_fn = load_symbol<KernelSupportedFn>(handle, "simpler_kernel_mode_supported");
+    KernelInitFn kernel_init_fn = nullptr;
+    KernelPrepareCallableFn kernel_prepare_callable_fn = nullptr;
+    KernelLaunchFn kernel_launch_fn = nullptr;
 
     const PipelineContract *contract = get_pipeline_contract_fn();
     if (!is_valid_pipeline_contract(contract) || !has_serviceable_arena_topology(*contract) ||
@@ -326,6 +322,12 @@ void ChipWorker::init(
     }
 
     try {
+        if (kernel_supported_fn(device_ctx_) != 0) {
+            kernel_init_fn = load_symbol<KernelInitFn>(handle, "simpler_kernel_mode_init");
+            kernel_prepare_callable_fn =
+                load_symbol<KernelPrepareCallableFn>(handle, "simpler_kernel_mode_prepare_callable");
+            kernel_launch_fn = load_symbol<KernelLaunchFn>(handle, "simpler_kernel_mode_launch");
+        }
         // One opaque native-run storage buffer per slot, always. The host
         // runtime constructs its per-run Runtime + phase state behind this
         // ABI boundary. This storage is not the RUNTIME_IMAGE resource: the
@@ -347,6 +349,7 @@ void ChipWorker::init(
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
+        reset_runtime_bindings();
         throw;
     }
 
@@ -420,6 +423,10 @@ void ChipWorker::init(
     }
 
     lib_handle_ = host_guard.release();
+    kernel_supported_fn_ = kernel_supported_fn;
+    kernel_init_fn_ = kernel_init_fn;
+    kernel_prepare_callable_fn_ = kernel_prepare_callable_fn;
+    kernel_launch_fn_ = kernel_launch_fn;
     device_id_ = device_id;
     // Published only once the runtime is up: the rollback paths above leave the
     // default K=1 contract in place, so a failed init never reports the counts
@@ -489,6 +496,14 @@ void ChipWorker::kernel_init(
 
     int init_rc = 0;
     try {
+        const auto kernel_supported_fn = load_symbol<KernelSupportedFn>(handle, "simpler_kernel_mode_supported");
+        if (kernel_supported_fn(device_ctx_) == 0) {
+            throw UnsupportedRuntimeOperation("this host runtime does not support kernel mode");
+        }
+        const auto kernel_init_fn = load_symbol<KernelInitFn>(handle, "simpler_kernel_mode_init");
+        const auto kernel_prepare_callable_fn =
+            load_symbol<KernelPrepareCallableFn>(handle, "simpler_kernel_mode_prepare_callable");
+        const auto kernel_launch_fn = load_symbol<KernelLaunchFn>(handle, "simpler_kernel_mode_launch");
         std::vector<uint8_t> aicpu_bytes = read_binary_file(aicpu_path);
         std::vector<uint8_t> aicore_bytes = read_binary_file(aicore_path);
         std::vector<uint8_t> dispatcher_bytes;
@@ -496,10 +511,16 @@ void ChipWorker::kernel_init(
             dispatcher_bytes = read_binary_file(dispatcher_path);
         }
         const uint8_t *dispatcher_ptr = dispatcher_bytes.empty() ? nullptr : dispatcher_bytes.data();
-        init_rc = kernel_init_fn_(
+        init_rc = kernel_init_fn(
             device_ctx_, device_id, aicpu_bytes.data(), aicpu_bytes.size(), aicore_bytes.data(), aicore_bytes.size(),
             dispatcher_ptr, dispatcher_bytes.size(), &config, context_generation
         );
+        if (init_rc == 0) {
+            kernel_supported_fn_ = kernel_supported_fn;
+            kernel_init_fn_ = kernel_init_fn;
+            kernel_prepare_callable_fn_ = kernel_prepare_callable_fn;
+            kernel_launch_fn_ = kernel_launch_fn;
+        }
     } catch (...) {
         destroy_device_context_fn_(device_ctx_);
         device_ctx_ = nullptr;
@@ -545,6 +566,9 @@ void ChipWorker::kernel_prepare_callable(
     if (caller_stream == nullptr) {
         throw std::runtime_error("kernel_prepare_callable: caller_stream must not be null");
     }
+    if (kernel_prepare_callable_fn_ == nullptr) {
+        throw UnsupportedRuntimeOperation("this host runtime does not support kernel mode");
+    }
     int rc = kernel_prepare_callable_fn_(device_ctx_, callable_id, callable, callable_size, caller_stream);
     if (rc != 0) {
         throw std::runtime_error("simpler_kernel_mode_prepare_callable failed with code " + std::to_string(rc));
@@ -560,6 +584,9 @@ void ChipWorker::kernel_launch(int32_t callable_id, const ChipStorageTaskArgs *a
     }
     if (caller_stream == nullptr) {
         throw std::runtime_error("kernel_launch: caller_stream must not be null");
+    }
+    if (kernel_launch_fn_ == nullptr) {
+        throw UnsupportedRuntimeOperation("this host runtime does not support kernel mode");
     }
     int rc = kernel_launch_fn_(device_ctx_, callable_id, args, caller_stream);
     if (rc != 0) {

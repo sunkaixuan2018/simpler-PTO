@@ -16,7 +16,8 @@
 #include <cstdint>
 #include <mutex>
 
-#include "runtime_c_api.h"
+#include "worker/runtime_c_api.h"
+#include "host/kernel_device_resources.h"
 
 /**
  * Runtime operations owned by the kernel-context lifecycle — the complete
@@ -30,9 +31,9 @@
  */
 struct KernelContextOps {
     void *context{nullptr};
-    int (*get_current_device)(void *context, int *device_id){nullptr};
-    int (*create_hidden_stream)(void *context, void **stream){nullptr};
-    int (*destroy_hidden_stream)(void *context, void *stream){nullptr};
+    int (*get_current_device)(void *context, int *device_id) noexcept {nullptr};
+    int (*create_hidden_stream)(void *context, void **stream) noexcept {nullptr};
+    int (*destroy_hidden_stream)(void *context, void *stream) noexcept {nullptr};
     /**
      * Creation flag every context event is born with, forwarded verbatim to
      * create_event. The platform constant it carries is knowledge of whoever
@@ -40,8 +41,8 @@ struct KernelContextOps {
      * test observes the flag the platform actually asked for.
      */
     uint32_t event_flag{0};
-    int (*create_event)(void *context, uint32_t flag, void **event){nullptr};
-    int (*destroy_event)(void *context, void *event){nullptr};
+    int (*create_event)(void *context, uint32_t flag, void **event) noexcept {nullptr};
+    int (*destroy_event)(void *context, void *event) noexcept {nullptr};
 
     bool valid() const {
         return get_current_device != nullptr && create_hidden_stream != nullptr && destroy_hidden_stream != nullptr &&
@@ -90,7 +91,7 @@ enum class KernelContextPhase : uint8_t {
  * The two streams a context creates and owns. Only Aicore is hidden in the
  * capture sense; Aicpu is a dedicated private stream. Neither is the caller's.
  */
-enum class KernelStreamKind : size_t {
+enum class KernelStreamKind : uint8_t {
     Aicpu = 0,
     Aicore,
     Count,
@@ -110,12 +111,12 @@ enum class KernelStreamKind : size_t {
  * and is consumed by the next launch, which is the only ordering a launch
  * needs against a prepare that did not stage on the caller's stream.
  */
-enum class KernelEventKind : size_t {
-    Start = 0,  /* caller → aicpu and caller → aicore fork */
+enum class KernelEventKind : uint8_t {
+    Start = 0,   /* caller → aicpu and caller → aicore fork */
     PrepareTail, /* preparation → first launch */
-    AicoreDone, /* aicore → caller join */
-    AicpuDone,  /* aicpu → caller join */
-    SerialTail, /* caller-visible call tail; the stream-switch gate reads it */
+    AicoreDone,  /* aicore → caller join */
+    AicpuDone,   /* aicpu → caller join */
+    SerialTail,  /* caller-visible call tail; the stream-switch gate reads it */
     Count,
 };
 
@@ -127,15 +128,17 @@ enum class KernelEventKind : size_t {
  * per-invocation object. The caller stream is never stored or destroyed —
  * each launch receives it as a borrowed argument.
  *
- * Phase machine:
- *   New → (initialize) → Collecting ⇄ ReadyEnqueued
- *   Collecting/ReadyEnqueued → (poison, on partial-enqueue failure) → Poisoned
- *   Collecting/ReadyEnqueued/Poisoned → (close) → Closing → Closed
+ * Initialization advances New to Collecting; enqueueing readiness advances
+ * Collecting to ReadyEnqueued. A
+ * partial-enqueue failure poisons either live
+ * phase. Close advances either live phase or Poisoned through Closing to
+ * Closed.
  * Initializing is held only inside initialize()'s critical section and the
- * lock is released with the phase already past it, so no caller observes it;
- * close()'s rejection of it is defensive. The stream and event sets are the
- * launch protocol's shared vocabulary, common to both runtimes, so
- * initialize() creates all of them unconditionally.
+ * lock is released with the
+ * phase already past it, so no caller observes it;
+ * close()'s rejection of it is defensive. The stream and event sets
+ * are the launch protocol's shared vocabulary, common to both runtimes, so initialize() creates all of them
+ * unconditionally.
  *
  * A pre-enqueue validation failure leaves the phase unchanged. Poisoned
  * rejects dispatch but still accepts close. Closing is sticky: entered
@@ -163,7 +166,20 @@ public:
     KernelExecutionState(const KernelExecutionState &) = delete;
     KernelExecutionState &operator=(const KernelExecutionState &) = delete;
 
-    int initialize(int requested_device_id, const KernelContextOps &ops);
+    int initialize(int requested_device_id, const KernelContextOps &ops, uint64_t context_generation = 1);
+    int prepare_resources(const KernelResourceLayout &layout, const KernelResourceOps &ops);
+    int freeze_resources();
+    // The caller holds the context lease and serializes binding with close.
+    int inspect_frozen_resources(
+        int device_id, uint64_t generation, uint64_t schema, const uint64_t *required, size_t count,
+        KernelResourceBinding &out
+    ) const;
+    int bind_resources_for_launch(
+        int device_id, uint64_t generation, uint64_t schema, const uint64_t *required, size_t count,
+        KernelResourceBinding &out
+    ) const;
+    bool resources_prepared() const;
+    bool resources_frozen() const;
     int mark_ready_enqueued();
     void poison(int runtime_error);
     int close();
@@ -184,6 +200,8 @@ private:
     mutable std::mutex mutex_;
     KernelContextPhase phase_{KernelContextPhase::New};
     int device_id_{-1};
+    uint64_t context_generation_{0};
+    KernelDeviceResources resources_;
     int last_runtime_error_{0};
     int unexpected_teardown_error_{0};
     KernelContextOps ops_{};

@@ -1,272 +1,174 @@
 # Kernel 模式 callable 缓存调用链
 
-本文从 `simpler_kernel_mode_prepare_callable` 开始，说明当前缓存实现的上传、注册、
-命中、回滚以及 launch 前查询流程。
+本文说明当前集成代码的 callable 准备、驻留、执行和释放流程。
+公开接口以 [runtime_c_api.h](../../src/common/worker/runtime_c_api.h) 为准。
 
-开发基线是 K2 提交 `48b120b1`（`Add: persistent kernel-context execution resources`），
-其父提交 `dc1268cd` 是 K1。分支 `feat/k10a-callable-cache` 直接在该 K2 提交上建立，
-K10a 复用 K2 的持久参数块，没有重新实现这部分资源管理。
-本文记录当前工作区的同步行为；prepare 的异步改造由 K2 另行推进，本次管理层接口改动不调整同步点。
+## 1. 支持范围与调用顺序
 
-## 1. 入口与调用总览
+| 构件 | Kernel 模式状态 |
+| ---- | --------------- |
+| a2a3 / a5 onboard 的 tensormap_and_ringbuffer（TMR） | 支持 init、prepare 和异步 launch，能力查询返回 1 |
+| host_build_graph（HBG） | H1-H3 内部能力已集成；H4 尚未提交，公开 init 返回 `UNSUPPORTED`，能力查询返回 0 |
+| sim | 公开 kernel init 返回 `UNSUPPORTED` |
 
-入口位于 [onboard C ABI](../../src/common/platform/onboard/host/c_api_shared.cpp)：
+HBG 和 sim 的不支持判定发生在取得 kernel 身份之前。在这种未取得身份的 context 上，
+结构合法的 prepare / launch 返回 `INVALID_STATE`。能力查询不替代 context 初始化或生命周期检查。
+
+调用者先完成 ACL 初始化，并让当前线程持有所需设备。Kernel init 借用这个设备，
+不调用选卡、设备重置或 ACL 初始化/终止接口。init 可在 capture 之外同步自己的
+AICPU stream 完成启动；prepare 和 launch 不做 stream/device 同步。
+调用者负责串行执行同一 context 的 init、prepare、launch 和 finalize。
 
 ```cpp
 int simpler_kernel_mode_prepare_callable(
-    DeviceContextHandle ctx,
-    const void *callable,
-    size_t callable_size,
-    SimplerCallableHandle *out_handle);
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable,
+    size_t callable_size, void *caller_stream);
+
+int simpler_kernel_mode_launch(
+    DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream);
 ```
 
-`callable` 是完整的、尚未修补设备地址的 `ChipCallable` 序列化镜像，包括 header、
-orchestration SO 和子 `CoreCallable`；`callable_size` 是镜像的实际字节数。
-此入口不接收 tensor 实参，也不执行计算。调用方不指定 ID：simpler 按内容查重，
-为新内容分配 context 内的 ID，连同 generation 写入 `out_handle`。返回值仍然是状态码。
-输出指针必须非空，指向独立、可写的 `SimplerCallableHandle`；失败时输出为 `{-1, 0}`。
+`callable` 是未修补设备地址的完整 `ChipCallable` 镜像，包括 header、orchestration SO
+和子 `CoreCallable`。`callable_size` 必须等于实际大小。prepare 不接收 tensor 实参，
+也不执行算子。调用者指定 `[0, MAX_REGISTERED_CALLABLE_IDS)` 内的 ID；当前上限为 64。
 
 ```cpp
-typedef struct SimplerCallableHandle {
-    int32_t callable_id;
-    uint64_t generation;
-} SimplerCallableHandle;
-```
-
-```cpp
-SimplerCallableHandle handle{-1, 0};
-int rc = simpler_kernel_mode_prepare_callable(ctx, callable, size, &handle);
+// 已完成 caller 的 ACL 初始化、选卡以及 simpler_kernel_mode_init。
+int rc = simpler_kernel_mode_prepare_callable(ctx, 7, callable, size, caller_stream);
 if (rc != 0) return rc;
-// handle 仅可用于创建它的 context，生命周期到该 context close 为止。
-return simpler_kernel_mode_launch(ctx, handle, args, caller_stream);
+// 在 capture 之外完成 caller 的 warmup，并同步 caller_stream，检查异步准备结果。
+rc = caller_warmup_and_synchronize(caller_stream); // 调用者自己的逻辑
+if (rc != 0) return rc;
+return simpler_kernel_mode_launch(ctx, 7, args, caller_stream);
 ```
 
-同内容重复 prepare 返回同一个 handle，不增加注册槽或引用计数；不同内容获得不同 ID。
-调用方必须原样保存 ID 和 generation；launch 按值接收完整 handle，不会替调用方刷新 generation。
-当前 generation 来自 context 的唯一代次。将来复用槽位时必须发放新代次，不能让旧 handle 再次有效；代次耗尽必须拒绝复用，不能回绕。
-当前没有单项释放或换入换出，所有成功返回的 ID 保留到 context close。
+同 ID 再次 prepare 是重复注册，会被拒绝。不同 ID 使用相同内容时，各有驻留描述符，
+但共用一次代码上传，不重复占用代码预算。成功驻留的 ID 在 close 前不删除、不换出、不复用。
+公开 C API 不返回 `SimplerCallableHandle`；该类型只在内部缓存中组合 ID 和 generation。
 
-调用前必须完成 `simpler_kernel_mode_init`。init 将调用方提供的非零、进程内唯一
-`context_generation` 写入缓存，并初始化 context 资源。
-prepare 必须在 capture 之外执行；同一 context 的 init、prepare、launch、close
-由调用方串行化。缓存自身不加锁，也不查询 capture 状态。
+init 接收调用者提供的非零、进程内唯一 `context_generation`。Host launch 从当前
+context 查出驻留信息，将 generation 写入设备包。仅凭整数 ID 不能判断它是否来自另一
+context；设备端的 generation 检查用于拒绝旧调用包，不能把旧 ID 自动变成跨 context 句柄。
 
-```mermaid
-flowchart TD
-    A["simpler_kernel_mode_prepare_callable"] --> B["校验参数、kernel 模式、context 状态"]
-    B --> C["adopt_borrowed_device"]
-    C --> D["KernelCallableCache::stage"]
-    D -->|同内容、已 ready| E["hit=true，返回已有 handle"]
-    D -->|新 ID，暂存成功| F["record_callable_on_runner"]
-    F --> G["prepare_kernel_callable"]
-    G --> H["设备注册：TRB 执行，HBG 跳过"]
-    H --> I["PersistentKernelArgs::prepare_once"]
-    I --> J["mark_ready_enqueued"]
-    J --> K["cache.commit：ready=true"]
-    K --> L["写出新 handle，返回 0"]
-```
+init、prepare、launch、finalize 只读核对当前线程的设备身份，不替调用者选卡。
+prepare / launch / finalize 查询设备失败时原样返回查询错误；设备不匹配时返回
+`INVALID_STATE`。这些提前拒绝不改变驻留内容，也不把 context 标为 Poisoned；
+调用者恢复正确设备后可以继续使用。
 
-入口先调用 `validate_kernel_prepare_callable_args` 检查输入/输出指针、最小尺寸和对齐，
-再确认 context 已归属 kernel 模式且 `accepts_dispatch()` 为真。
-`adopt_borrowed_device` 核对借用设备身份，不接管调用方的设备生命周期。
+## 2. 缓存准入、去重和上传
 
-## 2. stage：命中、准入与设备上传
-
-实现位于 [kernel_callable_cache.h](../../src/common/platform/include/host/kernel_callable_cache.h)。
-每个 `DeviceRunnerBase` 拥有一份 `kernel_callable_cache_`，不是进程全局缓存。
-
-### 命中与容量判定
-
-`stage` 按以下顺序处理：
-
-1. 检查 generation 和单项字节上限。超大镜像在读取完整内容前就被拒绝。
-2. `validate_image` 检查 signature 数量、名称边界、scalar 数量、子项偏移、对齐、
-   非重叠布局和镜像末尾，避免后续 hash/upload 越界。
-3. `compute_chip_callable_layout` 计算镜像尺寸、完整内容 hash 和 AICore image hash。
-4. 按内容查找已准备条目；命中直接返回该条目的 handle，即使容量已经用满也可以命中。
-5. 未命中时检查 64 项与累计字节预算；以当前条目数分配下一个 ID，保存 Host 副本并上传代码及设备描述符。
+每个 `DeviceRunnerBase` 拥有一份
+[KernelCallableCache](../../src/common/platform/include/host/kernel_callable_cache.h)。
+`stage` 校验 generation、ID、镜像大小、signature、名称、子项布局和子函数 ID，
+拒绝已占用 ID 或未完成准备的条目，然后检查内容是否可共享以及数量/字节预算。
+只有 hash、长度和完整字节都相同才共享代码；hash 相同但内容不同会被拒绝。
 
 | 情况 | 行为 |
 | ---- | ---- |
-| 同内容、已 ready | `hit=true`，返回已有 handle；无新分配、H2D 或 runtime 注册 |
-| 同内容、尚未 ready | 返回 `INVALID_STATE`，不发布未准备好的 ID |
-| 新内容、有容量 | 内部分配新 ID，复制 Host 镜像，取得 arena 内偏移，修补并上传代码 |
-| 第 65 份唯一内容 | 返回 `CALLABLE_COUNT_EXCEEDED`；原有内容仍可命中 |
-| hash 相同但完整字节不同 | 拒绝，不会仅凭 hash 错误复用代码 |
+| 已占用 ID | `INVALID_STATE`，保留原条目 |
+| 新 ID、相同内容 | 共用代码地址，上传该 ID 的描述符，继续其 runtime 注册 |
+| 新 ID、新内容 | 使用固定代码区，修补私有副本并上传 |
+| 数量或字节预算超限 | 拒绝候选，保留已有 ready 条目 |
+| 存在未 ready 的条目 | 拒绝后续 stage，防止暴露未完成准备的资源 |
 
-内容相等要求 hash、长度和 `memcmp` 都匹配，与输入镜像的 Host 指针无关。
-调用方反复 prepare 同一份内容，即使传入不同的 Host 副本，也只占一个 ID。
-
-ID 由管理层在 `[0, 64)` 内顺序分配，对外没有指定或覆盖槽位的入口。
-暂存失败且尚未发布的尾部 ID 可以回滚，成功发布的 ID 不复用。
-唯一镜像按 `align_up(callable_size, 64)` 计费，总代码预算为 512 MiB。
-计费包含整个 `ChipCallable` 镜像，不只是 AICore 指令字节；缓存命中不重复计费。
-
-### Host 与 Device 的保存内容
-
-Host 条目保存 residency、内容 hash、不可变镜像的 `shared_ptr`、计费字节数和 `ready`。
-`resident_count()` 只统计 ready 项；`resident_bytes()` 包含已暂存但尚未 commit 的代码占用。
-`host_bytes()` 统计去重后的镜像字节数，不含容器和 `shared_ptr` 元数据。
-
-首次上传新内容时，通过 `kernel_callable_cache_ops().allocate → mem_alloc_.alloc`，
-一次分配 **512 MiB 代码区 + 2 KiB 描述符前缀**。后续 prepare 不扩容。
+代码预算为 512 MiB；每份唯一镜像按 `align_up(callable_size, 64)` 计费，包含整个
+`ChipCallable`。首次上传分配固定代码区和描述符前缀，后续不扩容：
 
 ```text
 arena_（底层分配由 MemoryAllocator 持有）
 ├── 2 KiB：64 × KernelCallableDeviceResidency（每项 32 字节）
 │   └── descriptor_address = arena_ + callable_id × 32
-└── 512 MiB：按 64 字节对齐、顺序追加的唯一代码镜像
+└── 512 MiB：按 64 字节对齐追加的唯一代码镜像
     └── device_address = arena_ + 2048 + 当前 used_
 ```
 
-上传时先创建临时 `scratch`，调用 `patch_chip_callable_scratch_for_device`，
-将子 `CoreCallable::resolved_addr_` 改成设备 binary 地址。
-调用方的原始镜像和缓存中的 Host 副本均保持不变。
-上传通过 `Ops.copy → rtMemcpy(..., RT_MEMCPY_HOST_TO_DEVICE)` 完成；当前是 prepare 期同步拷贝。
+上传只修补临时 `scratch` 中的子 `CoreCallable::resolved_addr_`，调用者镜像保持不变。
+当前缓存上传仍通过 `Ops.copy → rtMemcpy(..., RT_MEMCPY_HOST_TO_DEVICE)` 同步复制代码和
+描述符；这不同于后续 runtime 注册的异步执行，也不意味着 prepare 会同步 stream/device。
 
-每个新 ID 随后上传自己的
-[KernelCallableDeviceResidency](../../src/common/task_interface/kernel_callable_residency.h)，
-包含 generation、代码地址、镜像字节数和 callable ID。
-此时条目仍为 `ready=false`，`resolve` 不会向 launch 暴露它。
+Host 条目保存驻留信息、内容 hash、镜像副本、计费字节数和 `ready`。
+`resident_count()` 只统计 ready 项，`resident_bytes()` 包括未 commit 的计费占用。
+不同 ID 共享代码时仍保存各自的 Host 条目；`host_bytes()` 是去重代码内容的计量，
+不是这些容器和镜像副本的实际进程内存总量。
 
-## 3. 接入 runtime 注册与 K2 持久资源
+## 3. Runtime 注册和准备完成的顺序
 
-stage 成功且不是内容命中时，入口调用 `record_callable_on_runner`：
+stage 成功后，`record_callable_on_runner` 生成 orchestration 信息和
+子 `func_id → 设备代码地址` 映射。Kernel 路径从缓存取得已上传地址，不重复上传代码；
+program 模式继续使用原有上传与引用计数路径。
 
-```text
-record_callable_on_runner
-  └─ register_callable_impl                    每种 runtime 各自实现
-      └─ upload_and_collect_child_addrs
-          └─ HostApi::upload_chip_callable_buffer
-              └─ DeviceRunnerBase::upload_chip_callable_buffer
-                  └─ kernel 模式：cache.uploaded_address(content_hash)
-```
+TMR 的 `prepare_kernel_callable` 首次配置固定 runtime 区域、准备 `PersistentKernelArgs`，
+随后冻结配置。每个 callable 在此分配 Host dispatch packet 缓冲区，launch 只重写内容。
 
-这里函数名仍叫 `upload_chip_callable_buffer`，但 kernel 分支只返回 stage 已上传的地址，
-不会再次 malloc 或 H2D。辅助函数据此生成 `func_id → 子 CoreCallable 设备地址` 映射。
-program 模式仍使用原来的 `chip_callable_buffers_` 上传与引用计数路径。
+设备注册在 context 专用的 AICPU stream 上发射 `RegisterCallableName`。
+提交成功后记录 `PrepareTail`，并让本次传入的 `caller_stream` 等待它。
+调用者同步 caller stream 即可观察注册完成或异步错误；prepare 本身不执行
+`aclrtSynchronizeStream*` 或 device synchronize。
 
-`record_callable_on_runner` 将结果存入已有的 `callables_` 表。
-该表保存 runtime 调用信息；缓存表负责镜像所有权、容量和驻留状态。
+context 随后转为 `ReadyEnqueued`，缓存通过 `commit(callable_id)` 发布 ready 条目。
+ready 表示准备已提交并建立依赖，设备工作仍可能在执行。第一次 launch 消费 `PrepareTail`；
+调用者仍须在 capture 之前完成自己的 warmup 和同步检查。
 
-| runtime | Host 记录 | `prepare_kernel_callable` 中的设备注册 |
-| ------- | --------- | -------------------------------------- |
-| TRB（tensormap_and_ringbuffer） | `register_callable_impl` 提取 orchestration SO 信息；`record_device_orch_callable` 保存地址、大小、符号名、signature 和子 kernel 地址 | `register_callable_on_device` 组装 `RegisterCallableArgs`，在私有 AICPU stream 上发射 `RegisterCallableName`；同步该 stream 后执行 `commit_device_register` |
-| HBG（host_build_graph） | 在 Host 上 `dlopen/dlsym` orchestration SO；`record_host_orch_callable` 保存 handle、函数指针、signature 和子 kernel 地址 | 检测到 `host_dlopen_handle` 后直接返回，不执行 AICPU orchestration SO 注册 |
+HBG 内部准备包含资源计划、freeze 和 execution-slot 注册；公开 HBG init 已提前拒绝，
+不能通过公开 prepare 绕过 H4 缺失的限制。详见
+[HBG 资源契约](../host-build-graph-kernel-contract.md)和
+[HBG 槽位准入](../host-build-graph-kernel-slot.md)。
 
-TRB 设备端的 `simpler_aicpu_register_callable` 调用 `load_orch_so`，将 orchestration
-入口装入按 ID 索引的表。prepare 中存在 stream 同步，这是当前实现事实，不是 launch 的行为。
+## 4. Launch 和设备端检查
 
-注册后继续调用 K2 的 `PersistentKernelArgs::prepare_once`：
-
-- 第一次成功调用分配并初始化 Runtime 设备副本、架构相关资源和设备 `KernelArgs`。
-- 后续 callable 复用这些 context 级参数块，不按 ID 再分配一套。
-- 持久 Runtime 不在这里绑定为“最近 prepare 的 callable”；具体 invocation 的绑定属于后续 binder。
-
-最后先执行 `mark_ready_enqueued()`，再执行 `cache.commit(callable_id)`，将条目标为 ready；只有此后才向调用方写出新 handle。
-**代码已上传、runtime 已记录、context 已就绪和缓存可供 launch 查询，是不同阶段。**
-
-主要源码：
-[DeviceRunnerBase](../../src/common/platform/onboard/host/device_runner_base.cpp)、
-[上传与子地址收集](../../src/common/task_interface/prepare_callable_common.h)、
-[TRB 注册实现](../../src/a2a3/runtime/tensormap_and_ringbuffer/host/runtime_maker.cpp)、
-[HBG 注册实现](../../src/a2a3/runtime/host_build_graph/host/runtime_maker.cpp)、
-[K2 持久参数](../../src/common/platform/onboard/host/kernel_persistent_args.cpp)。
-上面的 runtime 链接以 a2a3 为例，共用 platform 入口也用于 a5 构件。
-
-## 4. 错误、回滚与释放
-
-下表中的错误码名称均带 `PTO_RUNTIME_ERR_` 前缀。
-
-| 失败位置 | 返回与状态处理 |
-| -------- | -------------- |
-| 唯一内容数量超限 | `CALLABLE_COUNT_EXCEEDED`（-1004）；无缓存修改 |
-| 单项或累计代码预算超限 | `CALLABLE_BYTES_EXCEEDED`（-1005）；不上传候选，不破坏已有项 |
-| launch handle 代次不匹配 | `CALLABLE_STALE`（-1007）；不上传、不执行、不修改驻留项 |
-| 镜像结构非法 | `INTERNAL`（-1000）；完整内容 hash 和上传之前拒绝 |
-| 同内容仍在暂存中 | `INVALID_STATE`（-1003）；不返回可供 launch 使用的 ID |
-| stage 内分配或拷贝失败 | 移除候选，不增加 `used_`；已分配的整块 arena 可保留供重试 |
-| `record_callable_on_runner` 失败 | scope guard 调用 `cache.rollback`，移除尾部候选并退回本项计费；已有 ready 项不受影响 |
-| `prepare_kernel_callable` 返回错误或抛异常 | context 进入 Poisoned，候选保持未 ready，地址保留到显式 close；不复用可能已被设备引用的空间 |
-
-回滚只撤销未 commit 的候选，不提供删除 ready 项的接口。kernel 模式也拒绝通过
-program 的 `simpler_register_callable` / `simpler_unregister_callable` 绕过缓存管理。
-
-超限由 C ABI 返回分类错误，终止本次 prepare；runtime 不调用 `exit/abort`。
-是否退出上层进程由调用方处理返回码后决定。
-
-正常 close 前，调用方必须停止 enqueue、等待 eager/replay 完成并销毁相关 graph。
-`finalize_device → runner->finalize → finalize_common_impl` 会清理缓存 Host 元数据，
-arena 的设备分配由 `MemoryAllocator` 统一释放。
-`KernelCallableCache::clear()` 本身不调用设备 free；fatal abandon 路径遵循原有的设备资源放弃规则。
-
-## 5. prepare 之后：launch 查询与待接入部分
-
-当前 launch 链路为：
+当前 TMR 的 Host 链路为：
 
 ```text
-simpler_kernel_mode_launch(ctx, handle, args, caller_stream)
-  ├─ 校验参数（generation 不得为 0）、kernel 模式和 context 状态
-  ├─ cache.resolve(handle, residency)
-  │   ├─ 无 ready 项：CALLABLE_NOT_RESIDENT（-1006）
-  │   ├─ ID 已驻留但 generation 不匹配：CALLABLE_STALE（-1007）
-  │   └─ 成功：返回 ID、generation、代码地址、镜像大小、描述符地址
-  └─ binder 尚未实现：返回 INVALID_STATE
+simpler_kernel_mode_launch(ctx, callable_id, args, caller_stream)
+  ├─ 校验参数、kernel 身份和 context 状态
+  ├─ 取得提交锁，核对设备及 context 的执行占用权
+  ├─ cache.resolve({callable_id, 当前 context generation}, residency)
+  ├─ 将 tensor 元数据、设备地址和 scalar 编入已分配的 dispatch packet
+  └─ launch_bound_kernel：caller 分叉到专用 AICPU 和隐藏 AICore，再汇合到 caller
 ```
 
-`resolve` 只读 Host 缓存，无分配、H2D 或懒注册。prepare 成功目前不意味着 kernel launch 已可执行，
-`simpler_kernel_mode_supported()` 仍返回 0。
+`args` 指向真实 `ChipStorageTaskArgs`，tensor 必须声明为设备地址空间。Host 只读取元数据，
+不解引用或上传 tensor 内容。每次 launch 编码当前实参；CANN 接管调用包快照后，
+调用者可复用 Host 参数对象，tensor 和 context 资源仍须保持到设备工作完成。
 
-当前不换入、不换出、不复用成功驻留的槽，因此同一 context 的 generation 保持不变。
-AICPU 的独立入口 [`simpler_aicpu_kernel_exec`](../../src/common/platform/shared/aicpu/kernel_dispatch.cpp)
-已经实现 generation 校验。它与 program 的 `simpler_aicpu_exec` 分开，编入 a2a3/a5、
-onboard/sim 的两个 runtime AICPU 库。
+binder 使用三条 stream 和五个 event，先提交 AICore，再提交 AICPU，避免启动相互等待。
+launch 不分配设备内存、不创建 stream/event、不同步、不查询 capture 状态。
+返回 0 表示提交成功，最终数值和异步错误须由调用者同步后检查。
 
-设备调用包为 [`SimplerKernelDispatchArgs`](../../src/common/task_interface/kernel_dispatch_args.h)
-加紧随其后的 runtime payload，整个包经 CANN launch-args 通道深拷贝：
+设备包是 [SimplerKernelDispatchArgs](../../src/common/task_interface/kernel_dispatch_args.h)
+加 runtime payload。前缀包含包长、驻留描述符地址、context 的 `KernelArgs` 地址和 generation、
+SM/arena 范围及 `SimplerKernelInvocationHeader`。公共 invocation header 固定为 40 字节；
+`host_copy_tensor_count` 和显式 `reserved_` 必须为零。不要使用旧的 64 字节公共 header 假设。
 
-```text
-packet_bytes + residency_address + K9 invocation header + payload
-```
+设备入口先检查公共 framing 和驻留描述符，再由 TMR consumer 校验绑定、大小、参数数量和
+signature，解码到本次调用的私有参数，进入真实 executor。旧包的 generation 不会被刷新。
+HBG payload 尚未接入执行 consumer。
 
-`residency_address` 由 binder 从 `cache.resolve(handle)` 的结果填写，指向 prepare 发布的固定槽位描述符。
-它不能取自用户 tensor 或 callable 镜像。该分配在所有相关执行结束和 graph 销毁前必须保持有效；
-当前入口不能检测已释放的设备地址。CANN 入口只传 `void *`，没有独立的长度参数，
-binder 必须保证真实参数分配与 `packet_bytes` 一致；入口检查声明的包长与 payload 长度是否一致。
+部分已提交工作的失败会使 context 进入 Poisoned。若外围包在建立可信绑定前被拒绝，
+设备入口不会解引用任意 `binding_address` 尝试取消 AICore。常规错误输入在 Host 提交前
+就被拒绝；损坏设备包的恢复不等同于已完成端到端支持。
 
-```text
-simpler_aicpu_kernel_exec(packet)
-  ├─ 检查包长、mode、ID 范围、非零 generation、参数计数及描述符地址对齐
-  │   └─ 非法：InvalidArgs，尚未读取描述符
-  ├─ cache_invalidate_range(槽位描述符)
-  ├─ 读取当前 KernelCallableDeviceResidency
-  │   ├─ ID 不符、未驻留或记录无效：NotResident
-  │   └─ generation 不同：Stale
-  └─ consume_kernel_invocation(header, resident, payload, bytes)
-```
+## 5. 回滚、释放和验证范围
 
-每次调用都读取当前槽位，包括 replay；不会把调用包中的旧 generation 更新为当前值。
-拒绝发生在读取 payload、解引用 callable 代码及进入 runtime 消费函数之前。
-槽位更新与执行必须外部串行化；未来换出复用时应更新同一描述符位置，不能让旧图指向旧记录的副本。
+stage 的分配或复制失败撤销候选，已分配的固定 arena 可保留供重试。
+Host runtime 记录失败会回滚未发布条目。注册开始后发生错误时，context 保留相关地址并
+进入 Poisoned，调用者须建立静止状态后显式关闭。kernel 模式拒绝通过 program 注册/注销
+接口绕过这些规则。
 
-`KernelDispatchStatus` 是 AICPU entry 的直接返回码，区别于 Host C ABI 的 `-1007`，
-也不是 runtime 的 latched error code。非零值通过 CANN 的 entry 失败路径返回；
-调用方同步时具体看到的 CANN 错误码仍需上板核验。失败时入口不发起 runtime 工作或内部等待。
-binder 的双流完成/错误收敛协议仍由 binder 负责。
+close 前，调用者停止提交、等待 eager/replay 完成并销毁引用资源的 graph。
+`finalize_device` 只释放 context 资源，不释放 caller tensor，不重置设备，不终止 ACL。
+设备查询拒绝或清理失败后可以重试；清理失败保留剩余资源和执行占用权。
+同一加载的 host runtime SO 限制一个设备/runtime 身份下的 live kernel context；
+不同 host SO 副本或进程间的执行隔离仍需调用者协调。
 
-**当前连接边界：** Host launch binder 尚未向此入口 enqueue；runtime-specific payload 消费函数
-明确返回 `UnsupportedPayload`，不会借 program executor 执行或将未执行报告为成功。
-所以设备入口的 generation 校验已实现且有 UT，但完整算子执行和 ACLGraph replay 上板联调尚未完成。
+相关验证包括：
 
-对应测试：
+- [缓存单元测试](../../tests/ut/cpp/common/test_kernel_callable_cache.cpp)：ID、容量、去重、上传失败和回滚。
+- [Dispatch packet 测试](../../tests/ut/cpp/common/test_kernel_dispatch_packet.cpp)：真实解码、重复编码、地址和 scalar 隔离。
+- [设备入口测试](../../tests/ut/cpp/common/test_kernel_dispatch.cpp)：公共包校验、驻留身份和 generation 拒绝。
+- [HBG 内部测试](../../tests/ut/cpp/common/test_hbg_host_graph_build.cpp)：构图、资源容量、包和槽位准入。
+- [C ABI 测试](../../tests/ut/py/test_kernel_mode_c_api.py)：真实准备/关闭、TMR eager 数值、参数快照和设备查询恢复。
 
-- [缓存单元测试](../../tests/ut/cpp/common/test_kernel_callable_cache.cpp)：数量、字节、对齐、去重、
-  上传失败、回滚、子地址修补、Host handle 校验及跨 context 代次。
-- [AICPU 入口单元测试](../../tests/ut/cpp/common/test_kernel_dispatch.cpp)：直接编译生产入口 `.cpp`，
-  仅替换 cache primitive 和 payload 消费函数；验证非法 ID/零代次先于设备读取被拒、过期代次和错误槽位
-  不进入消费函数、合法调用透传消费返回码，以及同一捕获参数在槽位代次更新后的再次调用被拒。
-- [生产消费边界测试](../../tests/ut/cpp/common/test_kernel_dispatch_unavailable.cpp)：链接真实入口与当前消费函数，
-  验证合法身份返回 `UnsupportedPayload`、旧代次先返回 `Stale`。
-- [C ABI 测试](../../tests/ut/py/test_kernel_mode_c_api.py)：真实 prepare 注册、Host handle 校验与生命周期。
-
-AICPU 入口 UT 在 Host CPU 上执行同一份生产代码，不等于真实设备 cache maintenance 或 ACLGraph replay 的上板验收。
+a2a3 eager 数值路径已有真机通过记录。A5 的实现与测试入口均存在，但测试定义不等于真机验收。
+内部 HBG 单元测试以及 eager 成功也不代表完整 ACLGraph capture/replay 已完成验收；
+各次执行结果以本轮验证日志为准。

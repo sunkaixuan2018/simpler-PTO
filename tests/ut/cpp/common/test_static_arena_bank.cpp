@@ -18,6 +18,7 @@
 // calls, so an unwanted re-base is observable here with no device present.
 
 #include <cstddef>
+#include <cstdlib>
 
 #include <gtest/gtest.h>
 
@@ -30,9 +31,30 @@ constexpr size_t kGmHeapBytes = 64 * 1024;
 constexpr size_t kGmSmBytes = 16 * 1024;
 constexpr size_t kRuntimePoolBytes = 8 * 1024;
 
+// Backing allocator that fails a chosen allocation, which is what makes the
+// rollback path reachable here: DeviceArena's default libc backend never fails.
+struct FailingBackend {
+    int allocs{0};
+    int fail_on{0};  // 1-based index of the allocation to fail; 0 never fails
+
+    static void *alloc(void *ctx, size_t size) {
+        auto *self = static_cast<FailingBackend *>(ctx);
+        ++self->allocs;
+        if (self->fail_on != 0 && self->allocs == self->fail_on) return nullptr;
+        return std::malloc(size);
+    }
+    static void release(void * /*ctx*/, void *ptr) { std::free(ptr); }
+};
+
 // One bank's regions plus the sizes it remembers for them: the state a runner
 // keeps between calls.
 struct Bank {
+    Bank() = default;
+    explicit Bank(FailingBackend *backend) :
+        gm_heap(&FailingBackend::alloc, &FailingBackend::release, backend),
+        gm_sm(&FailingBackend::alloc, &FailingBackend::release, backend),
+        runtime_pool(&FailingBackend::alloc, &FailingBackend::release, backend) {}
+
     DeviceArena gm_heap;
     DeviceArena gm_sm;
     DeviceArena runtime_pool;
@@ -210,6 +232,51 @@ TEST(StaticArenaBankKernelMode, ZeroRequestForAnUncommittedRegionIsPermitted) {
 
     // And it stays permitted on every later bind.
     EXPECT_EQ(bank.commit(kGmHeapBytes, kGmSmBytes, 0, true).rc, 0);
+}
+
+// An allocation failure is the other failure class, and it takes the opposite
+// exit: the whole bank is released, peers that committed fine included, so a
+// caller retries from the post-construction state rather than a partial layout.
+TEST(StaticArenaBankProgramMode, AllocationFailureRollsTheWholeBankBack) {
+    FailingBackend backend;
+    Bank bank(&backend);
+    ASSERT_EQ(bank.commit(kGmHeapBytes, kGmSmBytes, kRuntimePoolBytes, false).rc, 0);
+    ASSERT_TRUE(bank.gm_heap.is_committed());
+
+    // Let the gm_heap grow succeed and fail the gm_sm one behind it.
+    backend.fail_on = backend.allocs + 2;
+    const StaticArenaBankOutcome outcome = bank.commit(kGmHeapBytes * 2, kGmSmBytes * 2, kRuntimePoolBytes, false);
+
+    EXPECT_EQ(outcome.rc, PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_TRUE(outcome.bases_changed);
+    EXPECT_FALSE(bank.gm_heap.is_committed());
+    EXPECT_FALSE(bank.gm_sm.is_committed());
+    EXPECT_FALSE(bank.runtime_pool.is_committed());
+    EXPECT_EQ(bank.cached_gm_heap_size, 0u);
+    EXPECT_EQ(bank.cached_gm_sm_size, 0u);
+    EXPECT_EQ(bank.cached_runtime_pool_size, 0u);
+}
+
+// A kernel-mode context's first commit can still fail on allocation, and that
+// is not a capacity refusal: it rolls back like any other allocation failure,
+// because a setup that never completed published no address for a captured
+// graph to hold. The two failure classes are distinguished by what happened,
+// not by the mode.
+TEST(StaticArenaBankKernelMode, AllocationFailureOnTheFirstCommitStillRollsBack) {
+    FailingBackend backend;
+    backend.fail_on = 3;  // gm_heap and gm_sm commit; runtime_pool fails
+    Bank bank(&backend);
+
+    const StaticArenaBankOutcome outcome = bank.commit(kGmHeapBytes, kGmSmBytes, kRuntimePoolBytes, true);
+
+    EXPECT_EQ(outcome.rc, PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_TRUE(outcome.bases_changed);
+    EXPECT_FALSE(bank.gm_heap.is_committed());
+    EXPECT_FALSE(bank.gm_sm.is_committed());
+    EXPECT_FALSE(bank.runtime_pool.is_committed());
+    EXPECT_EQ(bank.cached_gm_heap_size, 0u);
+    EXPECT_EQ(bank.cached_gm_sm_size, 0u);
+    EXPECT_EQ(bank.cached_runtime_pool_size, 0u);
 }
 
 // Program mode keeps the growth and rollback behavior it has always had: the

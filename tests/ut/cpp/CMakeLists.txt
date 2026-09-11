@@ -575,9 +575,12 @@ set_tests_properties(test_kernel_dispatch_unavailable PROPERTIES LABELS "no_hard
 # separate runtime-error vs teardown-error slots.
 add_executable(test_kernel_execution_state
     common/test_kernel_execution_state.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/kernel_device_resources.cpp
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/kernel_execution_state.cpp
 )
 target_include_directories(test_kernel_execution_state PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common
+    ${CMAKE_SOURCE_DIR}/../../../src/common/log/include
     ${GTEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/include
     ${CMAKE_SOURCE_DIR}/../../../src/common/worker
@@ -740,6 +743,8 @@ add_common_utils_test(test_file_marker_handshake common/test_file_marker_handsha
 # free of CANN.
 set(KERNEL_PERSISTENT_ARGS_SRC
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/onboard/host/kernel_persistent_args.cpp
+    ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/kernel_device_resources.cpp
+
     ${CMAKE_SOURCE_DIR}/../../../src/common/platform/shared/host/kernel_execution_state.cpp)
 
 add_executable(test_kernel_persistent_args
@@ -1364,6 +1369,9 @@ foreach(arch a2a3 a5)
     add_executable(${executor_test}
         common/test_tmr_executor_execution_inputs.cpp
         ${executor_runtime}/aicpu/aicpu_executor.cpp
+        ${executor_runtime}/aicpu/kernel_invocation_consumer.cpp
+        ${executor_platform}/shared/aicpu/kernel_dispatch.cpp
+        ${executor_platform}/shared/aicpu/kernel_invocation_consumer.cpp
         ${executor_runtime}/orchestration/common.cpp
         ${executor_runtime}/runtime/runtime_core.cpp
         ${executor_runtime}/runtime/orchestrator.cpp
@@ -1889,3 +1897,29 @@ if(SIMPLER_ENABLE_HARDWARE_TESTS)
     )
 
 endif()
+
+include(${CMAKE_CURRENT_LIST_DIR}/hbg_kernel_tests.cmake)
+
+add_common_utils_test(test_kernel_dispatch_packet common/test_kernel_dispatch_packet.cpp)
+target_include_directories(test_kernel_dispatch_packet PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface
+)
+target_sources(test_kernel_dispatch_packet PRIVATE
+    ${CMAKE_SOURCE_DIR}/../../../src/common/task_interface/assert_compat.cpp
+)
+foreach(arch IN ITEMS a2a3 a5)
+    set(cancel_test test_${arch}_aicore_pre_window_cancel)
+    add_executable(${cancel_test}
+        common/test_aicore_pre_window_cancel.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/${arch}/runtime/tensormap_and_ringbuffer/aicore/aicore_executor.cpp
+        ${CMAKE_SOURCE_DIR}/../../../src/common/platform/sim/aicpu/device_time.cpp
+    )
+    target_include_directories(${cancel_test} PRIVATE
+        ${GTEST_INCLUDE_DIRS}
+        ${CMAKE_SOURCE_DIR}/../../../src/${arch}/platform/sim/aicore
+        $<TARGET_PROPERTY:${arch}_rt_objs,INTERFACE_INCLUDE_DIRECTORIES>
+    )
+    target_link_libraries(${cancel_test} PRIVATE ${GTEST_MAIN_LIB} ${GTEST_LIB} pthread)
+    add_test(NAME ${cancel_test} COMMAND ${cancel_test})
+    set_tests_properties(${cancel_test} PROPERTIES LABELS "no_hardware" TIMEOUT 30)
+endforeach()

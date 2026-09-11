@@ -3,9 +3,13 @@
 One entry per adjudication, in the order it was made. Each entry states the
 problem, the options, the choice, the reason, and which PRs it affects.
 
-The goal of the integration is a single line on which
-`init -> prepare_callable -> launch -> close` runs one eager
-`tensormap_and_ringbuffer` invocation on a2a3 hardware.
+The scope is all 14 submitted PR contributions in the supplied kernel pipeline,
+including the latest K1 and K3 revisions frozen during the final audit. The
+end-to-end acceptance path is `init -> prepare_callable -> launch -> close`
+with real `tensormap_and_ringbuffer` computation on a2a3 hardware.
+
+See [the validation record](docs/kernel-integration-validation.md) for frozen
+PR heads, executed tests, source snapshot identity and remaining boundaries.
 
 ---
 
@@ -18,10 +22,10 @@ hand.
 
 **Finding.** That is not what the refs contain. K1 appears under three
 different commit ids -- `86dd62b4` (#2064 / K3), `dc1268cd` (#2177, #2176,
-#2185, #2180, #2190) and `66156ed3` (#2189) -- and all three have **identical
+\#2185, #2180, #2190) and `66156ed3` (#2189) -- and all three have **identical
 trees**:
 
-```
+```bash
 git diff --stat dc1268cd 86dd62b4   # empty
 git diff --stat 66156ed3 86dd62b4   # empty
 ```
@@ -55,43 +59,41 @@ polling was done.
 **Choice.** Merge `pr/k3` once, as the authoritative baseline for both.
 
 **Reason.** K3's K1 files are byte-identical to #2064's, so the merge delivers
-#2064 exactly. Splitting it would add a commit and change nothing.
+\#2064 exactly. Splitting it would add a commit and change nothing.
 
 **Affects.** #2064, K3.
 
 ---
 
-## D2 - The H chain is a third ABI fork and is deferred wholesale
+## D2 - Integrate the H chain while retaining the authoritative K1 ABI
 
-**Problem.** The recommended order puts #2171 at batch 0 as a "pure
-refactor, zero behaviour change" warm-up that does not occupy the merge order.
+**Scope (2026-09-11).** The user requested every submitted PR in the pipeline,
+so the earlier decision to defer HBG is superseded. The local integrated source
+now contains the contributions of all 14 listed PRs: #2064, #2171, #2172,
+\#2173, #2174, #2175, #2176, #2177, #2180, #2185, #2187, #2189, #2190 and #2193.
+This is local source integration, not a claim that the GitHub PRs were merged
+or that all tests have passed.
 
-**Finding.** #2171 is not orthogonal. Its own commit message says it
-"Include[s] the kernel-mode C ABI, state and invocation headers required by
-this implementation", and its head carries a K1 variant that **deletes
-`execution_mode_latch.h` and `kernel_entry_validation.h` outright** and
-rewrites `runtime_c_api.h` (+102/-64 against authoritative K1). Every H PR
-(#2171, #2172, #2173, #2174, #2175) carries that same variant; they are a
-consistent stack among themselves and a third ABI family against K1.
+**Finding.** The five H heads are cumulative snapshots of H1, 2B, Context
+Prepare, H2 and H3. Their shared K1 variant conflicts with the integrated C
+entries and invocation header; importing that whole variant would remove
+contracts the TMR path uses.
 
-Merging #2171 first was tried and reverted: it fast-forwards, silently
-adopting that variant as the branch's baseline.
+**Choice.** Integrate their HBG contributions and the shared resource
+prepare/freeze/inspect/bind methods into the existing context. Keep the current
+five-parameter `prepare_callable`, id-based launch, K1 header and five-event
+binder topology. Preserve #2180's contribution through the integrated #2189
+stack, and include #2193's updated capacity-refusal checks.
 
-**Options.**
+**Boundary.** H1-H3 build, sizing, immutable packets and slot admission are
+present. H4 has no submitted PR in the supplied pipeline; semantic restore and
+its public HBG owner wiring remain absent. HBG reports no kernel capability;
+kernel init returns `UNSUPPORTED`, and prepare/launch on that uninitialized
+context return `INVALID_STATE`. Added HBG and dispatch-packet tests require a Linux
+build; the separate positive TMR numerical test requires a2a3 hardware.
 
-1. Reconcile the H variant against authoritative K1 and land the H chain.
-2. Defer the whole H chain and integrate the TMR line only.
-
-**Choice.** Option 2 -- defer #2171, #2172, #2173, #2174, #2175 entirely.
-
-**Reason.** The H chain is `host_build_graph`; the smoke target is eager
-`tensormap_and_ringbuffer`. The handover explicitly permits deferring the H
-chain as a batch. Reconciling a third ABI family that deletes two headers the
-TMR line depends on buys nothing for the stated goal and risks the line that
-does matter.
-
-**Affects.** #2171, #2172, #2173, #2174, #2175. All five need rebasing onto
-this branch's K1 before they can land; see the closing report.
+**Affects.** All 14 submitted PR contributions; HBG ABI adaptation is recorded
+in D11.
 
 ---
 
@@ -143,7 +145,7 @@ context stream; the parameter costs nothing and covers the case where they
 do not.
 
 **Affects.** #2176, #2180, #2189 (must adopt five), #2190 (see D-later),
-#2177 and #2185 (unchanged).
+\#2177 and #2185 (unchanged).
 
 ---
 
@@ -197,7 +199,7 @@ K5 (`b6435e48`). Cherry-picking #2189's commits after #2177 (2a) and #2176
 
 **Choice.** Take #2180's K4 chain (`3e822453`, `b0943525`), which is stacked
 directly on the 2a commits this branch already has, then cherry-pick only
-#2189's K5 commit (`b6435e48`) on top.
+\#2189's K5 commit (`b6435e48`) on top.
 
 **Reason.** It is the same end state with no duplicated contribution, and it is
 the second option the handover itself offers. #2180 is otherwise superseded.
@@ -224,7 +226,7 @@ callable left from a previous context generation still resolves to
 added beyond that was a caller-held token, and an id-based ABI has no place to
 hold one -- the context generation is minted at init, so the check the caller
 would have armed is exactly the check the runtime now performs. Meanwhile
-#2185's entry layer, its nanobind binding and the Python wrapper are all
+\#2185's entry layer, its nanobind binding and the Python wrapper are all
 id-based, as is K1.
 
 **Affects.** #2190. Its `_prepare` ctypes helper and `CallableHandle` struct
@@ -308,7 +310,8 @@ entry -- takes `launch_aicpu` and `launch_aicore` as plain callbacks in
 `KernelLaunchOps`. Only the `_native` variant hard-codes the CANN family.
 
 **Choice.** Wire launch onto `launch_bound_kernel` with owner-supplied
-callbacks that reuse the existing `LaunchBuiltInOp` / AICore launch paths.
+callbacks that directly call `rtsLaunchCpuKernel` and
+`rtKernelLaunchWithHandleV2` using handles resolved during init/prepare.
 Leave `launch_bound_kernel_native` in the tree, unused, as the migration
 target.
 
@@ -319,5 +322,133 @@ where the `WithHostArgs` family has no precedent in this repo. The binder's
 are all in the generic entry, so nothing is given up. Switching the transport
 later changes two callbacks and no sequencing.
 
-**Affects.** #2187. The source guard covers only the three binder files, which
-this leaves untouched.
+`LoadAicpuOp::LaunchBuiltInOp` allocates its argument wrapper, so launch does
+not call that helper. The owner uses stack argument/configuration structures
+and a per-callable packet whose backing storage was allocated during prepare.
+
+**Affects.** #2187. The source guard also covers the new launch owner.
+
+---
+
+## D11 - HBG packets use the integrated common invocation header
+
+**Problem.** The H2/H3 snapshots assume a 64-byte common envelope with
+`abi_version`, `header_bytes` and reserved fields absent from the original K1.
+Hard-coded offsets would parse the wrong bytes after integration.
+
+**Choice.** Keep the authoritative `SimplerKernelInvocationHeader`. HBG producer,
+validator, HostArgs placeholders, slot limits and tests derive offsets with
+`sizeof(SimplerKernelInvocationHeader)`. Validate the shared mode, identity,
+counts and payload length; keep version/reserved checks on HBG's own graph
+header and slot records. HBG graph format remains version 2. D13 later imports
+K1's explicit trailing reserved word without changing the 40-byte layout.
+
+**Reason.** Both runtime payloads share one envelope without introducing a
+second public ABI. HBG framing, checksums and trusted slot admission remain
+intact. Compilation and execution results are recorded separately after tests
+run; source integration alone is not execution evidence.
+
+**Affects.** #2174, #2175 and their HBG documentation/tests.
+
+---
+
+## D12 - Kernel execution uses the resident device SO's single executor
+
+**Problem.** The TMR device SO contains one `g_aicpu_executor`, one affinity
+gate and shared platform register/profiling state. Separate host contexts can
+resolve the same resident SO, while their host mutexes and hidden streams are
+independent. A per-context submission lock does not serialize those contexts
+on the device.
+
+**Choice.** Each loaded host runtime SO enforces one live kernel context per
+`(device_id, device runtime SO fingerprint)`. Initialization claims this key
+before loading or initializing device state. A second claimant returns
+`PTO_RUNTIME_ERR_INVALID_STATE` with an explicit diagnostic. Failed initialization
+rolls back the claim. Failed close retains it; successful normal finalize releases
+it. Destruction and fatal resource abandonment cannot establish quiescence, so
+neither silently releases ownership. Launch also requires the context's claim.
+The owner sequences each launch's complete AICPU/AICore join before reusing its
+execution regions. Program contexts never acquire or release these claims.
+
+The registry covers contexts created through the same loaded host SO. Separately
+loaded copies of that host SO and different host processes have no shared claim
+registry; they must not concurrently target the same resident device runtime SO.
+This integration does not add a cross-library or cross-process locking protocol.
+Program/kernel execution sharing the same resident device SO must also be
+serialized by the caller, because program contexts do not participate in the
+kernel claim registry.
+
+**Reason.** Moving the executor, affinity gate and platform state into
+context-addressed storage requires an additional device ownership design.
+Adding only a host mutex to each context cannot establish that isolation.
+The new kernel consumer has one admission owner, publishes its immutable
+argument storage to the affinity group, gathers all thread errors and releases
+its borrowers only after every participating thread finishes.
+
+**Rejection boundary.** TMR admission failures with an established Runtime
+publish the pre-window AICore cancel sentinel. Outer dispatcher failures that
+reject the prefix or residency return an error without dereferencing
+`binding_address`: its alignment and numeric range alone cannot prove it is a
+live host-owned allocation. If AICore is already enqueued when such a packet is
+rejected, this boundary has no trusted cancellation target. Supporting recovery
+there requires a prepare-time binding registry plus explicit close-time revoke;
+this integration does not invent trust from malformed packet pointers. Host
+validation rejects ordinary invalid inputs before either device launch.
+
+**Validation.** Host lifecycle tests exercise concurrent claims, device/runtime
+key isolation, rejected-claim cleanup, initialization rollback, failed-close
+retention and successful retry. Executor tests cover trusted admission failure,
+pre-window cancellation and later reuse. The standalone K4 snapshot probe uses
+its own device symbol and raw encoder transport; production uses only the unified
+`SimplerKernelDispatchArgs` packet sender.
+
+**Affects.** #2176, #2180/#2189, #2190 and the launch owner. Host-side callable
+admission also rejects duplicate or out-of-range child function ids before
+allocation/upload, matching the device function-table contract.
+
+---
+
+## D13 - Refresh K1 without discarding integrated runtime behavior
+
+**Finding.** The final remote-head audit found #2064 had advanced from
+`86dd62b4` to `2ab04b1b`. The other 13 submitted heads matched the audited
+snapshots, including K3 #2193 at `b8e739d9`. Compare each K1 commit against
+its own parent (`405b5bbd` and `c540572d`) so unrelated upstream changes are
+not mistaken for K1 contributions.
+
+**Choice.** Import the revised K1 contracts into the working implementation:
+
+- Pin the invocation header to 40 bytes and every field offset. Turn the
+  historical final four padding bytes into `reserved_`, zero them in producers,
+  and reject nonzero values in the common, TMR and HBG consumers.
+- Derive callable scalar counts from signature entries, ignore historical
+  callable padding, and restore the existing C++/Python factory signatures.
+- Always resolve the runtime capability probe; resolve the three kernel
+  lifecycle symbols only for a supported component. Publish resolved function
+  pointers after successful initialization and test failed-init retry with
+  fixture shared libraries.
+- Make context operation callbacks non-throwing, retain the event-flags
+  parameter needed by K2, and use byte-sized stream/event enums. Invalid
+  initialization arguments are rejected before resource callbacks run.
+- Return `INVALID_STATE` for program-only device ownership operations attempted
+  through a kernel context. Structural C entry errors use `INVALID_ARGUMENT`.
+
+**Error-code adjudication.** Revised K1 assigned `INVALID_ARGUMENT` to -1004,
+which the already integrated callable cache uses for `CALLABLE_COUNT_EXCEEDED`.
+Keep the cache/capacity band -1004 through -1008 and assign `INVALID_ARGUMENT`
+the next free value, -1009. Preserve the specific launch-id capacity refusal.
+
+**Integration boundaries.** K1's stub-only removal of stream/event accessors
+and production source links cannot be applied: K2, HBG resource preparation
+and the real launch owner use them. Retain those integrated interfaces and
+K3's stronger capacity-preservation rules. No production feature is reverted
+to a K1 placeholder.
+
+**Test dispatch correction.** K2's capture test lacked runtime/device-count
+markers, so the mixed-runtime scene scheduler did not execute it. Add both
+markers and link the new shared resource implementation into its native probe.
+The final hardware sweep must explicitly report this test, rather than inferring
+capture coverage from the sweep exit code.
+
+**Affects.** #2064, #2176, #2190 and both runtime consumers. Final validation
+results are recorded separately from the source-integration decisions.

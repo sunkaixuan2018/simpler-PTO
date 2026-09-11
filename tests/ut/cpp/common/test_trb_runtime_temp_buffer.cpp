@@ -502,12 +502,18 @@ TEST_F(TrbRuntimeTempBufferTest, PreparedRuntimeEnvRequiresTheActiveArenaKey) {
 // Kernel-mode capacity: the retained buffer is context-static, so a run that
 // would grow it is refused rather than served. Growing is free + malloc, which
 // re-bases every slice the buffer has handed out, and a captured graph replays
-// the addresses of the run it captured.
+// the addresses of the run it captured. An empty slot holds no such address, so
+// the context's first allocation is not a re-base and is taken normally.
+//
+// The latch is write-once, so a real context is in kernel mode from its very
+// first bind -- KernelModeAllocatesOnceThenRefusesToGrow is that shape. The
+// cases that warm up in program mode and then flip the flag isolate the guard
+// itself against a slot that already holds a buffer.
 // ---------------------------------------------------------------------------
 
-// A kernel-mode run stages nothing: the input gate accepts only device
-// tensors, so the packed temporary size is zero and the retained slot is never
-// reached. This is the shape every kernel bind has.
+// A run whose tensors are all device memory stages nothing: the packed
+// temporary size is zero, so the retained slot is never reached and no grow is
+// considered. This is the shape a kernel bind is meant to have.
 TEST_F(TrbRuntimeTempBufferTest, KernelModeDeviceTensorRunTouchesNoAllocator) {
     fake_.reset();
     fake_.kernel_mode = true;
@@ -525,6 +531,48 @@ TEST_F(TrbRuntimeTempBufferTest, KernelModeDeviceTensorRunTouchesNoAllocator) {
     EXPECT_EQ(fake_.device_free_count, 0);
     EXPECT_EQ(fake_.retained_addr, nullptr);
     EXPECT_EQ(fake_.retained_size, 0u);
+}
+
+// The shape a real kernel context takes. Its first bind finds an empty slot and
+// must be allowed to allocate, since no captured graph can hold a slice of a
+// buffer that never existed; every later bind that would outgrow that buffer is
+// refused, because by then the address is one a replay may reference.
+TEST_F(TrbRuntimeTempBufferTest, KernelModeAllocatesOnceThenRefusesToGrow) {
+    ArgDirection signature[2] = {ArgDirection::IN, ArgDirection::OUT};
+    fake_.reset();
+    fake_.kernel_mode = true;
+
+    std::vector<uint8_t> sized_in(64, 1);
+    std::vector<uint8_t> sized_out(64, 0);
+    ChipStorageTaskArgs sized = make_args(sized_in, sized_out);
+    Runtime first_run = make_runtime();
+    ASSERT_EQ(bind_runtime(first_run, api_, sized, signature, 2), 0);
+    ASSERT_EQ(validate_runtime_impl(&first_run, &api_, 0), 0);
+    void *pinned_addr = fake_.retained_addr;
+    const size_t pinned_size = fake_.retained_size;
+    ASSERT_NE(pinned_addr, nullptr);
+    EXPECT_EQ(pinned_size, align_up(64, kAlign) * 2);
+    EXPECT_EQ(fake_.device_malloc_count, 1);
+    EXPECT_EQ(fake_.device_free_count, 0);
+
+    // Past that one allocation the slot is frozen.
+    std::vector<uint8_t> big_in(64, 1);
+    std::vector<uint8_t> big_out(kAlign + 1, 0);
+    ChipStorageTaskArgs big = make_args(big_in, big_out);
+    Runtime big_run = make_runtime();
+    EXPECT_EQ(bind_runtime(big_run, api_, big, signature, 2), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(fake_.retained_addr, pinned_addr);
+    EXPECT_EQ(fake_.retained_size, pinned_size);
+    EXPECT_EQ(fake_.device_malloc_count, 1);
+    EXPECT_EQ(fake_.device_free_count, 0);
+
+    // The run the context was sized for still binds, from the same address.
+    Runtime again = make_runtime();
+    EXPECT_EQ(bind_runtime(again, api_, sized, signature, 2), 0);
+    EXPECT_EQ(validate_runtime_impl(&again, &api_, 0), 0);
+    EXPECT_EQ(fake_.retained_addr, pinned_addr);
+    EXPECT_EQ(fake_.device_malloc_count, 1);
+    EXPECT_EQ(fake_.device_free_count, 0);
 }
 
 // A run larger than the retained buffer is refused, and the refusal happens
@@ -601,15 +649,15 @@ TEST_F(TrbRuntimeTempBufferTest, KernelModeHoldsOneAddressAcrossRepeatedRuns) {
     ArgDirection signature[2] = {ArgDirection::IN, ArgDirection::OUT};
     fake_.reset();
 
-    std::vector<uint8_t> warm_in(kAlign, 1);
-    std::vector<uint8_t> warm_out(kAlign, 0);
+    std::vector<uint8_t> warm_in(kAlign * 2, 1);
+    std::vector<uint8_t> warm_out(kAlign * 2, 0);
     ChipStorageTaskArgs warm = make_args(warm_in, warm_out);
     Runtime warm_run = make_runtime();
     ASSERT_EQ(bind_runtime(warm_run, api_, warm, signature, 2), 0);
     ASSERT_EQ(validate_runtime_impl(&warm_run, &api_, 0), 0);
     void *pinned_addr = fake_.retained_addr;
     const size_t pinned_size = fake_.retained_size;
-    ASSERT_EQ(pinned_size, kAlign * 2);
+    ASSERT_EQ(pinned_size, kAlign * 4);
 
     fake_.kernel_mode = true;
     const int mallocs = fake_.device_malloc_count;
@@ -624,10 +672,12 @@ TEST_F(TrbRuntimeTempBufferTest, KernelModeHoldsOneAddressAcrossRepeatedRuns) {
         EXPECT_EQ(fake_.retained_size, pinned_size);
     }
 
-    // A smaller run, and one whose tensors are the same pair reversed.
+    // A run that packs to strictly less than the retained size, and one whose
+    // tensors are the same pair reversed.
     std::vector<uint8_t> small_in(64, 1);
     std::vector<uint8_t> small_out(64, 0);
     ChipStorageTaskArgs small = make_args(small_in, small_out);
+    ASSERT_LT(align_up(64, kAlign) * 2, pinned_size);
     Runtime small_run = make_runtime();
     EXPECT_EQ(bind_runtime(small_run, api_, small, signature, 2), 0);
     EXPECT_EQ(validate_runtime_impl(&small_run, &api_, 0), 0);

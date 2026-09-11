@@ -34,7 +34,9 @@ struct FakeTopologyTransport {
     int launch_error{0};
     int sync_error{0};
     int free_error{0};
-    int set_device_error{0};
+    int get_device_error{0};
+    int current_device{0};
+    int set_device_calls{0};
     int alloc_calls{0};
     int copy_calls{0};
     int launch_calls{0};
@@ -54,22 +56,22 @@ public:
         ASSERT_EQ(execution_mode_latch().latch(SIMPLER_MODE_KERNEL), 0);
         device_id_ = 0;
         KernelContextOps ops{};
-        ops.get_current_device = [](void *, int *device) {
+        ops.get_current_device = [](void *, int *device) noexcept {
             *device = 0;
             return 0;
         };
-        ops.create_hidden_stream = [](void *, void **stream) {
+        ops.create_hidden_stream = [](void *, void **stream) noexcept {
             *stream = &fake;
             return 0;
         };
-        ops.destroy_hidden_stream = [](void *, void *) {
+        ops.destroy_hidden_stream = [](void *, void *) noexcept {
             return 0;
         };
-        ops.create_event = [](void *, uint32_t, void **event) {
+        ops.create_event = [](void *, uint32_t, void **event) noexcept {
             *event = &fake;
             return 0;
         };
-        ops.destroy_event = [](void *, void *) {
+        ops.destroy_event = [](void *, void *) noexcept {
             return 0;
         };
         ASSERT_EQ(kernel_execution_state().initialize(0, ops), 0);
@@ -86,10 +88,12 @@ protected:
     void TearDown() override {
         fake.sync_error = 0;
         fake.free_error = 0;
-        fake.set_device_error = 0;
+        fake.get_device_error = 0;
+        fake.current_device = 0;
         EXPECT_EQ(runner.finalize(), 0);
         EXPECT_TRUE(fake.live.empty());
         EXPECT_EQ(fake.reset_calls, 0);
+        EXPECT_EQ(fake.set_device_calls, 0);
     }
 
     int query() { return runner.query_aicpu_device_occupancy(output, &stream_token); }
@@ -135,7 +139,16 @@ extern "C" rtError_t rtMemcpy(void *dst, uint64_t dst_bytes, const void *src, ui
     return 0;
 }
 
-extern "C" rtError_t rtSetDevice(int32_t) { return fake.set_device_error; }
+extern "C" aclError aclrtGetDevice(int32_t *device_id) {
+    if (fake.get_device_error != 0) return fake.get_device_error;
+    *device_id = fake.current_device;
+    return 0;
+}
+
+extern "C" rtError_t rtSetDevice(int32_t) {
+    ++fake.set_device_calls;
+    return kInjectedError;
+}
 
 extern "C" rtError_t rtDeviceReset(int32_t) {
     ++fake.reset_calls;
@@ -256,14 +269,25 @@ TEST_F(KernelTopologyLifecycle, SyncAndCloseFailuresKeepBufferUntilConfirmedComp
     EXPECT_EQ(runner.committed_device_memory(), 0U);
 }
 
-TEST_F(KernelTopologyLifecycle, CloseDeviceSelectionFailurePreservesInFlightOwnership) {
+TEST_F(KernelTopologyLifecycle, CloseDeviceQueryFailurePreservesInFlightOwnership) {
     fake.sync_error = kInjectedError;
     EXPECT_EQ(query(), kInjectedError);
-    fake.set_device_error = kInjectedError;
+    fake.get_device_error = kInjectedError;
     EXPECT_EQ(runner.finalize(), kInjectedError);
     expect_retained(true);
     EXPECT_EQ(fake.sync_calls, 1);
     EXPECT_EQ(fake.free_calls, 0);
+}
+
+TEST_F(KernelTopologyLifecycle, CloseCurrentDeviceMismatchPreservesInFlightOwnership) {
+    fake.sync_error = kInjectedError;
+    EXPECT_EQ(query(), kInjectedError);
+    fake.current_device = 1;
+    EXPECT_EQ(runner.finalize(), PTO_RUNTIME_ERR_INVALID_STATE);
+    expect_retained(true);
+    EXPECT_EQ(fake.sync_calls, 1);
+    EXPECT_EQ(fake.free_calls, 0);
+    EXPECT_EQ(fake.set_device_calls, 0);
 }
 
 TEST_F(KernelTopologyLifecycle, ResultCopyFailureDoesNotPublishCache) {

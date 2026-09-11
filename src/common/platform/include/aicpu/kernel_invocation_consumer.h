@@ -13,11 +13,15 @@
 #include <cstddef>
 
 #include "kernel_callable_residency.h"
+#include "kernel_dispatch_args.h"
+
+// Per-thread kernel-entry setup supplied by platforms with a scheduling policy.
+void prepare_kernel_aicpu_thread();
 
 // Called only after envelope and current device residency validation. Runtime
 // consumers validate their payload layout/capacity before accessing its data.
 // This function does not own the launch packet or the resident allocation.
 int consume_kernel_invocation(
-    const SimplerKernelInvocationHeader &invocation, const KernelCallableDeviceResidency &resident, const void *payload,
+    const SimplerKernelDispatchArgs &args, const KernelCallableDeviceResidency &resident, const void *payload,
     size_t payload_bytes
 );

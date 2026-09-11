@@ -438,6 +438,8 @@ int finalize_device(DeviceContextHandle ctx) {
     if (ctx == NULL) return PTO_RUNTIME_ERR_INTERNAL;
     try {
         DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+        std::unique_lock<std::mutex> kernel_lease(runner->kernel_submission_mutex(), std::defer_lock);
+        if (runner->execution_mode_latch().is_kernel()) kernel_lease.lock();
         if (runner->native_runs_outstanding()) {
             LOG_ERROR("finalize_device: native run must be finalized first");
             return PTO_RUNTIME_ERR_INTERNAL;
@@ -1255,9 +1257,9 @@ int device_memory_info_ctx(DeviceContextHandle ctx, DeviceMemoryInfo *info) {
  * Kernel-mode lifecycle
  *
  * Init and prepare create context-owned resources on a borrowed device.
- * Launch remains a rejecting stub, so supported() reports 0. Structural
- * argument validation is shared with the simulated components through
- * kernel_entry_validation.h.
+ * Launch uses the runtime's capability hook and the three-stream binder. Structural
+ * argument validation is shared
+ * with the simulated components through kernel_entry_validation.h.
  * =========================================================================== */
 
 // Reports the bound runtime's own verdict rather than a constant, so the
@@ -1329,13 +1331,13 @@ int simpler_kernel_mode_init(
 }
 
 int simpler_kernel_mode_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size,
-    void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
 ) {
     int rc = validate_kernel_prepare_callable_args(ctx, callable_id, callable, callable_size, caller_stream);
     if (rc != 0) return rc;
 
     DeviceRunnerBase *runner = static_cast<DeviceRunnerBase *>(ctx);
+    std::lock_guard<std::mutex> submission_lock(runner->kernel_submission_mutex());
     if (!runner->execution_mode_latch().is_kernel()) {
         LOG_ERROR("simpler_kernel_mode_prepare_callable: no live kernel context on this device context");
         return PTO_RUNTIME_ERR_INVALID_STATE;
@@ -1377,7 +1379,7 @@ int simpler_kernel_mode_prepare_callable(
         rollback.dismiss();
         try {
             const HostApi kernel_api(runner, 0, 0, &g_host_api_ops);
-            rc = runner->prepare_kernel_callable(prepared.callable_id, &kernel_api);
+            rc = runner->prepare_kernel_callable(prepared.callable_id, &kernel_api, caller_stream);
         } catch (...) {
             runner->kernel_execution_state().poison(PTO_RUNTIME_ERR_INTERNAL);
             throw;
@@ -1393,24 +1395,20 @@ int simpler_kernel_mode_prepare_callable(
     }
 }
 
-int simpler_kernel_mode_launch(
-    DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream
-) {
+int simpler_kernel_mode_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream) {
     const int rc = validate_kernel_launch_args(ctx, callable_id, args, caller_stream);
     if (rc != 0) return rc;
     auto *runner = static_cast<DeviceRunnerBase *>(ctx);
     if (!runner->execution_mode_latch().is_kernel() || !runner->kernel_execution_state().accepts_dispatch())
         return PTO_RUNTIME_ERR_INVALID_STATE;
-    KernelCallableResidency residency;
-    auto &cache = runner->kernel_callable_cache();
-    const int residency_rc = cache.resolve({callable_id, cache.generation()}, residency);
-    if (residency_rc != 0) return residency_rc;
-    // Residency resolved, so the callable and its generation are good and the
-    // refusal below is about the runtime, not this call. simpler_kernel_mode_supported
-    // reports the same verdict from the same hook, so a caller that gates on it
-    // never reaches here.
-    LOG_ERROR("simpler_kernel_mode_launch: this runtime does not implement kernel-mode launch");
-    return PTO_RUNTIME_ERR_UNSUPPORTED;
+    if (!runtime_supports_kernel_launch_impl()) return PTO_RUNTIME_ERR_UNSUPPORTED;
+    try {
+        return runner->launch_kernel_callable(
+            callable_id, *static_cast<const ChipStorageTaskArgs *>(args), caller_stream
+        );
+    } catch (...) {
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
 }
 
 }  // extern "C"

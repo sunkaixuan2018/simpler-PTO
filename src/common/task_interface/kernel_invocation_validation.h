@@ -57,13 +57,11 @@ inline bool valid_invocation_counts(int32_t tensors, int32_t scalars) noexcept {
 // signature names a readable, aligned array of sig_count entries; its owning
 // callable's flexible-array bounds are validated before this function is called.
 inline InvocationStatus derive_invocation_counts(
-    const ArgDirection *signature, int32_t sig_count, int32_t cached_scalars, int32_t *tensors, int32_t *scalars
+    const ArgDirection *signature, int32_t sig_count, int32_t *tensors, int32_t *scalars
 ) noexcept {
     if (tensors == nullptr || scalars == nullptr || (signature == nullptr && sig_count != 0))
         return InvocationStatus::InvalidArgument;
-    if (sig_count < 0 || sig_count > CHIP_MAX_TENSOR_ARGS || cached_scalars < 0 ||
-        cached_scalars > CHIP_MAX_SCALAR_ARGS)
-        return InvocationStatus::InvalidCounts;
+    if (sig_count < 0 || sig_count > CHIP_MAX_TENSOR_ARGS) return InvocationStatus::InvalidCounts;
     int32_t scalar_count = 0;
     for (int32_t i = 0; i < sig_count; ++i) {
         switch (signature[i]) {
@@ -79,9 +77,7 @@ inline InvocationStatus derive_invocation_counts(
             return InvocationStatus::InvalidSignature;
         }
     }
-    if (!valid_invocation_counts(sig_count - scalar_count, scalar_count) ||
-        (cached_scalars != 0 && cached_scalars != scalar_count))
-        return InvocationStatus::InvalidSignature;
+    if (!valid_invocation_counts(sig_count - scalar_count, scalar_count)) return InvocationStatus::InvalidSignature;
     *tensors = sig_count - scalar_count;
     *scalars = scalar_count;
     return InvocationStatus::Ok;
@@ -100,7 +96,7 @@ inline InvocationStatus validate_invocation_header(
     SimplerKernelInvocationHeader header{};
     std::memcpy(&header, packet.data, sizeof(header));
     if (header.mode != SIMPLER_MODE_KERNEL || header.callable_id < 0 ||
-        header.callable_id >= MAX_REGISTERED_CALLABLE_IDS || header.generation == 0)
+        header.callable_id >= MAX_REGISTERED_CALLABLE_IDS || header.generation == 0 || header.reserved_ != 0)
         return InvocationStatus::InvalidHeader;
     if (!valid_invocation_counts(header.tensor_count, header.scalar_count) || header.host_copy_tensor_count != 0)
         return InvocationStatus::InvalidCounts;

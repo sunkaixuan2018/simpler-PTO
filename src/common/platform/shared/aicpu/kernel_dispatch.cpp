@@ -22,6 +22,8 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_kernel_exec(
         return static_cast<int>(KernelDispatchStatus::InvalidArgs);
     // The packet prefix and declared packet_bytes must describe the actual
     // CANN argument allocation. The entry ABI exposes no independent length.
+    // Before runtime admission, binding_address has no independently trusted
+    // owner. A rejected prefix must not dereference it for AICore cancellation.
     const auto &args = *static_cast<const SimplerKernelDispatchArgs *>(arg);
     const auto &invocation = args.invocation;
     if (args.packet_bytes < sizeof(args) || args.packet_bytes > std::numeric_limits<size_t>::max() ||
@@ -30,7 +32,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_kernel_exec(
         invocation.generation == 0 || invocation.tensor_count < 0 || invocation.tensor_count > CHIP_MAX_TENSOR_ARGS ||
         invocation.scalar_count < 0 || invocation.scalar_count > CHIP_MAX_SCALAR_ARGS ||
         invocation.tensor_count > CHIP_MAX_TENSOR_ARGS - invocation.scalar_count ||
-        invocation.host_copy_tensor_count != 0)
+        invocation.host_copy_tensor_count != 0 || invocation.reserved_ != 0)
         return static_cast<int>(KernelDispatchStatus::InvalidArgs);
     if (args.residency_address == 0 || args.residency_address % alignof(KernelCallableDeviceResidency) != 0 ||
         args.residency_address > std::numeric_limits<uintptr_t>::max() - sizeof(KernelCallableDeviceResidency))
@@ -49,5 +51,5 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_kernel_exec(
     if (!kernel_callable_residency_matches(invocation, resident)) return static_cast<int>(KernelDispatchStatus::Stale);
 
     const auto *payload = static_cast<const unsigned char *>(arg) + sizeof(args);
-    return consume_kernel_invocation(invocation, resident, payload, static_cast<size_t>(invocation.payload_bytes));
+    return consume_kernel_invocation(args, resident, payload, static_cast<size_t>(invocation.payload_bytes));
 }

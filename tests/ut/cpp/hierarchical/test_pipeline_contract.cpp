@@ -305,6 +305,85 @@ TEST(PipelineContract, CommonKernelAdmissionDoesNotRequireTmrResourceSet) {
     EXPECT_FALSE(is_valid_tmr_kernel_pipeline_contract(&c));
 }
 
+PipelineContract hbg_kernel_contract() {
+    return {
+        PTO_PIPELINE_CONTRACT_ABI_VERSION,
+        4,
+        1,
+        {
+            {PTO_PIPELINE_GM_HEAP, PTO_PIPELINE_HOST_PER_RUN, 4096},
+            {PTO_PIPELINE_RUNTIME_IMAGE, PTO_PIPELINE_HOST_PER_RUN, 8192},
+            {PTO_PIPELINE_AICPU_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0},
+            {PTO_PIPELINE_AICORE_STREAM, PTO_PIPELINE_EXEC_HANDLE, 0},
+        },
+    };
+}
+
+TEST(HbgKernelPipelineContract, RuntimeSpecificAdmissionSharesCommonValidation) {
+    const auto hbg = hbg_kernel_contract();
+    const auto tmr = kernel_contract();
+    for (const auto *contract : {&hbg, &tmr}) {
+        EXPECT_TRUE(is_valid_pipeline_contract(contract, SIMPLER_MODE_KERNEL));
+        EXPECT_TRUE(has_serviceable_arena_topology(*contract));
+        EXPECT_TRUE(has_serviceable_stream_topology(*contract));
+        EXPECT_FALSE(is_valid_pipeline_contract(contract));
+    }
+    EXPECT_TRUE(is_valid_hbg_kernel_pipeline_contract(&hbg));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&tmr));
+    EXPECT_TRUE(is_valid_tmr_kernel_pipeline_contract(&tmr));
+    EXPECT_FALSE(is_valid_tmr_kernel_pipeline_contract(&hbg));
+}
+
+TEST(HbgKernelPipelineContract, RequiresExactlyFourCorrectlyClassifiedResources) {
+    const auto contract = hbg_kernel_contract();
+    for (uint32_t i = 0; i < contract.resource_count; ++i) {
+        auto invalid = contract;
+        invalid.resources[i] = invalid.resources[--invalid.resource_count];
+        EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&invalid)) << i;
+        invalid = contract;
+        invalid.resources[i].resource_class = (invalid.resources[i].resource_class + 1) % 3;
+        EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&invalid)) << i;
+        invalid = contract;
+        invalid.resources[i] = invalid.resources[(i + 1) % invalid.resource_count];
+        EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&invalid)) << i;
+    }
+    auto invalid = contract;
+    invalid.pipeline_depth = 2;
+    EXPECT_TRUE(is_valid_pipeline_contract(&invalid, SIMPLER_MODE_KERNEL));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&invalid));
+    invalid.resource_count = PTO_PIPELINE_MAX_RESOURCES + 1;
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&invalid));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(nullptr));
+}
+
+TEST(HbgKernelPipelineContract, EmbeddedSmIsOmittedInsteadOfDeclaringZeroSizedArena) {
+    auto contract = hbg_kernel_contract();
+    EXPECT_EQ(find_pipeline_resource(contract, PTO_PIPELINE_GM_SM), nullptr);
+    contract.resources[contract.resource_count++] = {PTO_PIPELINE_GM_SM, PTO_PIPELINE_DEVICE_SCRATCH, 0};
+    EXPECT_FALSE(is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL));
+    contract.resources[contract.resource_count - 1].bytes_per_copy = 4096;
+    EXPECT_TRUE(is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&contract));
+}
+
+TEST(HbgKernelPipelineContract, TaskArgsByteFieldUsesTheCommonReservedRule) {
+    auto contract = hbg_kernel_contract();
+    contract.resources[contract.resource_count++] = {PTO_PIPELINE_TASK_ARGS, PTO_PIPELINE_HOST_PER_RUN, 0};
+    EXPECT_TRUE(is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&contract));
+    contract.resources[contract.resource_count - 1].bytes_per_copy = 64;
+    EXPECT_FALSE(is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL));
+}
+
+TEST(HbgKernelPipelineContract, RejectsPooledFootprintOverflowInRuntimeAdmission) {
+    auto contract = hbg_kernel_contract();
+    contract.resources[0].bytes_per_copy = UINT64_MAX;
+    EXPECT_TRUE(is_valid_pipeline_contract(&contract, SIMPLER_MODE_KERNEL));
+    EXPECT_FALSE(is_valid_hbg_kernel_pipeline_contract(&contract));
+    contract.resources[0].bytes_per_copy -= contract.resources[1].bytes_per_copy;
+    EXPECT_TRUE(is_valid_hbg_kernel_pipeline_contract(&contract));
+}
+
 TEST(PipelineSlotPool, DepthOneKeepsLegacySingleSlotBehavior) {
     PipelineSlotPool pool(1);
     auto first = pool.try_acquire();

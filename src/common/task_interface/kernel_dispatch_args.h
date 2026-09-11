@@ -24,6 +24,17 @@
 struct SimplerKernelDispatchArgs {
     uint64_t packet_bytes;
     uint64_t residency_address;
+    /* The issuing context's device KernelArgs. It is the one pointer a
+       kernel-mode entry gets, and everything the program-mode entry receives in
+       its own launch argument hangs off it: the resident runtime, the per-core
+       register table, and the profiling bases. Stable for the context's life. */
+    uint64_t binding_address;
+    uint64_t context_generation;
+    /* Extents of the two context-static regions the resident runtime names.
+       The runtime records their bases but not their sizes, and the device may
+       not read a region to learn how far it may read. */
+    uint64_t sm_bytes;
+    uint64_t arena_bytes;
     SimplerKernelInvocationHeader invocation;
 };
 

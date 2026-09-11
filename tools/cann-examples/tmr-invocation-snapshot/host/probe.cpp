@@ -20,7 +20,8 @@
 #include <vector>
 
 #include "../protocol.h"
-#include "platform/onboard/host/tmr_kernel_invocation.h"
+#include "aicpu_loader/host/load_aicpu_op.h"
+#include "worker/tmr_kernel_invocation.h"
 
 namespace {
 void check(int code, const char *operation) {
@@ -68,7 +69,7 @@ int main(int argc, char **argv) {
                 ),
                 "bootstrap"
             );
-            check(loader.Init({simpler::tmr::TmrKernelInvocationName}), "register entries");
+            check(loader.Init({SnapshotProbeEntryName}), "register entries");
             SnapshotProbeInit init{reinterpret_cast<uint64_t>(results), 13, reinterpret_cast<uint64_t>(gate), count};
             check(loader.LaunchBuiltInOp(stream, &init, sizeof(init), 1, "simpler_aicpu_init"), "init fixture");
             check(aclrtSynchronizeStream(stream), "sync prepare");
@@ -95,12 +96,16 @@ int main(int argc, char **argv) {
                 simpler::tmr::TmrEncodingCandidate candidate;
                 auto status = simpler::tmr::encode_tmr_invocation(args, callable, binding, caches[i % 3], &candidate);
                 if (status != simpler::kernel::InvocationStatus::Ok) throw std::runtime_error("encode failed");
+                status = simpler::tmr::validate_tmr_submission(candidate, callable, binding);
+                if (status != simpler::kernel::InvocationStatus::Ok) throw std::runtime_error("validation failed");
+                const auto packet = candidate.packet();
                 check(
-                    simpler::tmr::enqueue_tmr_invocation_aicpu(loader, stream, 1, candidate, callable, binding),
+                    loader.LaunchBuiltInOp(
+                        stream, const_cast<uint8_t *>(packet.data), packet.size, 1, SnapshotProbeEntryName
+                    ),
                     "enqueue snapshot"
                 );
                 caches[i % 3].commit(std::move(candidate));
-                const auto packet = candidate.packet();
                 std::memset(const_cast<uint8_t *>(packet.data), 0xa5, packet.size);
                 args = {};
                 expected.push_back({sum, callable.callable_id, 0});

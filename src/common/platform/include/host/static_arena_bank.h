@@ -109,9 +109,9 @@ inline StaticArenaBankOutcome commit_static_arena_bank(const StaticArenaBankRequ
         outcome.bases_changed = true;
         arena.reserve(requested_size, DeviceArena::kDefaultBaseAlign);
         if (arena.commit(DeviceArena::kDefaultBaseAlign) == nullptr) {
-            // commit() failure leaves committed_=false, so the rollback below
-            // skips this arena's release branch. release() is idempotent on a
-            // never-committed arena (zeroes cursor_).
+            // release() is idempotent on an arena whose commit() failed — it
+            // zeroes cursor_ and frees nothing — so the rollback below releases
+            // every region unconditionally rather than testing each one.
             arena.release();
             outcome.rc = PTO_RUNTIME_ERR_INTERNAL;
             break;

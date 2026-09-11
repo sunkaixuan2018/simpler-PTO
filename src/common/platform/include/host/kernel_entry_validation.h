@@ -40,12 +40,12 @@ inline int validate_kernel_init_args(
     size_t aicore_size, const uint8_t *dispatcher_binary, size_t dispatcher_size, const void *config,
     uint64_t context_generation
 ) {
-    if (ctx == nullptr || config == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
-    if (device_id < 0 || context_generation == 0) return PTO_RUNTIME_ERR_INTERNAL;
+    if (ctx == nullptr || config == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (device_id < 0 || context_generation == 0) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     if (!kernel_binary_span_is_consistent(aicpu_binary, aicpu_size) ||
         !kernel_binary_span_is_consistent(aicore_binary, aicore_size) ||
         !kernel_binary_span_is_consistent(dispatcher_binary, dispatcher_size)) {
-        return PTO_RUNTIME_ERR_INTERNAL;
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     }
     return 0;
 }
@@ -53,23 +53,21 @@ inline int validate_kernel_init_args(
 inline int validate_kernel_prepare_callable_args(
     const void *ctx, int32_t callable_id, const void *callable, size_t callable_size, const void *caller_stream
 ) {
-    if (ctx == nullptr || callable == nullptr || caller_stream == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
-    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) return PTO_RUNTIME_ERR_INTERNAL;
-    if (callable_size < sizeof(ChipCallable)) return PTO_RUNTIME_ERR_INTERNAL;
+    if (ctx == nullptr || callable == nullptr || caller_stream == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (callable_id < 0 || callable_id >= MAX_REGISTERED_CALLABLE_IDS) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (callable_size < sizeof(ChipCallable)) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     /* ChipCallable's storage_ is CALLABLE_CHILD_ALIGN-aligned relative to the
        header, so a misaligned image puts every child at a misaligned address. */
-    if (reinterpret_cast<uintptr_t>(callable) % alignof(ChipCallable) != 0) return PTO_RUNTIME_ERR_INTERNAL;
+    if (reinterpret_cast<uintptr_t>(callable) % alignof(ChipCallable) != 0) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     const auto *bytes = static_cast<const uint8_t *>(callable);
     int32_t sig_count = 0;
-    int32_t cached_scalars = 0;
     std::memcpy(&sig_count, bytes + offsetof(ChipCallable, sig_count_), sizeof(sig_count));
-    std::memcpy(&cached_scalars, bytes + offsetof(ChipCallable, scalar_count_), sizeof(cached_scalars));
     int32_t tensors = 0;
     int32_t scalars = 0;
     const auto *signature = reinterpret_cast<const ArgDirection *>(bytes + offsetof(ChipCallable, signature_));
-    if (simpler::kernel::derive_invocation_counts(signature, sig_count, cached_scalars, &tensors, &scalars) !=
+    if (simpler::kernel::derive_invocation_counts(signature, sig_count, &tensors, &scalars) !=
         simpler::kernel::InvocationStatus::Ok)
-        return PTO_RUNTIME_ERR_INTERNAL;
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
 
     const auto *image = static_cast<const ChipCallable *>(callable);
     const auto valid_name = [](const char *name, uint32_t length) {
@@ -77,12 +75,12 @@ inline int validate_kernel_prepare_callable_args(
     };
     if (!valid_name(image->func_name_, image->func_name_len_) ||
         !valid_name(image->config_name_, image->config_name_len_))
-        return PTO_RUNTIME_ERR_INTERNAL;
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     const size_t storage_size = callable_size - offsetof(ChipCallable, storage_);
     size_t used = image->binary_size_;
     constexpr size_t max_children = sizeof(image->child_offsets_) / sizeof(image->child_offsets_[0]);
     if (used > storage_size || image->child_count_ < 0 || static_cast<size_t>(image->child_count_) > max_children)
-        return PTO_RUNTIME_ERR_INTERNAL;
+        return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     for (int32_t i = 0; i < image->child_count_; ++i) {
         const size_t offset = image->child_offsets_[i];
         // Canonical child packing starts at the next aligned byte after
@@ -90,22 +88,21 @@ inline int validate_kernel_prepare_callable_args(
         const size_t padding = (CALLABLE_ALIGN - used % CALLABLE_ALIGN) % CALLABLE_ALIGN;
         if (padding > storage_size - used || offset != used + padding ||
             CoreCallable::binary_data_offset() > storage_size - offset)
-            return PTO_RUNTIME_ERR_INTERNAL;
+            return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
         const auto *child = reinterpret_cast<const CoreCallable *>(image->storage_ + offset);
-        if (child->sig_count_ < 0 || child->sig_count_ > CORE_MAX_TENSOR_ARGS) return PTO_RUNTIME_ERR_INTERNAL;
+        if (child->sig_count_ < 0 || child->sig_count_ > CORE_MAX_TENSOR_ARGS) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
         const size_t binary_offset = offset + CoreCallable::binary_data_offset();
-        if (child->binary_size_ > storage_size - binary_offset) return PTO_RUNTIME_ERR_INTERNAL;
+        if (child->binary_size_ > storage_size - binary_offset) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
         used = binary_offset + child->binary_size_;
     }
-    if (used != storage_size) return PTO_RUNTIME_ERR_INTERNAL;
+    if (used != storage_size) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     return 0;
 }
 
-inline int validate_kernel_launch_args(
-    const void *ctx, int32_t callable_id, const void *args, const void *caller_stream
-) {
-    if (ctx == nullptr || args == nullptr || caller_stream == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
-    if (callable_id < 0) return PTO_RUNTIME_ERR_INTERNAL;
+inline int
+validate_kernel_launch_args(const void *ctx, int32_t callable_id, const void *args, const void *caller_stream) {
+    if (ctx == nullptr || args == nullptr || caller_stream == nullptr) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
+    if (callable_id < 0) return PTO_RUNTIME_ERR_INVALID_ARGUMENT;
     if (callable_id >= MAX_REGISTERED_CALLABLE_IDS) return PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED;
     return 0;
 }

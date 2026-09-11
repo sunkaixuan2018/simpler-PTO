@@ -27,7 +27,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_init(void *a
 }
 extern "C" __attribute__((visibility("default"))) int simpler_aicpu_exec(void *) { return 1; }
 
-extern "C" __attribute__((visibility("default"))) int simpler_aicpu_kernel_exec(void *args) {
+extern "C" __attribute__((visibility("default"))) int tmr_invocation_snapshot_probe(void *args) {
     using namespace simpler::tmr;
     if (args == nullptr || fixture.results_addr == 0 || next_result >= fixture.capacity) return 1;
     if (fixture.gate_addr == 0) return 1;
@@ -46,7 +46,7 @@ extern "C" __attribute__((visibility("default"))) int simpler_aicpu_kernel_exec(
     auto status = tmr_invocation_size(callable, &bytes);
     TmrInvocationView view;
     const TmrExecutionBindingView binding{fixture.results_addr, fixture.context_generation};
-    // The formal host adapter submits exactly the independently derived size.
+    // The host probe submits exactly the independently derived size.
     // This CPU entry has no API for observing CANN's actual readable byte count.
     if (status == InvocationStatus::Ok)
         status = decode_tmr_invocation({static_cast<const uint8_t *>(args), bytes}, callable, binding, &view);

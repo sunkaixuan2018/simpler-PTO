@@ -20,30 +20,19 @@
  * let simpler stand the device up would exercise the program-mode shape and
  * pass for the wrong reason.
  *
- * The backend reports kernel mode unsupported today, so the contract-correct
- * outcome is a refusal, and which refusal is the assertion:
+ * Real TMR binaries must initialize and close successfully. Another live
+ * context using the same runtime is refused
+ * until that owner closes. Invalid
+ * arguments and unprepared launches retain their precise entry error codes.
+ * The
+ * ChipWorker cases exercise its dlsym forwarding and lifecycle as well.
+ * After close, the caller verifies that its
+ * device and stream remain usable.
+ * Numerical execution and successful callable preparation are covered by the
  *
- *   simpler_kernel_mode_supported     -> 0
- *   simpler_kernel_mode_init          -> PTO_RUNTIME_ERR_UNSUPPORTED after the
- *                                        shared structural validation accepts
- *                                        the arguments
- *   prepare_callable / launch         -> PTO_RUNTIME_ERR_INVALID_STATE, since
- *                                        no kernel context is live
- *   malformed arguments to any of the
- *   three                             -> PTO_RUNTIME_ERR_INTERNAL, and the
- *                                        refusal is reached before the state
- *                                        check, so validation is what rejects
- *
- * Distinguishing INTERNAL from INVALID_STATE is what makes the pass meaningful:
- * a call that never arrived would look identical to one refused for state if
- * only "nonzero" were asserted. The ChipWorker cases add the host half — the
- * kernel entry points are wired to the four dlsym'd pointers, and a refused
- * kernel_init leaves a worker that finalize() can still close.
- *
- * When the platform gains a real implementation these expectations invert into
- * a full init -> prepare -> launch -> close lifecycle; the borrowed-stream
- * scaffolding above them does not change.
- *
+ * Python kernel-mode hardware test, which compiles a real orchestration/kernel
+ * pair; this target requires only the
+ * prebuilt runtime artifacts below.
  * Hardware classification: requires_hardware_a2a3 (ctest label) + CMake gate
  * SIMPLER_ENABLE_HARDWARE_TESTS. Device allocation is driven by CTest
  * RESOURCE_GROUPS + --resource-spec-file.
@@ -58,6 +47,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -73,6 +65,7 @@
 #include "chip_worker.h"
 #include "runtime_c_api.h"
 #include "task_args.h"
+#include "host/raii_scope_guard.h"
 
 namespace {
 
@@ -81,6 +74,7 @@ namespace {
 struct KernelModeApi {
     void *(*create_device_context)();
     void (*destroy_device_context)(void *);
+    int (*finalize_device)(void *);
     decltype(&simpler_kernel_mode_supported) supported;
     decltype(&simpler_kernel_mode_init) init;
     decltype(&simpler_kernel_mode_prepare_callable) prepare_callable;
@@ -98,13 +92,34 @@ F resolve(void *handle, const char *name) {
 bool load_kernel_mode_api(void *handle, KernelModeApi &api) {
     api.create_device_context = resolve<decltype(api.create_device_context)>(handle, "create_device_context");
     api.destroy_device_context = resolve<decltype(api.destroy_device_context)>(handle, "destroy_device_context");
+    api.finalize_device = resolve<decltype(api.finalize_device)>(handle, "finalize_device");
     api.supported = resolve<decltype(api.supported)>(handle, "simpler_kernel_mode_supported");
     api.init = resolve<decltype(api.init)>(handle, "simpler_kernel_mode_init");
     api.prepare_callable = resolve<decltype(api.prepare_callable)>(handle, "simpler_kernel_mode_prepare_callable");
     api.launch = resolve<decltype(api.launch)>(handle, "simpler_kernel_mode_launch");
-    return api.create_device_context && api.destroy_device_context && api.supported && api.init &&
-           api.prepare_callable && api.launch;
+    return api.create_device_context && api.destroy_device_context && api.finalize_device && api.supported &&
+           api.init && api.prepare_callable && api.launch;
 }
+
+std::vector<uint8_t> read_binary(const char *path) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input) throw std::runtime_error(std::string("cannot read runtime artifact: ") + path);
+    return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+struct RuntimeBinaries {
+    std::vector<uint8_t> aicpu{read_binary(PTO_KERNEL_UT_AICPU_PATH)};
+    std::vector<uint8_t> aicore{read_binary(PTO_KERNEL_UT_AICORE_PATH)};
+    std::vector<uint8_t> dispatcher{read_binary(PTO_KERNEL_UT_DISPATCHER_PATH)};
+
+    int init(const KernelModeApi &api, void *ctx, int device_id, uint64_t generation) const {
+        const CallConfig config{};
+        return api.init(
+            ctx, device_id, aicpu.data(), aicpu.size(), aicore.data(), aicore.size(), dispatcher.data(),
+            dispatcher.size(), &config, generation
+        );
+    }
+};
 
 /// Device ids allocated by CTest resource allocation, parsed from
 /// CTEST_RESOURCE_GROUP_<n>_NPUS ("id:<N>,slots:<M>;..."). Mirrors
@@ -132,7 +147,8 @@ std::vector<int> read_ctest_devices() {
 
 /// A zeroed, correctly aligned ChipCallable image. The entry validation checks
 /// alignment, the size floor and the callable id range; it does not walk the
-/// flexible-array offsets, so a zeroed header is an image it accepts.
+/// flexible-array offsets. It is used only for entry rejection checks, never
+/// as a successfully registered device orchestration callable.
 struct AlignedCallableImage {
     alignas(ChipCallable) unsigned char bytes[sizeof(ChipCallable)];
 
@@ -171,6 +187,19 @@ public:
     void *stream() const { return stream_; }
     int device_id() const { return device_id_; }
 
+    void verify_still_usable() const {
+        int32_t current = -1;
+        ASSERT_EQ(aclrtGetDevice(&current), ACL_SUCCESS);
+        ASSERT_EQ(current, device_id_);
+        void *buffer = nullptr;
+        ASSERT_EQ(aclrtMalloc(&buffer, 64, ACL_MEM_MALLOC_HUGE_FIRST), ACL_SUCCESS);
+        auto cleanup = RAIIScopeGuard([&]() {
+            EXPECT_EQ(aclrtFree(buffer), ACL_SUCCESS);
+        });
+        ASSERT_EQ(aclrtMemsetAsync(buffer, 64, 0, 64, stream_), ACL_SUCCESS);
+        EXPECT_EQ(aclrtSynchronizeStreamWithTimeout(stream_, 1000), ACL_SUCCESS);
+    }
+
 private:
     int device_id_;
     bool acl_owned_{false};
@@ -203,7 +232,7 @@ protected:
 // C ABI surface: all four entries, on a borrowed device and stream.
 // ---------------------------------------------------------------------------
 
-TEST_F(KernelModeEntryTest, EntriesRefuseOnBorrowedStreamPerContract) {
+TEST_F(KernelModeEntryTest, SupportsBorrowedContextAndRejectsUnpreparedEntries) {
     BorrowedDevice borrowed(device_id_);
     ASSERT_TRUE(borrowed.ready()) << "could not stand up the caller's device/stream on device " << device_id_;
 
@@ -215,17 +244,13 @@ TEST_F(KernelModeEntryTest, EntriesRefuseOnBorrowedStreamPerContract) {
 
     void *ctx = api.create_device_context();
     ASSERT_NE(ctx, nullptr);
+    auto cleanup = RAIIScopeGuard([&]() {
+        EXPECT_EQ(api.finalize_device(ctx), 0);
+        api.destroy_device_context(ctx);
+        dlclose(handle);
+    });
 
-    EXPECT_EQ(api.supported(ctx), 0) << "this backend reports kernel mode unsupported";
-
-    const CallConfig config{};
-    const std::vector<uint8_t> aicpu(16, 0);
-    const std::vector<uint8_t> aicore(16, 0);
-
-    EXPECT_EQ(
-        api.init(ctx, device_id_, aicpu.data(), aicpu.size(), aicore.data(), aicore.size(), nullptr, 0, &config, 1),
-        PTO_RUNTIME_ERR_UNSUPPORTED
-    ) << "structurally valid arguments must pass validation and be refused for support, not for shape";
+    EXPECT_EQ(api.supported(ctx), 1);
 
     AlignedCallableImage image;
     EXPECT_EQ(
@@ -237,8 +262,55 @@ TEST_F(KernelModeEntryTest, EntriesRefuseOnBorrowedStreamPerContract) {
     EXPECT_EQ(api.launch(ctx, 0, &args, borrowed.stream()), PTO_RUNTIME_ERR_INVALID_STATE)
         << "no kernel context is live on this device context";
 
-    api.destroy_device_context(ctx);
-    dlclose(handle);
+    const RuntimeBinaries binaries;
+    ASSERT_EQ(binaries.init(api, ctx, device_id_, 1), 0);
+    EXPECT_EQ(binaries.init(api, ctx, device_id_, 2), PTO_RUNTIME_ERR_INVALID_STATE);
+    // The declared binary cannot fit in this image. Admission must reject it
+    // before registration enqueues any device work.
+    reinterpret_cast<ChipCallable *>(image.bytes)->binary_size_ = 1;
+    EXPECT_EQ(
+        api.prepare_callable(ctx, 0, image.data(), AlignedCallableImage::size(), borrowed.stream()),
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
+    );
+    EXPECT_EQ(api.launch(ctx, 0, &args, borrowed.stream()), PTO_RUNTIME_ERR_INVALID_STATE);
+    ASSERT_EQ(api.finalize_device(ctx), 0);
+    EXPECT_EQ(api.launch(ctx, 0, &args, borrowed.stream()), PTO_RUNTIME_ERR_INVALID_STATE);
+    borrowed.verify_still_usable();
+}
+
+TEST_F(KernelModeEntryTest, LiveContextClaimRejectsAnotherOwnerAndClosePermitsFreshContext) {
+    BorrowedDevice borrowed(device_id_);
+    ASSERT_TRUE(borrowed.ready());
+    void *handle = dlopen(PTO_HOST_RUNTIME_LIB_PATH, RTLD_NOW | RTLD_LOCAL);
+    ASSERT_NE(handle, nullptr) << dlerror();
+    KernelModeApi api{};
+    ASSERT_TRUE(load_kernel_mode_api(handle, api));
+    auto unload = RAIIScopeGuard([&]() {
+        dlclose(handle);
+    });
+    void *owner = api.create_device_context();
+    void *refused = api.create_device_context();
+    void *next = api.create_device_context();
+    auto cleanup = RAIIScopeGuard([&]() {
+        for (void *ctx : {next, refused, owner}) {
+            if (ctx == nullptr) continue;
+            EXPECT_EQ(api.finalize_device(ctx), 0);
+            api.destroy_device_context(ctx);
+        }
+    });
+    ASSERT_NE(owner, nullptr);
+    ASSERT_NE(refused, nullptr);
+    ASSERT_NE(next, nullptr);
+    const RuntimeBinaries binaries;
+    ASSERT_EQ(binaries.init(api, owner, device_id_, 1), 0);
+    EXPECT_EQ(binaries.init(api, refused, device_id_, 2), PTO_RUNTIME_ERR_INVALID_STATE);
+    ChipStorageTaskArgs args{};
+    EXPECT_EQ(api.launch(refused, 0, &args, borrowed.stream()), PTO_RUNTIME_ERR_INVALID_STATE);
+    EXPECT_EQ(api.finalize_device(refused), 0);
+    ASSERT_EQ(api.finalize_device(owner), 0);
+    ASSERT_EQ(binaries.init(api, next, device_id_, 3), 0);
+    ASSERT_EQ(api.finalize_device(next), 0);
+    borrowed.verify_still_usable();
 }
 
 TEST_F(KernelModeEntryTest, MalformedArgumentsAreRejectedBeforeTheStateCheck) {
@@ -258,34 +330,38 @@ TEST_F(KernelModeEntryTest, MalformedArgumentsAreRejectedBeforeTheStateCheck) {
     // Generation zero is the ABI's invalid generation.
     EXPECT_EQ(
         api.init(ctx, device_id_, aicpu.data(), aicpu.size(), nullptr, 0, nullptr, 0, &config, 0),
-        PTO_RUNTIME_ERR_INTERNAL
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
     );
     // A binary and its size describe one object: present-together or absent-together.
-    EXPECT_EQ(api.init(ctx, device_id_, aicpu.data(), 0, nullptr, 0, nullptr, 0, &config, 1), PTO_RUNTIME_ERR_INTERNAL);
     EXPECT_EQ(
-        api.init(ctx, -1, aicpu.data(), aicpu.size(), nullptr, 0, nullptr, 0, &config, 1), PTO_RUNTIME_ERR_INTERNAL
+        api.init(ctx, device_id_, aicpu.data(), 0, nullptr, 0, nullptr, 0, &config, 1), PTO_RUNTIME_ERR_INVALID_ARGUMENT
+    );
+    EXPECT_EQ(
+        api.init(ctx, -1, aicpu.data(), aicpu.size(), nullptr, 0, nullptr, 0, &config, 1),
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
     );
 
     AlignedCallableImage image;
     // A null stream cannot be borrowed.
     EXPECT_EQ(
-        api.prepare_callable(ctx, 0, image.data(), AlignedCallableImage::size(), nullptr), PTO_RUNTIME_ERR_INTERNAL
+        api.prepare_callable(ctx, 0, image.data(), AlignedCallableImage::size(), nullptr),
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
     );
     // Below the size floor the image cannot hold a ChipCallable header.
     EXPECT_EQ(
         api.prepare_callable(ctx, 0, image.data(), sizeof(ChipCallable) - 1, borrowed.stream()),
-        PTO_RUNTIME_ERR_INTERNAL
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
     );
     EXPECT_EQ(
         api.prepare_callable(
             ctx, MAX_REGISTERED_CALLABLE_IDS, image.data(), AlignedCallableImage::size(), borrowed.stream()
         ),
-        PTO_RUNTIME_ERR_INTERNAL
+        PTO_RUNTIME_ERR_INVALID_ARGUMENT
     );
 
     ChipStorageTaskArgs args{};
-    EXPECT_EQ(api.launch(ctx, 0, &args, nullptr), PTO_RUNTIME_ERR_INTERNAL);
-    EXPECT_EQ(api.launch(ctx, -1, &args, borrowed.stream()), PTO_RUNTIME_ERR_INTERNAL);
+    EXPECT_EQ(api.launch(ctx, 0, &args, nullptr), PTO_RUNTIME_ERR_INVALID_ARGUMENT);
+    EXPECT_EQ(api.launch(ctx, -1, &args, borrowed.stream()), PTO_RUNTIME_ERR_INVALID_ARGUMENT);
 
     api.destroy_device_context(ctx);
     dlclose(handle);
@@ -295,27 +371,45 @@ TEST_F(KernelModeEntryTest, MalformedArgumentsAreRejectedBeforeTheStateCheck) {
 // ChipWorker surface: the host half of the wiring.
 // ---------------------------------------------------------------------------
 
-TEST_F(KernelModeEntryTest, WorkerKernelInitReachesTheEntryAndReportsUnsupported) {
+TEST_F(KernelModeEntryTest, WorkerKernelInitAndClosePreserveBorrowedDeviceAndStream) {
     BorrowedDevice borrowed(device_id_);
     ASSERT_TRUE(borrowed.ready());
 
     ChipWorker worker;
     const CallConfig config{};
+    ASSERT_NO_THROW(worker.kernel_init(
+        PTO_HOST_RUNTIME_LIB_PATH, PTO_KERNEL_UT_AICPU_PATH, PTO_KERNEL_UT_AICORE_PATH, PTO_KERNEL_UT_DISPATCHER_PATH,
+        device_id_, config, ChipWorker::next_kernel_context_generation()
+    ));
+
+    EXPECT_TRUE(worker.initialized());
+    EXPECT_EQ(worker.device_id(), device_id_);
+    EXPECT_TRUE(worker.kernel_mode_supported());
+    ChipWorker refused;
     EXPECT_THROW(
-        worker.kernel_init(
+        refused.kernel_init(
             PTO_HOST_RUNTIME_LIB_PATH, PTO_KERNEL_UT_AICPU_PATH, PTO_KERNEL_UT_AICORE_PATH,
             PTO_KERNEL_UT_DISPATCHER_PATH, device_id_, config, ChipWorker::next_kernel_context_generation()
         ),
-        UnsupportedRuntimeOperation
-    ) << "kernel_init must reach simpler_kernel_mode_init and surface its refusal";
+        std::runtime_error
+    );
+    EXPECT_FALSE(refused.initialized());
+    EXPECT_EQ(refused.device_id(), -1);
+    EXPECT_NO_THROW(refused.finalize());
+    EXPECT_TRUE(worker.initialized());
 
-    // A refused init rolls the binding back, so the worker never came up.
-    EXPECT_FALSE(worker.initialized());
-    EXPECT_EQ(worker.device_id(), -1);
+    AlignedCallableImage image;
+    reinterpret_cast<ChipCallable *>(image.bytes)->binary_size_ = 1;
+    EXPECT_THROW(
+        worker.kernel_prepare_callable(0, image.data(), AlignedCallableImage::size(), borrowed.stream()),
+        std::runtime_error
+    );
+    ChipStorageTaskArgs args{};
+    EXPECT_THROW(worker.kernel_launch(0, &args, borrowed.stream()), std::runtime_error);
 
-    // And it stays closable: finalize() is the fifth lifecycle entry for a
-    // kernel context, and it must not fault on one that never initialized.
     EXPECT_NO_THROW(worker.finalize());
+    EXPECT_FALSE(worker.initialized());
+    borrowed.verify_still_usable();
 }
 
 TEST_F(KernelModeEntryTest, WorkerKernelStateMachineRejectsOutOfOrderUse) {

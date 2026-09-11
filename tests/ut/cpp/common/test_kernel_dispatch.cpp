@@ -24,6 +24,10 @@ bool publish_on_invalidate;
 int consumer_result;
 const void *seen_payload;
 uint64_t seen_generation;
+uint64_t seen_binding;
+uint64_t seen_context_generation;
+uint64_t seen_sm_bytes;
+uint64_t seen_arena_bytes;
 struct Packet {
     SimplerKernelDispatchArgs args;
     uint64_t payload;
@@ -38,6 +42,7 @@ protected:
         publish_on_invalidate = false;
         consumer_result = 0;
         seen_generation = 0;
+        seen_binding = seen_context_generation = seen_sm_bytes = seen_arena_bytes = 0;
         packet.args.packet_bytes = sizeof(packet);
         packet.args.residency_address = reinterpret_cast<uint64_t>(&resident);
         packet.args.invocation.mode = SIMPLER_MODE_KERNEL;
@@ -61,9 +66,10 @@ void invalidate_range_impl(const void *address, size_t size) {
 }
 }  // namespace aicpu_cache_maintenance
 int consume_kernel_invocation(
-    const SimplerKernelInvocationHeader &invocation, const KernelCallableDeviceResidency &resident, const void *payload,
+    const SimplerKernelDispatchArgs &args, const KernelCallableDeviceResidency &resident, const void *payload,
     size_t bytes
 ) {
+    const auto &invocation = args.invocation;
     ++consumed;
     EXPECT_GE(invalidations, consumed);
     EXPECT_EQ(bytes, sizeof(uint64_t));
@@ -71,6 +77,10 @@ int consume_kernel_invocation(
     EXPECT_EQ(invocation.generation, resident.generation);
     seen_payload = payload;
     seen_generation = invocation.generation;
+    seen_binding = args.binding_address;
+    seen_context_generation = args.context_generation;
+    seen_sm_bytes = args.sm_bytes;
+    seen_arena_bytes = args.arena_bytes;
     return consumer_result;
 }
 
@@ -81,6 +91,18 @@ TEST_F(KernelDispatch, ValidPacketReachesConsumerAndPropagatesItsResult) {
     EXPECT_EQ(seen_payload, &packet.payload);
     EXPECT_EQ(seen_generation, 17);
     EXPECT_EQ(invalidated_address, &resident);
+}
+
+TEST_F(KernelDispatch, ForwardsContextBindingAndRegionExtentsToRuntimeConsumer) {
+    packet.args.binding_address = 0x200000;
+    packet.args.context_generation = 83;
+    packet.args.sm_bytes = 4096;
+    packet.args.arena_bytes = 8192;
+    EXPECT_EQ(run(), 0);
+    EXPECT_EQ(seen_binding, 0x200000u);
+    EXPECT_EQ(seen_context_generation, 83u);
+    EXPECT_EQ(seen_sm_bytes, 4096u);
+    EXPECT_EQ(seen_arena_bytes, 8192u);
 }
 TEST_F(KernelDispatch, RejectsStaleBeforePayloadOrCodeAccess) {
     packet.args.invocation.generation = 16;
@@ -143,6 +165,9 @@ TEST_F(KernelDispatch, MalformedEnvelopeNeverReadsDescriptor) {
     packet.args.invocation.host_copy_tensor_count = 1;
     EXPECT_EQ(run(), static_cast<int>(KernelDispatchStatus::InvalidArgs));
     packet.args.invocation.host_copy_tensor_count = 0;
+    packet.args.invocation.reserved_ = 1;
+    EXPECT_EQ(run(), static_cast<int>(KernelDispatchStatus::InvalidArgs));
+    packet.args.invocation.reserved_ = 0;
     packet.args.residency_address = 0;
     EXPECT_EQ(run(), static_cast<int>(KernelDispatchStatus::InvalidArgs));
     packet.args.residency_address = std::numeric_limits<uint64_t>::max() - 7;

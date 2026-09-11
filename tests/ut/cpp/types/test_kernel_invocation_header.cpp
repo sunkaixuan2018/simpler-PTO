@@ -22,7 +22,7 @@ TEST(KernelInvocationHeaderWire, ModeValuesArePinned) {
     EXPECT_EQ(SIMPLER_MODE_KERNEL, 1);
 }
 
-TEST(KernelInvocationHeaderWire, SurvivesMemcpyRoundtrip) {
+TEST(KernelInvocationHeaderWire, MatchesWireLayoutAndSurvivesMemcpy) {
     SimplerKernelInvocationHeader header{};
     header.mode = SIMPLER_MODE_KERNEL;
     header.callable_id = 17;
@@ -43,6 +43,13 @@ TEST(KernelInvocationHeaderWire, SurvivesMemcpyRoundtrip) {
     EXPECT_EQ(restored.tensor_count, 12);
     EXPECT_EQ(restored.scalar_count, 5);
     EXPECT_EQ(restored.host_copy_tensor_count, 0);
+    EXPECT_EQ(restored.reserved_, 0u);
+
+    const unsigned char expected[40] = {
+        1, 0, 0, 0, 17, 0, 0, 0, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0, 0x10, 0, 0,
+        0, 0, 0, 0, 12, 0, 0, 0, 5,    0,    0,    0,    0,    0,    0,    0,    0, 0,    0, 0,
+    };
+    EXPECT_EQ(std::memcmp(wire, expected, sizeof(expected)), 0);
 }
 
 TEST(KernelInvocationHeaderWire, ZeroInitializedBlobReadsAsEmpty) {
@@ -54,6 +61,7 @@ TEST(KernelInvocationHeaderWire, ZeroInitializedBlobReadsAsEmpty) {
     EXPECT_EQ(header.tensor_count, 0);
     EXPECT_EQ(header.scalar_count, 0);
     EXPECT_EQ(header.host_copy_tensor_count, 0);
+    EXPECT_EQ(header.reserved_, 0u);
 }
 
 }  // namespace

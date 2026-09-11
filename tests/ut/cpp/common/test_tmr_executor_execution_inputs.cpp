@@ -23,8 +23,12 @@
 #include "aicpu/device_log.h"
 #include "aicpu/platform_aicpu_affinity.h"
 #include "aicpu/platform_regs.h"
+#include "callable.h"
 #include "common/kernel_args.h"
 #include "host_log.h"
+#include "kernel_dispatch_args.h"
+#include "kernel_callable_residency.h"
+#include "tensormap_and_ringbuffer/kernel_dispatch.h"
 #include "tensormap_and_ringbuffer/kernel_execution_inputs.h"
 #include "worker/tmr_kernel_invocation.h"
 
@@ -39,6 +43,11 @@ std::atomic<int> opened_windows{0};
 // platform fixtures supply ready-core reports and idle register windows.
 int platform_aicpu_affinity_thread_idx() { return affinity_index; }
 void platform_aicpu_affinity_set_thread_idx(int index) { affinity_index = index; }
+bool platform_aicpu_affinity_gate_filter(const int32_t *, int32_t count, int32_t) {
+    return affinity_index >= 0 && affinity_index < count;
+}
+extern "C" void set_platform_regs(uint64_t base) { EXPECT_EQ(base, reinterpret_cast<uint64_t>(register_bases.data())); }
+extern "C" void set_platform_pmu_reg_addrs(uint64_t base) { EXPECT_EQ(base, 0u); }
 extern "C" uint64_t get_platform_regs() { return reinterpret_cast<uint64_t>(register_bases.data()); }
 extern "C" uint64_t get_platform_pmu_reg_addrs() { return 0; }
 uint32_t platform_get_physical_cores_count() { return PLATFORM_MAX_CORES; }
@@ -109,6 +118,7 @@ protected:
     void report_ready_cores() {
         opened_windows = 0;
         for (int i = 0; i < 3; ++i) {
+            resident->get_teardown_gates()[i].post_close_release = 0;
             auto &worker = resident->get_workers()[i];
             worker.physical_core_id = i;
             worker.core_type = i == 0 ? CoreType::AIC : CoreType::AIV;
@@ -133,6 +143,65 @@ protected:
         std::thread orchestrator([&] {
             affinity_index = 1;
             results[1] = init_kernel_execution();
+        });
+        scheduler.join();
+        orchestrator.join();
+        return results;
+    }
+
+    std::array<int, 2> dispatch(
+        int id, uint64_t value, bool invalid_binding = false, bool invalid_counts = false, bool dirty_padding = false
+    ) {
+        KernelArgs kernel_binding{};
+        kernel_binding.runtime_args = resident.get();
+        kernel_binding.regs = reinterpret_cast<uint64_t>(register_bases.data());
+        resident->dev.gm_sm_ptr_ = binding.sm.base;
+        resident->dev.prebuilt_arena_base_ = binding.arena.base;
+        resident->dev.prebuilt_runtime_offset_ = binding.runtime_offset;
+        resident->dev.aicpu_allowed_cpu_count = 2;
+        resident->dev.aicpu_launch_count = 2;
+        const TmrExecutionBindingView identity{reinterpret_cast<uint64_t>(&kernel_binding), 13};
+        const ArgDirection signature[] = {ArgDirection::OUT, ArgDirection::SCALAR};
+        auto image = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+            signature, 2, "orchestration", nullptr, 0, nullptr, nullptr, 0, ""
+        );
+        if (dirty_padding) {
+            constexpr size_t padding_begin = offsetof(ChipCallable, config_name_len_) + sizeof(uint32_t);
+            std::memset(image.data() + padding_begin, 0xff, offsetof(ChipCallable, storage_) - padding_begin);
+        }
+        KernelCallableDeviceResidency residency{17, reinterpret_cast<uint64_t>(image.data()), image.size(), id, 0};
+        TmrEncodingCache cache;
+        TmrEncodingCandidate encoded;
+        auto invocation_args = arguments(value);
+        EXPECT_EQ(
+            encode_tmr_invocation(invocation_args, {id, 1, 1, 17}, identity, cache, &encoded), InvocationStatus::Ok
+        );
+        const auto invocation = encoded.packet();
+        const size_t bytes =
+            sizeof(SimplerKernelDispatchArgs) + invocation.size - sizeof(SimplerKernelInvocationHeader);
+        std::vector<uint64_t> storage((bytes + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+        auto *packet = reinterpret_cast<SimplerKernelDispatchArgs *>(storage.data());
+        packet->packet_bytes = bytes;
+        packet->residency_address = reinterpret_cast<uint64_t>(&residency);
+        packet->binding_address = identity.device_binding_addr;
+        packet->context_generation = identity.context_generation + (invalid_binding ? 1 : 0);
+        packet->sm_bytes = binding.sm.capacity;
+        packet->arena_bytes = binding.arena.capacity;
+        std::memcpy(&packet->invocation, invocation.data, sizeof(packet->invocation));
+        std::memcpy(
+            reinterpret_cast<uint8_t *>(packet) + sizeof(*packet), invocation.data + sizeof(packet->invocation),
+            invocation.size - sizeof(packet->invocation)
+        );
+        if (invalid_counts) ++packet->invocation.scalar_count;
+        report_ready_cores();
+        std::array<int, 2> results{};
+        std::thread scheduler([&] {
+            affinity_index = 0;
+            results[0] = simpler_aicpu_kernel_exec(packet);
+        });
+        std::thread orchestrator([&] {
+            affinity_index = 1;
+            results[1] = simpler_aicpu_kernel_exec(packet);
         });
         scheduler.join();
         orchestrator.join();
@@ -354,6 +423,115 @@ TEST_F(TmrExecutorExecutionInputsTest, RejectedAdmissionLeavesActualExecutorInac
     ASSERT_EQ(admit_kernel_execution(packet.packet(), {callable, {}}, binding), InvocationStatus::Ok);
     EXPECT_EQ(kernel_execution_status(), 0);
     release_kernel_execution();
+    EXPECT_EQ(kernel_execution_status(), -1);
+}
+
+TEST_F(TmrExecutorExecutionInputsTest, DispatchEntryExecutesDistinctCallablesAndReleasesBorrowersAcrossABA) {
+    for (bool serial : {false, true}) {
+        resident->dev.serial_orch_sched = serial;
+        for (int id : {3, 4, 3}) {
+            output.fill(0);
+            const auto result = dispatch(id, 71 + id);
+            ASSERT_EQ(result[0], 0);
+            ASSERT_EQ(result[1], 0);
+            EXPECT_EQ(output[0], static_cast<uint64_t>(id));
+            EXPECT_EQ(output[1], static_cast<uint64_t>(71 + id));
+            EXPECT_EQ(output[3], static_cast<uint64_t>(id));
+            EXPECT_EQ(output[4], static_cast<uint64_t>(71 + id));
+            EXPECT_NE(output[2], 0u);
+            EXPECT_EQ(output[2], output[5]);
+            EXPECT_EQ(kernel_execution_status(), -1);
+            EXPECT_EQ(resident->get_active_callable_id(), -1);
+            EXPECT_EQ(resident->get_orch_args().tensor_count(), 0);
+        }
+    }
+}
+
+TEST_F(TmrExecutorExecutionInputsTest, DispatchEntryIgnoresHistoricalCallablePadding) {
+    const auto result = dispatch(3, 71, false, false, true);
+    ASSERT_EQ(result[0], 0);
+    ASSERT_EQ(result[1], 0);
+    EXPECT_EQ(output[0], 3u);
+    EXPECT_EQ(output[1], 71u);
+    EXPECT_EQ(output[3], 3u);
+    EXPECT_EQ(output[4], 71u);
+    EXPECT_EQ(kernel_execution_status(), -1);
+}
+
+TEST_F(TmrExecutorExecutionInputsTest, DispatchAdmissionErrorsDoNotInitializeExecutorAndPermitReuse) {
+    for (bool invalid_binding : {false, true}) {
+        output.fill(0);
+        const auto result = dispatch(3, 9, invalid_binding, !invalid_binding);
+        EXPECT_EQ(result[0], static_cast<int>(KernelDispatchStatus::InvalidArgs));
+        EXPECT_EQ(result[1], static_cast<int>(KernelDispatchStatus::InvalidArgs));
+        EXPECT_EQ(opened_windows.load(), 0);
+        EXPECT_EQ(output[0], 0u);
+        EXPECT_EQ(kernel_execution_status(), -1);
+        for (int core = 0; core < 3; ++core)
+            EXPECT_EQ(resident->get_teardown_gates()[core].post_close_release, AICORE_PRE_WINDOW_HOST_CANCEL);
+        const auto reused = dispatch(3, 91);
+        EXPECT_EQ(reused[0], 0);
+        EXPECT_EQ(reused[1], 0);
+        EXPECT_EQ(output[4], 91u);
+    }
+}
+
+TEST_F(TmrExecutorExecutionInputsTest, DispatchRuntimeFailureReachesEveryThreadAndPermitsReuse) {
+    register_orchestration(5, "orchestration_a", "config_mismatch");
+    const auto result = dispatch(5, 9);
+    EXPECT_NE(result[0], 0);
+    EXPECT_EQ(result[0], result[1]);
+    EXPECT_EQ(kernel_execution_status(), -1);
+    const auto reused = dispatch(4, 92);
+    EXPECT_EQ(reused[0], 0);
+    EXPECT_EQ(reused[1], 0);
+    EXPECT_EQ(output[4], 92u);
+}
+
+TEST_F(TmrExecutorExecutionInputsTest, DispatchResolvesOnlyTheAdmittedCallablesChildTable) {
+    const uint32_t binary = 0;
+    auto child = make_callable<CORE_MAX_TENSOR_ARGS>(nullptr, 0, &binary, sizeof(binary));
+    const int32_t function_id = 77;
+    const ArgDirection signature[] = {ArgDirection::OUT, ArgDirection::SCALAR};
+    auto image = make_callable<CoreCallable, CHIP_MAX_TENSOR_ARGS, 1024>(
+        signature, 2, "orchestration", nullptr, 0, &function_id, &child, 1, ""
+    );
+    auto *callable = reinterpret_cast<ChipCallable *>(image.data());
+    auto *resident_child = reinterpret_cast<CoreCallable *>(callable->storage_ + callable->child_offsets_[0]);
+    resident_child->set_resolved_addr(reinterpret_cast<uint64_t>(resident_child->binary_data()));
+    KernelCallableDeviceResidency residency{17, reinterpret_cast<uint64_t>(image.data()), image.size(), 3, 0};
+
+    resident->dev.gm_sm_ptr_ = binding.sm.base;
+    resident->dev.prebuilt_arena_base_ = binding.arena.base;
+    resident->dev.prebuilt_runtime_offset_ = binding.runtime_offset;
+    resident->dev.func_id_to_addr_[function_id] = 0xdeadbeef;
+    TmrEncodingCache cache;
+    TmrEncodingCandidate encoded;
+    auto invocation_args = arguments(31);
+    ASSERT_EQ(
+        encode_tmr_invocation(invocation_args, {3, 1, 1, 17}, binding.identity, cache, &encoded), InvocationStatus::Ok
+    );
+    const auto invocation = encoded.packet();
+    const size_t bytes = offsetof(SimplerKernelDispatchArgs, invocation) + invocation.size;
+    std::vector<uint64_t> storage((bytes + sizeof(uint64_t) - 1) / sizeof(uint64_t));
+    auto *packet = reinterpret_cast<SimplerKernelDispatchArgs *>(storage.data());
+    packet->binding_address = binding.identity.device_binding_addr;
+    packet->context_generation = binding.identity.context_generation;
+    packet->sm_bytes = binding.sm.capacity;
+    packet->arena_bytes = binding.arena.capacity;
+    std::memcpy(
+        reinterpret_cast<uint8_t *>(packet) + offsetof(SimplerKernelDispatchArgs, invocation), invocation.data,
+        invocation.size
+    );
+    KernelDispatchGroup group;
+    ASSERT_EQ(admit_kernel_dispatch(*packet, residency, resident.get(), group), InvocationStatus::Ok);
+    EXPECT_EQ(group.functions[function_id], reinterpret_cast<uint64_t>(resident_child));
+    EXPECT_EQ(group.functions[function_id + 1], 0u);
+    EXPECT_EQ(resident->dev.func_id_to_addr_[function_id], 0xdeadbeefu);
+    release_kernel_execution();
+
+    callable->child_offsets_[0] = static_cast<uint32_t>(image.size());
+    EXPECT_EQ(admit_kernel_dispatch(*packet, residency, resident.get(), group), InvocationStatus::InvalidBinding);
     EXPECT_EQ(kernel_execution_status(), -1);
 }
 

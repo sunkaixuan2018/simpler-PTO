@@ -68,7 +68,9 @@
 #include "host/host_phase_records.h"
 #include "host/execution_mode_latch.h"
 #include "host/kernel_execution_state.h"
+#include "host/kernel_context_claim.h"
 #include "host/kernel_callable_cache.h"
+#include "worker/kernel_dispatch_packet.h"
 #include "kernel_persistent_args.h"
 #include "host/kernel_static_config.h"
 #include "host/memory_allocator.h"
@@ -142,10 +144,12 @@ public:
 
     /**
      * This context's execution identity, latched once by whichever init entry
-     * constructs it. Every kernel-mode guard on the ACL-lifecycle and arena
-     * paths keys on is_kernel(); `attach_current_thread` refuses outright on a
-     * kernel latch, which is what keeps the program-mode entries and the
-     * per-thread device bind off a borrowed device.
+     * constructs it. Every kernel-mode guard on the ACL-lifecycle and capacity
+     * paths keys on is_kernel() — the pooled arena regions here, and the trb
+     * retained temporary buffer through HostApiOps::is_kernel_mode, which
+     * carries this same latch into runtime code. `attach_current_thread`
+     * refuses outright on a kernel latch, which is what keeps the program-mode
+     * entries and the per-thread device bind off a borrowed device.
      */
     ExecutionModeLatch &execution_mode_latch() { return execution_mode_latch_; }
 
@@ -167,7 +171,9 @@ public:
      * context's persistent argument blocks exist. Idempotent in the part that
      * matters: only the first callable pays for the argument blocks.
      */
-    int prepare_kernel_callable(int32_t callable_id, const HostApi *api);
+    int prepare_kernel_callable(int32_t callable_id, const HostApi *api, void *caller_stream);
+    int launch_kernel_callable(int32_t callable_id, const ChipStorageTaskArgs &args, void *caller_stream);
+    std::mutex &kernel_submission_mutex() { return kernel_submission_mutex_; }
     KernelCallableCache &kernel_callable_cache() { return kernel_callable_cache_; }
     KernelCallableCache::Ops kernel_callable_cache_ops();
 
@@ -213,15 +219,19 @@ public:
      * is 0 for the hbg path (no prebuilt runtime arena) — the
      * corresponding arena stays uncommitted.
      *
-     * On failure to commit a later region, earlier committed regions are
-     * rolled back (a5's prior semantics). This is the safer default: a
+     * An allocation failure on any region rolls the whole bank back,
+     * earlier committed peers included. This is the safer default: a
      * partial commit otherwise leaves the caller with pooled pointers
      * that survive a "failure" return, masking the real error and risking
-     * later mismatched-arena bugs. (The a2a3 implementation that
-     * previously kept earlier committed peers alive on failure is
-     * normalized away.)
+     * later mismatched-arena bugs.
      *
-     * @return 0 on success, -1 on failure.
+     * A kernel-mode context's refusal to re-base or release a committed
+     * region is the one failure that does not roll back — every region
+     * stays committed and every cached size stays intact, because the
+     * rollback would free the addresses the refusal exists to hold still.
+     * A caller distinguishes the two by mode, not by the return code.
+     *
+     * @return 0 on success, PTO_RUNTIME_ERR_INTERNAL on failure.
      */
     int setup_static_arena(uint32_t arena_bank, size_t gm_heap_size, size_t gm_sm_size, size_t runtime_arena_size);
 
@@ -1213,6 +1223,7 @@ protected:
         // common
         std::vector<std::pair<int, uint64_t>> kernel_addrs;
         std::vector<ArgDirection> signature;
+        simpler::kernel::KernelDispatchPacket kernel_packet;
         // hbg path (host already dlopen'd the orch SO)
         void *host_dlopen_handle{nullptr};
         void *host_orch_func_ptr{nullptr};
@@ -1274,6 +1285,11 @@ protected:
     KernelExecutionState kernel_exec_state_;
     PersistentKernelArgs persistent_args_;
     KernelStaticConfig kernel_static_config_;
+    KernelContextClaim kernel_context_claim_;
+    std::mutex kernel_submission_mutex_;
+    uintptr_t kernel_previous_caller_{0};
+    bool kernel_prepare_pending_{false};
+    rtFuncHandle kernel_aicpu_handle_{nullptr};
     // The Runtime image a kernel-mode context uploads once. Its per-callable
     // and per-invocation fields stay at the sentinels Runtime() sets; binding
     // a callable into it is a later step's work.

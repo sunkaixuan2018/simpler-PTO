@@ -264,8 +264,8 @@ public:
     // Pack the run's non-child, non-empty tensors to compute the required
     // aligned size, then grow the retained slot if it is too small (free old +
     // malloc new + write back). Returns false when that device_malloc fails,
-    // and when a kernel-mode context would have to grow at all. A run needing
-    // 0 bytes leaves the slot untouched.
+    // and when a kernel-mode context would have to grow a slot that already
+    // holds a buffer. A run needing 0 bytes leaves the slot untouched.
     bool begin(const HostApi *api, const ChipStorageTaskArgs *orch_args) {
         api_ = api;
         offset_ = 0;
@@ -280,12 +280,14 @@ public:
         void *addr = nullptr;
         size_t size = 0;
         api->get_retained_temp_buffer(&addr, &size);
-        if (required > size && api->is_kernel_mode()) {
-            // A kernel-mode context's device buffers keep their addresses for
-            // the context's life, and a captured graph replays the slices this
-            // one handed out. Growing is free + malloc, which re-bases them, so
-            // the run is refused ahead of the free and the slot stays exactly
-            // as the previous run left it.
+        if (required > size && addr != nullptr && api->is_kernel_mode()) {
+            // A kernel-mode context's retained buffer keeps its address for the
+            // context's life, and a captured graph replays the slices it handed
+            // out. Growing is free + malloc, which re-bases every one of them,
+            // so the run is refused ahead of the free and the slot stays
+            // exactly as the previous run left it. An empty slot holds no
+            // address to preserve, so the context's first allocation is not a
+            // re-base and is taken normally.
             LOG_ERROR(
                 "Retained temp buffer is context-static in kernel mode: this run needs %zu bytes, the retained "
                 "buffer holds %zu",
@@ -511,16 +513,8 @@ int configure_kernel_runtime_impl(Runtime &runtime, bool serial_orch_sched) {
     return 0;
 }
 
-// A kernel-mode launch needs three things this runtime does not yet have:
-// the pooled arena committed on the kernel path (prepare_kernel_callable
-// never reaches setup_static_arena, so kernel_runtime_ carries no heap, no
-// shared memory and no prebuilt arena), a device binding address published
-// from that arena, and a consume_kernel_invocation that reaches
-// admit/init/run_kernel_execution instead of the shared UnsupportedPayload
-// default. Until those land a launch cannot be serviced, and reporting
-// otherwise would let a caller that gates on this entry enlist a launch
-// that must fail.
-extern "C" int runtime_supports_kernel_launch_impl(void) { return 0; }
+// The device consumer executes validated snapshots on the prepared context.
+extern "C" int runtime_supports_kernel_launch_impl(void) { return 1; }
 
 extern "C" int build_kernel_pipeline_contract_impl(const CallConfig *config, PipelineContract *out) {
     if (config == nullptr || out == nullptr) return PTO_RUNTIME_ERR_INTERNAL;
@@ -1111,7 +1105,9 @@ extern "C" int validate_runtime_impl(Runtime *runtime, const HostApi *api, int e
 // device, so it exports simpler_aicpu_register_callable; the common AICPU loader
 // queries this so it carries no runtime-specific symbol knowledge.
 extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count) {
-    static const char *const kExtra[] = {"simpler_aicpu_register_callable", "simpler_aicpu_query_topology", "simpler_aicpu_kernel_exec"};
+    static const char *const kExtra[] = {
+        "simpler_aicpu_register_callable", "simpler_aicpu_query_topology", "simpler_aicpu_kernel_exec"
+    };
     if (count != nullptr) {
         *count = sizeof(kExtra) / sizeof(kExtra[0]);
     }

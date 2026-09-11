@@ -12,6 +12,7 @@
 #pragma once
 
 #include "worker/runtime_c_api.h"
+#include "worker/pipeline_contract.h"
 
 // Internal host-runtime hook, not a dlsym lifecycle API. Input is borrowed and
 // immutable during the call; output is caller-exclusive and unchanged on error.
@@ -35,3 +36,25 @@ int prepare_kernel_runtime_impl(Runtime &runtime, const HostApi *api, const Call
 // capability entry reports this, so a caller that gates on it never reaches a
 // launch the runtime cannot service.
 extern "C" int runtime_supports_kernel_launch_impl(void);
+
+// Borrowed, call-local role bindings; no stream is created or retained here.
+// Caller, dedicated AICPU and hidden AICore are three distinct streams.
+struct KernelStreamBinding {
+    void *caller_stream{nullptr};
+    void *aicpu_stream{nullptr};
+    void *aicore_stream{nullptr};
+};
+
+inline int bind_kernel_stream_roles(
+    const PipelineContract *contract, void *caller_stream, void *aicpu_stream, void *hidden_aicore_stream,
+    KernelStreamBinding &out
+) {
+    if (!is_valid_pipeline_contract(contract, SIMPLER_MODE_KERNEL) || !has_serviceable_arena_topology(*contract) ||
+        !has_serviceable_stream_topology(*contract) || caller_stream == nullptr || hidden_aicore_stream == nullptr ||
+        aicpu_stream == nullptr || caller_stream == aicpu_stream || caller_stream == hidden_aicore_stream ||
+        aicpu_stream == hidden_aicore_stream) {
+        return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    out = {caller_stream, aicpu_stream, hidden_aicore_stream};
+    return 0;
+}

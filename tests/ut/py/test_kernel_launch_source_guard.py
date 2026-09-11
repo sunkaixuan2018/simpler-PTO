@@ -18,6 +18,7 @@ SOURCES = (
     "src/common/platform/onboard/host/kernel_launch_binder.cpp",
     "src/common/platform/onboard/host/kernel_launch_native.cpp",
     "src/common/platform/onboard/host/kernel_launch_sequence.h",
+    "src/common/platform/onboard/host/kernel_launch_owner.cpp",
 )
 ALLOWED_ACL = {
     "aclrtQueryEventStatus",
@@ -26,12 +27,14 @@ ALLOWED_ACL = {
     "aclrtMemsetAsync",
     "aclrtLaunchKernel",
     "aclrtLaunchKernelWithHostArgs",
+    "rtKernelLaunchWithHandleV2",
+    "rtsLaunchCpuKernel",
 }
 
 
 def violations(source):
     code = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
-    calls = set(re.findall(r"\b((?:aclrt|acl|rt)[A-Z]\w*)\s*\(", code))
+    calls = set(re.findall(r"\b((?:aclrt|acl|rts|rt)[A-Z]\w*)\s*\(", code))
     banned = re.findall(
         r"\b(?:malloc|calloc|realloc|free|make_graph_host_args|submit_graph_template)\s*\("
         r"|\b(?:new|delete)\b|std::(?:vector|make_unique|make_shared)\b",

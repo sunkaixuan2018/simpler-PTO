@@ -45,6 +45,15 @@
 
 #include "arg_direction.h"
 
+// signature contains sig_count validated entries.
+inline int32_t count_scalar_args(const ArgDirection *signature, int32_t sig_count) {
+    int32_t scalar_count = 0;
+    for (int32_t i = 0; i < sig_count; ++i) {
+        if (signature[i] == ArgDirection::SCALAR) ++scalar_count;
+    }
+    return scalar_count;
+}
+
 // ============================================================================
 // Forward declaration
 // ============================================================================
@@ -109,20 +118,6 @@ struct Callable {
     int32_t child_count_;
     char config_name_[CALLABLE_FUNC_NAME_MAX];
     uint32_t config_name_len_;
-    // Cached derivation of the signature: the number of ArgDirection::SCALAR
-    // entries in signature_[0..sig_count_). The factory rejects a nonzero
-    // value that disagrees with the signature; 0 additionally means "not
-    // recorded", which a legacy blob and a scalar-free orchestration share.
-    // sig_count_ includes the scalar entries, so a consumer derives the
-    // effective count first — this field when nonzero, otherwise the
-    // signature's SCALAR entries, the split count_callable_tensor_args
-    // already computes — and takes sig_count_ minus that as the tensor
-    // comparandum. Subtracting this field directly counts an unrecorded
-    // callable's scalars as tensors. Occupies
-    // four bytes of the historical padding between config_name_len_ and the
-    // 16-byte-aligned storage_, so every other field keeps its wire offset
-    // and a legacy zero-initialized blob reads as scalar_count == 0.
-    int32_t scalar_count_;
     // Children live in storage_ at CALLABLE_ALIGN-aligned offsets, but the
     // all-uint32 header above can leave offsetof(storage_) at 4-mod-8, which
     // would place an 8-byte-aligned Child (CoreCallable has a uint64) on a
@@ -144,9 +139,15 @@ struct Callable {
     uint32_t func_name_len() const { return func_name_len_; }
     const char *config_name() const { return config_name_; }
     uint32_t config_name_len() const { return config_name_len_; }
-    // 0 means either an artifact built before this field existed or an
-    // orchestration that takes no scalars; the two are indistinguishable.
-    int32_t scalar_count() const { return scalar_count_; }
+    int32_t scalar_count() const {
+        if (sig_count_ < 0 || sig_count_ > MaxSig) {
+            throw std::invalid_argument(
+                "Callable: signature count " + std::to_string(sig_count_) + " is outside the supported range [0, " +
+                std::to_string(MaxSig) + "]"
+            );
+        }
+        return count_scalar_args(signature_, sig_count_);
+    }
 
     const Child &child(int32_t i) const {
         if (i < 0 || i >= child_count_) throw std::out_of_range("Callable: child index out of range");
@@ -167,9 +168,9 @@ private:
 
     template <typename C, int MS, int MC>
     friend std::vector<uint8_t> make_callable(
-        const ArgDirection *sig, int32_t sig_count, int32_t scalar_count, const char *func_name, const void *binary,
-        uint32_t binary_size, const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers,
-        int32_t child_count, const char *config_name
+        const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
+        const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
+        const char *config_name
     );
 };
 
@@ -196,8 +197,7 @@ static_assert(
 );
 
 // Callable bytes are shipped through L3/L4 IPC and the on-disk kernel cache,
-// so the header layout is wire ABI. scalar_count_ must consume tail padding
-// rather than move any historical field. The constants below encode
+// so the header layout is wire ABI. The constants below encode
 // CHIP_MAX_TENSOR_ARGS = 256, CORE_MAX_TENSOR_ARGS = 32,
 // CALLABLE_FUNC_NAME_MAX = 64, and MaxChildren = 1024; a deliberate capacity
 // change updates them in the same commit.
@@ -221,7 +221,6 @@ static_assert(offsetof(ChipCallable, config_name_) == 9296, "ChipCallable wire A
 static_assert(
     offsetof(ChipCallable, config_name_len_) == 9360, "ChipCallable wire ABI: config_name_len offset changed"
 );
-static_assert(offsetof(ChipCallable, scalar_count_) == 9364, "ChipCallable wire ABI: scalar_count offset changed");
 static_assert(offsetof(ChipCallable, storage_) == 9376, "ChipCallable wire ABI: storage offset changed");
 static_assert(sizeof(ChipCallable) == 9376, "ChipCallable wire ABI: header size changed");
 static_assert(offsetof(CoreCallable, signature_) == 0, "CoreCallable wire ABI: signature offset changed");
@@ -271,8 +270,8 @@ make_callable(const ArgDirection *sig, int32_t sig_count, const void *binary, ui
 
 template <typename Child, int MaxSig, int MaxChildren>
 std::vector<uint8_t> make_callable(
-    const ArgDirection *sig, int32_t sig_count, int32_t scalar_count, const char *func_name, const void *binary,
-    uint32_t binary_size, const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
+    const ArgDirection *sig, int32_t sig_count, const char *func_name, const void *binary, uint32_t binary_size,
+    const int32_t *child_func_ids, const std::vector<uint8_t> *child_buffers, int32_t child_count,
     // No default arg here: the friend declaration above has none, so a default
     // on this definition is a "redeclaration may not have default arguments"
     // error once ChipCallable is instantiated (the static_assert below does
@@ -285,27 +284,6 @@ std::vector<uint8_t> make_callable(
             "make_callable: requested tensor count " + std::to_string(sig_count) + " exceeds supported tensor count " +
             std::to_string(MaxSig)
         );
-    }
-    if (scalar_count < 0 || scalar_count > CHIP_MAX_SCALAR_ARGS) {
-        throw std::invalid_argument(
-            "make_callable: requested scalar count " + std::to_string(scalar_count) +
-            " is outside the supported range [0, " + std::to_string(CHIP_MAX_SCALAR_ARGS) + "]"
-        );
-    }
-    // scalar_count is a cached derivation of the signature, so a nonzero
-    // value must match the signature's SCALAR entries; 0 stays valid with any
-    // signature because it also means "not recorded" (legacy semantics).
-    if (scalar_count != 0) {
-        int32_t signature_scalars = 0;
-        for (int32_t i = 0; i < sig_count; ++i) {
-            if (sig[i] == ArgDirection::SCALAR) ++signature_scalars;
-        }
-        if (scalar_count != signature_scalars) {
-            throw std::invalid_argument(
-                "make_callable: requested scalar count " + std::to_string(scalar_count) +
-                " disagrees with the signature's " + std::to_string(signature_scalars) + " SCALAR entries"
-            );
-        }
     }
     if (child_count > MaxChildren) throw std::invalid_argument("make_callable: child_count exceeds MaxChildren");
 
@@ -326,7 +304,6 @@ std::vector<uint8_t> make_callable(
     for (int32_t i = 0; i < sig_count; ++i)
         obj->signature_[i] = sig[i];
     obj->sig_count_ = sig_count;
-    obj->scalar_count_ = scalar_count;
     obj->binary_size_ = binary_size;
 
     // Store func_name (null-terminated, truncated to CALLABLE_FUNC_NAME_MAX-1)

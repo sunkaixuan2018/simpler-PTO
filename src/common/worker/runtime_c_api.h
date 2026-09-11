@@ -30,9 +30,7 @@
  *                   simpler_unregister_callable,
  *                   get_aicpu_dlopen_count, get_host_dlopen_count,
  *                   get_run_stream_set_create_count
- *   - kernel mode:  simpler_kernel_mode_supported, simpler_kernel_mode_init,
- *                   simpler_kernel_mode_prepare_callable,
- *                   simpler_kernel_mode_launch
+ *   - kernel probe: simpler_kernel_mode_supported
  *   - pipeline:     get_pipeline_contract,
  *                   supports_concurrent_native_prepare_ctx,
  *                   get_arena_bank_gm_heap_base_ctx,
@@ -42,14 +40,18 @@
  *   - comm:         comm_init, comm_alloc_windows, comm_get_local_window_base,
  *                   comm_get_window_size, comm_barrier, comm_destroy
  *
- * Native-run storage: caller allocates at least get_runtime_size() bytes with
- * get_runtime_alignment() alignment, zero-initializes it before first use, and
- * keeps its address stable from prepare through finalize. After finalize the
- * same storage may be reused without re-zeroing. The storage must not be moved,
- * copied, or used for overlapping runs while it contains a prepared run. The
- * caller must serialize phase functions for a given context/storage pair;
- * poll/wait/finalize are not concurrent operations on the same run.
- * Error codes: 0 = success, negative = error — see the two disjoint negative
+ * Capability-dependent API: every host_runtime.so exports kernel init,
+ * prepare_callable, and launch. ChipWorker
+ * requires those three symbols only
+ * when simpler_kernel_mode_supported returns nonzero.
+ *
+ * Native-run storage:
+ * caller allocates at least get_runtime_size() bytes with
+ * get_runtime_alignment() alignment, zero-initializes it
+ * before first use, and keeps its address stable from prepare through finalize. After finalize the same storage may be
+ * reused without re-zeroing. The storage must not be moved, copied, or used for overlapping runs while it contains a
+ * prepared run. The caller must serialize phase functions for a given context/storage pair; poll/wait/finalize are not
+ * concurrent operations on the same run. Error codes: 0 = success, negative = error — see the two disjoint negative
  * bands documented on the PTO_RUNTIME_ERR_* enum below.
  */
 
@@ -120,6 +122,9 @@ enum {
     PTO_RUNTIME_ERR_CALLABLE_BYTES_EXCEEDED = PTO_RUNTIME_ERR_BASE - 5,
     PTO_RUNTIME_ERR_CALLABLE_NOT_RESIDENT = PTO_RUNTIME_ERR_BASE - 6,
     PTO_RUNTIME_ERR_CALLABLE_STALE = PTO_RUNTIME_ERR_BASE - 7,
+    PTO_RUNTIME_ERR_CAPACITY_EXCEEDED = PTO_RUNTIME_ERR_BASE - 8,
+    /* A caller supplied an invalid pointer, id, size, or serialized argument. */
+    PTO_RUNTIME_ERR_INVALID_ARGUMENT = PTO_RUNTIME_ERR_BASE - 9,
 };
 
 /** Return values from simpler_poll_run(). */
@@ -571,25 +576,40 @@ size_t get_run_stream_set_create_count(DeviceContextHandle ctx);
  *
  * Kernel-mode capacity is a mode invariant, not a gated state: `config` is
  * context-static, so each pooled arena region is committed at most once and
- * never grown or released afterwards. The platform arena reports a growth or
- * release request under kernel mode as an internal invariant break
- * (PTO_RUNTIME_ERR_INTERNAL), and capacity intent travels in
+ * never grown or released afterwards, and the trb retained temporary buffer is
+ * allocated at most once. Both report a request that would re-base or release
+ * what they already hold as a capacity invariant break
+ * (PTO_RUNTIME_ERR_CAPACITY_EXCEEDED), and capacity intent
+ * travels in
  * CallConfig.runtime_env like everywhere else.
  *
- * All four entries below are part of the required dlsym surface: every
- * host_runtime.so exports them. Onboard implements init and prepare; launch
- * remains a rejecting stub and supported returns 0. Simulated init reports
- * PTO_RUNTIME_ERR_UNSUPPORTED; simulated prepare and launch report
- * PTO_RUNTIME_ERR_INVALID_STATE after structural validation.
- * The fifth lifecycle entry is the existing
- * finalize_device(): in kernel mode it must release only context-owned
- * resources and never reset the device or finalize ACL. Onboard kernel init
- * records the borrowed device id, allowing explicit close to release the
- * context-owned resources while the kernel-mode latch guards device reset.
+ * Every host_runtime.so exports all four entries below. Consumers always
+ * require the capability probe, and require
+ * the other three symbols only
+ * when it returns nonzero. Onboard TMR implements init, prepare and launch
+ * and
+ * reports supported=1. HBG and simulated kernel execution report
+ * supported=0: init returns
+ * PTO_RUNTIME_ERR_UNSUPPORTED, while prepare and
+ * launch on the uninitialized context return
+ * PTO_RUNTIME_ERR_INVALID_STATE.
+ * The fifth lifecycle entry is the existing finalize_device(): in kernel mode it must
+ * release only context-owned resources and never reset the device or finalize ACL. Onboard kernel init records the
+ * borrowed device id, allowing explicit close to release the context-owned resources while the kernel-mode latch guards
+ * device reset.
  *
- * These entries accept only POD structs, serialized blobs, and device/stream
- * pointers — never framework objects. The caller stream is always an explicit
- * parameter and is never stored beyond the call or destroyed by simpler.
+ * Structural argument errors return PTO_RUNTIME_ERR_INVALID_ARGUMENT before
+ * capability or lifecycle checks; a launch
+ * id above the cache limit retains
+ * the more specific PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED result.
+ * These
+ * entries accept only POD structs, serialized blobs, and device/stream
+ * pointers. The caller stream is explicit and
+ * never destroyed by simpler.
+ * Its identity is retained to order consecutive submissions, so the caller
+ * must keep
+ * it alive through completion of its submitted work.
+ *
  * =========================================================================== */
 
 /** Return nonzero when this runtime/context can execute kernel-mode launches. */
@@ -647,8 +667,7 @@ int simpler_kernel_mode_init(
  * stream is borrowed for this call only.
  */
 int simpler_kernel_mode_prepare_callable(
-    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size,
-    void *caller_stream
+    DeviceContextHandle ctx, int32_t callable_id, const void *callable, size_t callable_size, void *caller_stream
 );
 
 /**
@@ -670,9 +689,7 @@ int simpler_kernel_mode_prepare_callable(
  * implementation's obligation. A return of 0 means the sequence was enqueued;
  * device execution may still be in flight and may still fail asynchronously.
  */
-int simpler_kernel_mode_launch(
-    DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream
-);
+int simpler_kernel_mode_launch(DeviceContextHandle ctx, int32_t callable_id, const void *args, void *caller_stream);
 
 #ifdef __cplusplus
 }

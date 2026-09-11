@@ -16,11 +16,10 @@
  * The header is the shared envelope both runtimes use; the payload format
  * under it belongs to each runtime (tensormap_and_ringbuffer carries
  * graph-build input, host_build_graph carries a serialized graph blob) and is
- * not constrained here. Validating identity, generation, and capacity against
- * this header before dispatching to the runtime payload consumer is the AICPU
- * dispatch entry's obligation: that validation lives with the consumers, not
- * in this header. simpler_aicpu_kernel_exec validates the envelope and device
- * residency before handing the payload to its runtime consumer.
+ * not constrained here. AICPU dispatch consumers must validate identity,
+ * generation, and capacity before consuming the payload, and reject nonzero
+ * host_copy_tensor_count or reserved_. Producers must zero-initialize the
+ * complete header before assigning invocation fields.
  *
  * Both sides of this wire are produced by the same build (`build_runtimes.py`
  * emits the host runtime and the AICPU executor into one
@@ -32,6 +31,7 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "execution_mode.h"
@@ -46,27 +46,19 @@ typedef struct SimplerKernelInvocationHeader {
        generation starts at 1, matching PipelineSlotLease and CanonicalIdentity.
        The comparison belongs on the AICPU dispatch path because replay does
        not return to the host, so a stale captured snapshot has to be caught
-       on-device. KernelCallableCache mints it from the context generation; slots are
-       never reused within a context. KernelCallableDeviceResidency holds the
-       device-side comparand. The runtime invocation consumer must call
-       kernel_callable_residency_matches before dereferencing callable code. */
+       on-device. */
     uint64_t generation;
     /* Byte length of the runtime-specific payload that follows this header. */
     uint64_t payload_bytes;
-    /* Arg counts of this invocation. ChipCallable's sig_count includes the
-       scalar entries, and its scalar_count() reads 0 both for a scalar-free
-       orchestration and for an artifact built before that field existed, so
-       a consumer derives the effective scalar count first — scalar_count()
-       when nonzero, otherwise the signature's ArgDirection::SCALAR entries —
-       then checks tensor_count against sig_count minus it and scalar_count
-       against it. Subtracting scalar_count() directly would count an
-       unrecorded callable's scalars as tensors. */
+    /* Arg counts of this invocation. ChipCallable's sig_count includes both
+       tensors and scalars. Consumers count its ArgDirection::SCALAR entries,
+       compare scalar_count with that count, and compare tensor_count with
+       sig_count minus that count. */
     int32_t tensor_count;
     int32_t scalar_count;
-    /* Count of host-only duplicate tensor args (a tensor the host must read
-       is passed twice: a device arg plus a host-only copy). Zero until the
-       host-only copy contract lands; consumers reject nonzero meanwhile. */
+    /* Reserved host-only duplicate tensor count; must be zero. */
     int32_t host_copy_tensor_count;
+    uint32_t reserved_; /* Must be zero. */
 } SimplerKernelInvocationHeader;
 
 #ifdef __cplusplus
@@ -76,4 +68,13 @@ static_assert(
     std::is_trivially_copyable_v<SimplerKernelInvocationHeader> &&
     std::is_standard_layout_v<SimplerKernelInvocationHeader>
 );
+static_assert(sizeof(SimplerKernelInvocationHeader) == 40);
+static_assert(offsetof(SimplerKernelInvocationHeader, mode) == 0);
+static_assert(offsetof(SimplerKernelInvocationHeader, callable_id) == 4);
+static_assert(offsetof(SimplerKernelInvocationHeader, generation) == 8);
+static_assert(offsetof(SimplerKernelInvocationHeader, payload_bytes) == 16);
+static_assert(offsetof(SimplerKernelInvocationHeader, tensor_count) == 24);
+static_assert(offsetof(SimplerKernelInvocationHeader, scalar_count) == 28);
+static_assert(offsetof(SimplerKernelInvocationHeader, host_copy_tensor_count) == 32);
+static_assert(offsetof(SimplerKernelInvocationHeader, reserved_) == 36);
 #endif

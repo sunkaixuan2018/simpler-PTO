@@ -121,6 +121,28 @@ TEST(TmrKernelInvocation, ConsumptionRejectsBeforeChangingCallerStorage) {
     EXPECT_EQ(storage.scalar(0), 19u);
 }
 
+TEST(TmrKernelInvocation, ReservedHeaderBytesRejectBeforeChangingCallerStorage) {
+    const auto args = make_args();
+    TmrEncodingCache cache;
+    TmrEncodingCandidate encoded;
+    ASSERT_EQ(encode_tmr_invocation(args, kCallable, kBinding, cache, &encoded), InvocationStatus::Ok);
+    const auto source = encoded.packet();
+    std::vector<uint8_t> packet(source.data, source.data + source.size);
+    const uint32_t reserved = UINT32_MAX;
+    std::memcpy(packet.data() + offsetof(SimplerKernelInvocationHeader, reserved_), &reserved, sizeof(reserved));
+    EntryArgsStorage storage{};
+    storage.scalar_count_ = 1;
+    storage.scalars_[0] = 1234;
+    EXPECT_EQ(
+        consume_tmr_invocation({packet.data(), packet.size()}, kCallable, kBinding, &storage),
+        InvocationStatus::InvalidHeader
+    );
+    EXPECT_EQ(storage.scalar_count(), 1);
+    EXPECT_EQ(storage.scalar(0), 1234u);
+    ASSERT_EQ(consume_tmr_invocation(source, kCallable, kBinding, &storage), InvocationStatus::Ok);
+    EXPECT_EQ(storage.scalar(0), 19u);
+}
+
 TEST(TmrKernelInvocation, RetainedCacheIsBoundedAcrossRepeatedInvocations) {
     TmrEncodingCache cache;
     size_t expected_bytes = 0;

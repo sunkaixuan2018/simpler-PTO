@@ -68,6 +68,11 @@ extern "C" const char *const *runtime_extra_aicpu_symbols(size_t *count);
 
 namespace {
 
+KernelContextClaimRegistry &kernel_context_claim_registry() {
+    static KernelContextClaimRegistry registry;
+    return registry;
+}
+
 HostRuntimeTimeoutConfig resolve_onboard_timeout_config() {
     RuntimeTimeoutConfig order_defaults{
         PLATFORM_OP_EXECUTE_TIMEOUT_US, PLATFORM_STREAM_SYNC_TIMEOUT_MS, PLATFORM_SCHEDULER_TIMEOUT_MS
@@ -433,7 +438,7 @@ int DeviceRunnerBase::attach_current_thread(int device_id) {
     // skips this call on a kernel latch.
     if (execution_mode_latch().is_kernel()) {
         LOG_ERROR("attach_current_thread: refused — a kernel-mode context does not own the caller's device");
-        return PTO_RUNTIME_ERR_UNSUPPORTED;
+        return PTO_RUNTIME_ERR_INVALID_STATE;
     }
 
     int rc = bind_current_thread(device_id);
@@ -474,6 +479,15 @@ int DeviceRunnerBase::adopt_borrowed_device(int device_id) {
     if (device_id_ != -1 && device_id_ != device_id) {
         LOG_ERROR("DeviceRunner already on device %d; close before adopting device %d", device_id_, device_id);
         return PTO_RUNTIME_ERR_INTERNAL;
+    }
+    int current_device = -1;
+    const int rc = aclrtGetDevice(&current_device);
+    if (rc != 0) return rc;
+    if (current_device != device_id) {
+        LOG_ERROR(
+            "Kernel context requires current device %d, but this thread has device %d", device_id, current_device
+        );
+        return PTO_RUNTIME_ERR_INVALID_STATE;
     }
     if (device_id_ == -1) {
         timeout_config_ = resolve_onboard_timeout_config();
@@ -567,10 +581,26 @@ int DeviceRunnerBase::init_kernel_context(int device_id, const CallConfig &confi
     const bool serial = serial_env && (serial_env[0] == '1' || serial_env[0] == 't' || serial_env[0] == 'T');
     int rc = kernel_static_config_.initialize(&config, context_generation, serial);
     if (rc != 0) return rc;
+    if (aicpu_so_binary_.empty()) return PTO_RUNTIME_ERR_INVALID_STATE;
+    const uint64_t runtime_fingerprint =
+        simpler::common::utils::elf_build_id_64(aicpu_so_binary_.data(), aicpu_so_binary_.size());
+    rc = kernel_context_claim_.acquire(kernel_context_claim_registry(), device_id, runtime_fingerprint);
+    if (rc != 0) {
+        LOG_ERROR(
+            "init_kernel_context: one live kernel context is allowed per host runtime SO, device and device runtime "
+            "SO; "
+            "device=%d runtime=%016lx is already claimed or invalid",
+            device_id, runtime_fingerprint
+        );
+        return rc;
+    }
+    auto claim_rollback = RAIIScopeGuard([this]() {
+        kernel_context_claim_.rollback_initialization();
+    });
     rc = adopt_borrowed_device(device_id);
     if (rc != 0) return rc;
 
-    rc = kernel_exec_state_.initialize(device_id_, make_onboard_kernel_context_ops());
+    rc = kernel_exec_state_.initialize(device_id_, make_onboard_kernel_context_ops(), context_generation);
     if (rc != 0) {
         LOG_ERROR("init_kernel_context: context stream/event creation failed: %d", rc);
         return rc;
@@ -595,7 +625,15 @@ int DeviceRunnerBase::init_kernel_context(int device_id, const CallConfig &confi
     // The async-DMA workspace is program mode's SDMA channel; kernel mode
     // provisions none, so this launch publishes the all-zero addresses that
     // mean "that engine is unavailable".
-    return ensure_aicpu_init_launched(control_stream);
+    rc = ensure_aicpu_init_launched(control_stream);
+    if (rc != 0) return rc;
+    kernel_aicpu_handle_ = load_aicpu_op_.BuiltInHandle("simpler_aicpu_kernel_exec");
+    rc = prepare_launch_shape(kernel_runtime_, kernel_static_config_.request());
+    if (rc != 0) return rc;
+    rc = prepare_aicpu_affinity(kernel_runtime_, config.aicpu_thread_num, control_stream);
+    if (rc != 0) return rc;
+    claim_rollback.dismiss();
+    return 0;
 }
 
 PersistentArgsOps DeviceRunnerBase::persistent_args_ops() {
@@ -628,7 +666,7 @@ KernelCallableCache::Ops DeviceRunnerBase::kernel_callable_cache_ops() {
     };
 }
 
-int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id, const HostApi *api) {
+int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id, const HostApi *api, void *caller_stream) {
     rtStream_t control_stream = static_cast<rtStream_t>(kernel_exec_state_.hidden_stream(KernelStreamKind::Aicpu));
     if (control_stream == nullptr) {
         LOG_ERROR("prepare_kernel_callable: no live kernel context");
@@ -638,11 +676,7 @@ int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id, const HostApi
     if (!kernel_static_config_.initialized()) return PTO_RUNTIME_ERR_INVALID_STATE;
     if (!persistent_args_.is_prepared()) {
         if (persistent_args_.has_live_resources()) return PTO_RUNTIME_ERR_INVALID_STATE;
-        int rc = prepare_launch_shape(kernel_runtime_, kernel_static_config_.request());
-        if (rc != 0) return rc;
-        rc = prepare_aicpu_affinity(kernel_runtime_, kernel_static_config_.request().aicpu_thread_num, control_stream);
-        if (rc != 0) return rc;
-        rc = configure_kernel_runtime_impl(kernel_runtime_, kernel_static_config_.serial_orch_sched());
+        int rc = configure_kernel_runtime_impl(kernel_runtime_, kernel_static_config_.serial_orch_sched());
         if (rc != 0) return rc;
         // The context-static device regions are committed here, before the
         // runtime image that names them is uploaded.
@@ -652,8 +686,46 @@ int DeviceRunnerBase::prepare_kernel_callable(int32_t callable_id, const HostApi
         if (rc != 0) return rc;
         rc = kernel_static_config_.freeze();
         if (rc != 0) return rc;
+        activate_launch_shape(kernel_runtime_);
+        rtDevBinary_t binary{};
+        binary.magic = RT_DEV_BINARY_MAGIC_ELF;
+        binary.data = aicore_kernel_binary_.data();
+        binary.length = aicore_kernel_binary_.size();
+        rc = rtRegisterAllKernel(&binary, &aicore_bin_handle_);
+        if (rc != 0) return rc;
     }
-    int rc = register_callable_on_device(callable_id, control_stream);
+    auto it = callables_.find(callable_id);
+    if (it == callables_.end()) return PTO_RUNTIME_ERR_CALLABLE_NOT_RESIDENT;
+    auto &state = it->second;
+    simpler::kernel::PreparedInvocationView callable{callable_id, 0, 0, kernel_callable_cache_.generation()};
+    if (simpler::kernel::derive_invocation_counts(
+            state.signature.data(), static_cast<int32_t>(state.signature.size()), &callable.tensor_count,
+            &callable.scalar_count
+        ) != simpler::kernel::InvocationStatus::Ok)
+        return PTO_RUNTIME_ERR_INTERNAL;
+    if (state.kernel_packet.prepare(callable) != simpler::kernel::InvocationStatus::Ok) return PTO_RUNTIME_ERR_INTERNAL;
+
+    int rc = 0;
+    if (state.host_dlopen_handle == nullptr) {
+        RegisterCallableArgs reg_args{};
+        reg_args.active_callable_id = callable_id;
+        reg_args.dev_orch_so_addr = state.dev_orch_so_addr;
+        reg_args.dev_orch_so_size = state.dev_orch_so_size;
+        snprintf(reg_args.device_orch_func_name, sizeof(reg_args.device_orch_func_name), "%s", state.func_name.c_str());
+        snprintf(
+            reg_args.device_orch_config_name, sizeof(reg_args.device_orch_config_name), "%s", state.config_name.c_str()
+        );
+        rc = launch_aicpu_payload(
+            control_stream, &reg_args, sizeof(reg_args), host::KernelNames::RegisterCallableName, 1
+        );
+        if (rc != 0) return rc;
+        rc = commit_device_register(callable_id);
+        if (rc != 0) return rc;
+    }
+    rc = aclrtRecordEvent(kernel_exec_state_.event(KernelEventKind::PrepareTail), control_stream);
+    if (rc != 0) return rc;
+    kernel_prepare_pending_ = true;
+    rc = aclrtStreamWaitEvent(caller_stream, kernel_exec_state_.event(KernelEventKind::PrepareTail));
     if (rc != 0) return rc;
 
     return kernel_exec_state_.mark_ready_enqueued();
@@ -1714,6 +1786,7 @@ int DeviceRunnerBase::finalize_common_impl(bool abandon_device_resources) {
     if (abandon_device_resources) {
         LOG_WARN("Fatal teardown: host-side ownership cleared without further device calls");
     }
+    if (!abandon_device_resources && execution_mode_latch_.is_kernel()) kernel_context_claim_.finish_finalize(rc);
     return rc;
 }
 

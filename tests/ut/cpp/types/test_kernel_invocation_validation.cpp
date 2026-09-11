@@ -20,27 +20,32 @@
 namespace {
 using namespace simpler::kernel;
 
-TEST(KernelInvocationValidation, EffectiveScalarCompatibilityAndFailureTransaction) {
+TEST(KernelInvocationValidation, DerivesSignatureCountsAndPreservesOutputsOnFailure) {
     const ArgDirection signature[] = {ArgDirection::IN, ArgDirection::OUT, ArgDirection::SCALAR};
     int32_t tensors = -1, scalars = -1;
-    EXPECT_EQ(derive_invocation_counts(signature, 3, 0, &tensors, &scalars), InvocationStatus::Ok);
-    EXPECT_EQ(tensors, 2);
-    EXPECT_EQ(scalars, 1);
-    EXPECT_EQ(derive_invocation_counts(signature, 3, 1, &tensors, &scalars), InvocationStatus::Ok);
-    EXPECT_EQ(derive_invocation_counts(signature, 3, 2, &tensors, &scalars), InvocationStatus::InvalidSignature);
+    EXPECT_EQ(derive_invocation_counts(signature, 3, &tensors, &scalars), InvocationStatus::Ok);
     EXPECT_EQ(tensors, 2);
     EXPECT_EQ(scalars, 1);
     const ArgDirection interleaved[] = {ArgDirection::SCALAR, ArgDirection::IN};
-    EXPECT_EQ(derive_invocation_counts(interleaved, 2, 0, &tensors, &scalars), InvocationStatus::InvalidSignature);
+    EXPECT_EQ(derive_invocation_counts(interleaved, 2, &tensors, &scalars), InvocationStatus::InvalidSignature);
+    EXPECT_EQ(tensors, 2);
+    EXPECT_EQ(scalars, 1);
     const ArgDirection unknown[] = {static_cast<ArgDirection>(42)};
-    EXPECT_EQ(derive_invocation_counts(unknown, 1, 0, &tensors, &scalars), InvocationStatus::InvalidSignature);
-    EXPECT_EQ(derive_invocation_counts(nullptr, 0, 0, &tensors, &scalars), InvocationStatus::Ok);
+    EXPECT_EQ(derive_invocation_counts(unknown, 1, &tensors, &scalars), InvocationStatus::InvalidSignature);
+    const std::vector<ArgDirection> too_many_scalars(CHIP_MAX_SCALAR_ARGS + 1, ArgDirection::SCALAR);
+    EXPECT_EQ(
+        derive_invocation_counts(too_many_scalars.data(), too_many_scalars.size(), &tensors, &scalars),
+        InvocationStatus::InvalidSignature
+    );
+    EXPECT_EQ(tensors, 2);
+    EXPECT_EQ(scalars, 1);
+    EXPECT_EQ(derive_invocation_counts(nullptr, 0, &tensors, &scalars), InvocationStatus::Ok);
     EXPECT_EQ(tensors, 0);
     EXPECT_EQ(scalars, 0);
-    EXPECT_EQ(derive_invocation_counts(signature, -1, 0, &tensors, &scalars), InvocationStatus::InvalidCounts);
-    EXPECT_EQ(derive_invocation_counts(signature, 257, 0, &tensors, &scalars), InvocationStatus::InvalidCounts);
-    EXPECT_EQ(derive_invocation_counts(signature, 3, -1, &tensors, &scalars), InvocationStatus::InvalidCounts);
-    EXPECT_EQ(derive_invocation_counts(nullptr, 1, 0, &tensors, &scalars), InvocationStatus::InvalidArgument);
+    EXPECT_EQ(derive_invocation_counts(signature, -1, &tensors, &scalars), InvocationStatus::InvalidCounts);
+    EXPECT_EQ(derive_invocation_counts(signature, 257, &tensors, &scalars), InvocationStatus::InvalidCounts);
+    EXPECT_EQ(derive_invocation_counts(signature, 3, nullptr, &scalars), InvocationStatus::InvalidArgument);
+    EXPECT_EQ(derive_invocation_counts(nullptr, 1, &tensors, &scalars), InvocationStatus::InvalidArgument);
 }
 
 TEST(KernelInvocationValidation, FramingRejectsBeforePayloadReadsAndPreservesOutput) {
@@ -60,6 +65,9 @@ TEST(KernelInvocationValidation, FramingRejectsBeforePayloadReadsAndPreservesOut
         if (expected != InvocationStatus::Ok) EXPECT_EQ(out.callable_id, 31);
     };
     check(InvocationStatus::Ok);
+    header.reserved_ = UINT32_MAX;
+    check(InvocationStatus::InvalidHeader);
+    header.reserved_ = 0;
     check(InvocationStatus::InvalidSize, sizeof(header) - 1);
     header.payload_bytes = std::numeric_limits<uint64_t>::max();
     check(InvocationStatus::InvalidSize);

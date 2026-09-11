@@ -187,7 +187,7 @@ int DeviceRunner::ensure_acl_ready(int device_id) {
     // latched PROGRAM, for which latching is idempotent.
     if (execution_mode_latch().latch(SIMPLER_MODE_PROGRAM) != 0) {
         LOG_ERROR("ensure_acl_ready: refused — a kernel-mode context does not own the caller's ACL lifecycle");
-        return PTO_RUNTIME_ERR_UNSUPPORTED;
+        return PTO_RUNTIME_ERR_INVALID_STATE;
     }
 
     // aclInit is process-wide; CANN returns ACL_ERROR_REPEAT_INITIALIZE if it
@@ -906,7 +906,7 @@ int DeviceRunner::force_reset_device() {
     // process.
     if (execution_mode_latch().is_kernel()) {
         LOG_ERROR("force_reset_device: refused — a kernel-mode context does not own the caller's device");
-        return PTO_RUNTIME_ERR_UNSUPPORTED;
+        return PTO_RUNTIME_ERR_INVALID_STATE;
     }
     // aclrtResetDeviceForce is an ACL API; bring ACL up for the whole sequence,
     // released on scope exit so a repeated poison-then-reset cycle in a
@@ -1040,6 +1040,10 @@ void DeviceRunner::unregister_device_memory_from_host(void *dev_ptr) {
 int DeviceRunner::finalize() {
     if (device_id_ == -1) {
         return 0;
+    }
+    if (execution_mode_latch().is_kernel()) {
+        const int device_rc = adopt_borrowed_device(device_id_);
+        if (device_rc != 0) return device_rc;
     }
 
     // Fatal path: the ordinary stream completion/error boundary has already

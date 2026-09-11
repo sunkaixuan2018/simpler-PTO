@@ -83,8 +83,7 @@ public:
         }
         if (entries_.size() >= MAX_REGISTERED_CALLABLE_IDS) return PTO_RUNTIME_ERR_CALLABLE_COUNT_EXCEEDED;
         const size_t padding = (CALLABLE_ALIGN - bytes % CALLABLE_ALIGN) % CALLABLE_ALIGN;
-        if (shared == nullptr &&
-            (bytes > byte_limit_ - used_ || padding > byte_limit_ - used_ - bytes))
+        if (shared == nullptr && (bytes > byte_limit_ - used_ || padding > byte_limit_ - used_ - bytes))
             return PTO_RUNTIME_ERR_CALLABLE_BYTES_EXCEEDED;
         const size_t charged = shared != nullptr ? 0 : bytes + padding;
         if (deduplicated != nullptr) *deduplicated = shared != nullptr;
@@ -185,11 +184,12 @@ public:
     }
 
     static int validate_image(const ChipCallable *callable, size_t bytes) {
+        constexpr size_t function_capacity = std::extent_v<decltype(ChipCallable::child_func_ids_)>;
         if (!callable || bytes < sizeof(ChipCallable) || reinterpret_cast<uintptr_t>(callable) % alignof(ChipCallable))
             return PTO_RUNTIME_ERR_INTERNAL;
         if (callable->sig_count_ < 0 || callable->sig_count_ > CHIP_MAX_TENSOR_ARGS || callable->child_count_ < 0 ||
-            callable->child_count_ > 1024 || callable->func_name_len_ >= CALLABLE_FUNC_NAME_MAX ||
-            callable->config_name_len_ >= CALLABLE_FUNC_NAME_MAX)
+            static_cast<size_t>(callable->child_count_) > function_capacity ||
+            callable->func_name_len_ >= CALLABLE_FUNC_NAME_MAX || callable->config_name_len_ >= CALLABLE_FUNC_NAME_MAX)
             return PTO_RUNTIME_ERR_INTERNAL;
         if (callable->func_name_[callable->func_name_len_] != '\0' ||
             callable->config_name_[callable->config_name_len_] != '\0')
@@ -200,13 +200,16 @@ public:
             if (direction < ArgDirection::SCALAR || direction > ArgDirection::INOUT) return PTO_RUNTIME_ERR_INTERNAL;
             scalars += direction == ArgDirection::SCALAR;
         }
-        if (callable->scalar_count_ < 0 || scalars > CHIP_MAX_SCALAR_ARGS ||
-            (callable->scalar_count_ != 0 && callable->scalar_count_ != scalars))
-            return PTO_RUNTIME_ERR_INTERNAL;
+        if (scalars > CHIP_MAX_SCALAR_ARGS) return PTO_RUNTIME_ERR_INTERNAL;
         const size_t storage = bytes - offsetof(ChipCallable, storage_);
         size_t end = callable->binary_size_;
         if (end > storage) return PTO_RUNTIME_ERR_INTERNAL;
         for (int32_t i = 0; i < callable->child_count_; ++i) {
+            const int32_t id = callable->child_func_ids_[i];
+            const auto *ids_end = callable->child_func_ids_ + i;
+            if (id < 0 || static_cast<size_t>(id) >= function_capacity ||
+                std::find(callable->child_func_ids_, ids_end, id) != ids_end)
+                return PTO_RUNTIME_ERR_INTERNAL;
             const size_t offset = callable->child_offsets_[i];
             if (offset % CALLABLE_ALIGN || offset < end || offset > storage ||
                 CoreCallable::binary_data_offset() > storage - offset)

@@ -14,6 +14,8 @@
 #include <type_traits>
 #include "task_interface/kernel_invocation_validation.h"
 
+inline constexpr char SnapshotProbeEntryName[] = "tmr_invocation_snapshot_probe";
+
 // Test fixtures, published by a separate init task before any invocation.
 struct SnapshotProbeInit {
     uint64_t results_addr;
