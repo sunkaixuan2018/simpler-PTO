@@ -1526,15 +1526,23 @@ inline AsyncPollResult AsyncWaitList::poll_and_complete(
             CompletionCondition &cond = entry.conditions[c];
             if (cond.satisfied) continue;
             CompletionPollResult poll = cond.test();
-            if (poll.state == CompletionPollState::FAILED) {
+            if (poll.state == CompletionPollState::FAILED || poll.state == CompletionPollState::UNCONFIRMED) {
                 result.error_code = poll.error_code;
+                if (cond.completion_type == COMPLETION_TYPE_CCU_REQUEST && poll.state == CompletionPollState::FAILED &&
+                    !cond.retire())
+                    result.error_code = SIMPLER_ERROR_CCU_UNCONFIRMED;
                 result.failed_slot_state = entry.slot_state;
                 unlock();
                 return result;
             }
             if (poll.state == CompletionPollState::READY) {
+                if (!cond.retire()) {
+                    result.error_code = SIMPLER_ERROR_CCU_UNCONFIRMED;
+                    result.failed_slot_state = entry.slot_state;
+                    unlock();
+                    return result;
+                }
                 cond.satisfied = true;
-                cond.retire();
                 entry.waiting_completion_count--;
             }
         }

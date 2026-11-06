@@ -1095,6 +1095,16 @@ extern "C" int copy_back_run_outputs_impl(const Runtime *runtime, const HostApi 
         int32_t orch_error_code = host_header.orch_error_code.load(std::memory_order_relaxed);
         int32_t sched_error_code = host_header.sched_error_code.load(std::memory_order_relaxed);
         LOG_RUNTIME_FAILURE(orch_error_code, sched_error_code, runtime_status);
+        if (sched_error_code == SIMPLER_ERROR_ASYNC_COMPLETION_INVALID) {
+            const auto &diagnostic = host_header.ccu_accept_diagnostic;
+            LOG_ERROR(
+                "[CCU accept] captured=%u count=%u marker_valid=%u magic=0x%08x stage=%u status=%u "
+                "callable=%d rank=%u ranks=%u flags=0x%02x checks=0x%08x",
+                diagnostic.state & 1U, diagnostic.count, static_cast<uint32_t>(diagnostic.valid()), diagnostic.magic,
+                diagnostic.stage(), diagnostic.status(), diagnostic.callable(), diagnostic.rank(), diagnostic.ranks(),
+                diagnostic.flags(), diagnostic.checks
+            );
+        }
         // A scheduler no-progress timeout (code 100) carries a device-classified
         // sub-reason + locators so the failure line is self-diagnosing without a
         // device-log dive. The full stall snapshot stays in the device log / plog.

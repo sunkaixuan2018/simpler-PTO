@@ -158,6 +158,7 @@ public:
 class FencedCompletionRunner : public Runner {
 public:
     using Runner::Runner;
+    std::shared_ptr<simpler::ccu::RunLease> ccu_lease;
     bool publish_success{true};
     int published_error{0};
     bool refuse_retirement_owner{false};
@@ -207,6 +208,7 @@ public:
         int rc = Runner::prepare_execution(runtime, config, slot, identity, out);
         if (rc != 0) return rc;
         (*out)->resources_owned = true;
+        (*out)->ccu_readers.lease = ccu_lease;
         rc = ensure_device_run_result_region(slot, identity.run_epoch, (*out)->kernel_args);
         if (rc != 0) return rc;
         return (*out)->kernel_args.prepare_runtime_args(runtime, mem_alloc_, slot_persistent_args(slot));
@@ -638,6 +640,59 @@ TEST_F(NativeAdmissionTest, SuccessfulExplicitObservationDoesNotReadThePrivateRe
     EXPECT_EQ(control().observed_streams.size(), 2u);
     EXPECT_EQ(control().d2h_calls, 0u);
     EXPECT_TRUE(active.empty());
+}
+
+TEST_F(NativeAdmissionTest, CcuReadersKeepNativeCarrierUntilPlatformStops) {
+    class Lease final : public simpler::ccu::RunLease {
+    public:
+        simpler::ccu::ReaderResult next{simpler::ccu::ReaderState::PENDING, 0};
+        simpler::ccu::ReaderResult poll() noexcept override { return next; }
+        simpler::ccu::ReaderResult drain() noexcept override { return next; }
+    };
+    FencedCompletionRunner runner;
+    auto lease = std::make_shared<Lease>();
+    runner.ccu_lease = lease;
+    Attempt active(runner, 0, 10);
+    ASSERT_EQ(active.prepare(), 0);
+    ASSERT_EQ(simpler_launch_run(&runner, active.storage), 0);
+    auto *state = static_cast<NativeRunContext<DeviceRunnerBase> *>(active.storage);
+    const auto retained_bytes = control().bytes;
+    EXPECT_EQ(simpler_poll_run(&runner, active.storage), SIMPLER_NATIVE_RUN_POLL_NOT_READY);
+    EXPECT_EQ(control().bytes, retained_bytes);
+    EXPECT_FALSE(state->physical_complete);
+    EXPECT_FALSE(state->execution_retired);
+    EXPECT_TRUE(state->active_execution->prepared->resources_owned);
+    lease->next = {simpler::ccu::ReaderState::STOPPED, 0};
+    EXPECT_EQ(simpler_poll_run(&runner, active.storage), SIMPLER_NATIVE_RUN_POLL_COMPLETE);
+    EXPECT_TRUE(state->physical_complete);
+    EXPECT_EQ(simpler_finalize_run(&runner, active.storage), 0);
+    EXPECT_TRUE(active.empty());
+}
+
+TEST_F(NativeAdmissionTest, CcuUnconfirmedDrainCannotTurnStreamSuccessIntoPhysicalCompletion) {
+    class Lease final : public simpler::ccu::RunLease {
+    public:
+        simpler::ccu::ReaderResult poll() noexcept override { return {simpler::ccu::ReaderState::UNCONFIRMED, -106}; }
+        simpler::ccu::ReaderResult drain() noexcept override { return poll(); }
+    };
+    class CcuRunner : public Runner {
+    public:
+        void check() {
+            Runtime runtime;
+            CallConfig config;
+            NativeRunIdentity identity{301, 3, 301, 0};
+            PreparedExecution prepared(identity, runtime, config, 0);
+            static int streams[2];
+            prepared.streams = {&streams[0], &streams[1]};
+            prepared.resources_owned = false;
+            prepared.ccu_readers.lease = std::make_shared<Lease>();
+            EXPECT_EQ(wait_run_fence(prepared), -106);
+            EXPECT_FALSE(prepared.physical_complete);
+            EXPECT_TRUE(admission_poisoned);
+            EXPECT_FALSE(prepared.ccu_readers.stopped());
+        }
+    } runner;
+    runner.check();
 }
 
 TEST_F(NativeAdmissionTest, BlockingPhysicalProgressDoesNotPerformTheStrongObserver) {

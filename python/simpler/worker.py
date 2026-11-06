@@ -152,6 +152,7 @@ from .callable_identity import (
     parse_python_callable_payload,
     parse_python_import_target,
 )
+from .ccu_runtime import discover_ccu_domains, require_ccu_execution_backend
 from .comm_domain import CommDomainRef, DomainConfig
 from .comm_endpoints import (
     DEVICE_AICORE,
@@ -898,6 +899,9 @@ _CTRL_OP_NAMES[_CTRL_DEVICE_MEMORY_INFO] = "device_memory_info"
 # Publish every diagnostic run this chip child has closed. 26 is the delegated
 # region control; 27 mirrors worker_manager.h::CTRL_DFX_FLUSH.
 _CTRL_DFX_FLUSH = 27
+_CTRL_CCU_PREPARE = 28
+_CCU_PREPARE_HEADER = struct.Struct("<QQQI")
+_CTRL_OP_NAMES[_CTRL_CCU_PREPARE] = "ccu_prepare"
 _CTRL_OP_NAMES[_CTRL_DFX_FLUSH] = "flush_diagnostics"
 # The native flush wait takes a millisecond count in a C `int`. The wire field
 # is 64-bit, so a malformed frame is clamped here rather than left to fail
@@ -3640,6 +3644,24 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         prepared.discard(int(cid))
             elif sub_cmd == _CTRL_ALLOC_DOMAIN:
                 _handle_ctrl_alloc_domain(cw, buf, base_comm_handle=base_comm_handle)
+            elif sub_cmd == _CTRL_CCU_PREPARE:
+                payload_size = int(struct.unpack_from("Q", buf, _CTRL_OFF_ARG0)[0])
+                payload = _read_raw_payload_from_shm(_read_ctrl_staged_shm_name(buf), payload_size)
+                allocation_id, domain_owner, generation, count = _CCU_PREPARE_HEADER.unpack_from(payload)
+                if count != 2 or len(payload) != _CCU_PREPARE_HEADER.size + count * 4:
+                    raise ValueError("invalid CCU preparation members")
+                devices = struct.unpack_from(f"<{count}I", payload, _CCU_PREPARE_HEADER.size)
+                if device_id in devices:
+                    if chip_platform != "a5" or chip_runtime != "tensormap_and_ringbuffer":
+                        raise RuntimeError("CCU preparation requires A5 TMR")
+                    digest = _read_control_digest(buf)
+                    cid = identity_table.get(digest)
+                    if cid is None or cid not in prepared:
+                        raise RuntimeError("CCU callable must be registered before domain creation")
+                    cw.comm_prepare_ccu(
+                        _require_base_communicator(base_comm_handle), int(cid), allocation_id, domain_owner,
+                        generation, list(digest),
+                    )
             elif sub_cmd == _CTRL_RELEASE_DOMAIN:
                 _handle_ctrl_release_domain(cw, buf, base_comm_handle=base_comm_handle)
             elif sub_cmd == _CTRL_COMM_INIT:
@@ -3905,6 +3927,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             args = staged.pending_args  # type: ignore[attr-defined]
             _validate_host_control_access(registry.get(staged.cid), args)
             chip_args = _materialize_chip_task_args(args, import_registry)
+            require_ccu_execution_backend(
+                registry.get(staged.cid),
+                native_provider=chip_platform == "a5" and chip_runtime == "tensormap_and_ringbuffer",
+            )
             if staged.config.output_prefix:
                 _bind_host_log_session_directory()
             staged.chip_run = cw._submit_chip_run_materialized(
@@ -5605,6 +5631,7 @@ class Worker:
         self._config = _config_with_valid_workspace_budget_shape(_adopt_canonical_collect_across_runs(config))
         self._callable_registry: dict[int, Any] = {}
         self._identity_registry: dict[bytes, _CallableIdentityState] = {}
+        self._ccu_prepared_domains: set[tuple[bytes, int, int]] = set()
         self._live_handles: dict[int, bytes] = {}
         self._next_handle_id: int = 0
         self._owner_id = uuid.uuid4().hex
@@ -8655,6 +8682,12 @@ class Worker:
             cid = state.slot_id
             if cid in self._pending_unregister_cids:
                 raise KeyError("UNREGISTER_TOMBSTONE_ACTIVE: callable handle already pending unregister")
+            if (
+                state.ref_count <= 1
+                and getattr(state.target, "ccu_function_count", 0)
+                and any(prepared[0] == digest for prepared in self._ccu_prepared_domains)
+            ):
+                raise RuntimeError("release prepared CCU domains before unregistering the last callable handle")
             self._live_handles.pop(handle_id, None)
             state.ref_count -= 1
             should_broadcast_decrement = self.level >= 3
@@ -10500,12 +10533,53 @@ class Worker:
                 raise ValueError("workspace_engines selection is supported only on L3 domains")
             if self._config.get("platform") != "a5":
                 raise ValueError("domain workspace selection requires A5; A2/A3 SDMA uses enable_sdma")
+            if "ccu" in config.workspace_engines:
+                if self._config.get("runtime") != "tensormap_and_ringbuffer" or len(config.members) != 2:
+                    raise ValueError("CCU domain workspaces require A5 TMR and exactly two members")
             if "urma" in config.workspace_engines:
                 if self._config.get("runtime") != "tensormap_and_ringbuffer":
                     raise ValueError("URMA domain workspaces require the A5 tensormap_and_ringbuffer runtime")
                 if config.members != tuple(range(len(config.members))):
                     raise ValueError("URMA requires ranks in dense prefix order")
         return config
+
+    def _prepare_ccu_submission(self, digest: bytes, args, worker_id: int) -> None:
+        with self._registry_lock:
+            state = self._identity_registry.get(digest)
+            target = state.target if state is not None else None
+        if not getattr(target, "ccu_function_count", 0):
+            return
+        domains = discover_ccu_domains(args, worker_id, self._live_domains.values())
+        for domain in domains:
+            self._use_domain(domain)
+            if (digest, domain.domain_id, domain.generation) not in self._ccu_prepared_domains:
+                raise RuntimeError("CCU callable was not prepared when the selected domain was created or reused")
+
+    def _prepare_ccu_domain(self, domain: CommDomainHandle) -> None:
+        config = cast(DomainConfig | None, domain._config)
+        if config is None or "ccu" not in config.workspace_engines:
+            return
+        with self._registry_lock:
+            definitions = sorted(
+                digest for digest, state in self._identity_registry.items()
+                if getattr(state.target, "ccu_function_count", 0)
+            )
+        pending = [
+            digest for digest in definitions
+            if (digest, domain.domain_id, domain.generation) not in self._ccu_prepared_domains
+        ]
+        if not pending:
+            return
+        devices = tuple(int(self._config["device_ids"][worker]) for worker in config.members)
+        payload = _CCU_PREPARE_HEADER.pack(
+            domain.allocation_id, int.from_bytes(self._owner_instance_id, "little"), domain.generation, len(devices)
+        ) + struct.pack(f"<{len(devices)}I", *devices)
+        with self._control_admission("prepare_ccu_domain"):
+            for digest in pending:
+                self._broadcast_py_control(
+                    [WorkerType.NEXT_LEVEL], _CTRL_CCU_PREPARE, digest=digest, payload=payload, strict=True,
+                )
+                self._ccu_prepared_domains.add((digest, domain.domain_id, domain.generation))
 
     def _comm_domain(self, *, name, members, window_size, buffers, retain_after_run, reuse, workspace_engines=()):
         resources = self._building_run_resources
@@ -10531,6 +10605,18 @@ class Worker:
                 if difference:
                     raise ValueError(f"domain {name!r} configuration differs: {difference}")
                 self._use_domain(handle)
+                try:
+                    self._prepare_ccu_domain(handle)
+                except BaseException as preparation_error:
+                    # A new callable may have created only part of its peer state.
+                    # Retire this whole domain through the same fence-owned ledger
+                    # used for failed initial creation; never reuse its old directory.
+                    handle._released = True
+                    try:
+                        self._release_domain_handle(handle, resources)
+                    except BaseException as cleanup_error:
+                        raise preparation_error from cleanup_error
+                    raise
                 return handle
             try:
                 if self.level == 3:
@@ -10562,6 +10648,8 @@ class Worker:
                 handle._use_fn = self._use_domain
                 self._use_domain(handle)
                 handle._config = config
+                if self.level == 3:
+                    self._prepare_ccu_domain(handle)
                 return handle
             except BaseException as creation_error:
                 # The backend live table also owns partially committed allocations. Close the
@@ -11001,6 +11089,10 @@ class Worker:
             self._defer_domain_retirement(handle)
             raise
         handle._freed = True  # noqa: SLF001 -- runtime owns this transition
+        self._ccu_prepared_domains.difference_update(
+            key for key in tuple(self._ccu_prepared_domains)
+            if key[1:] == (handle.domain_id, handle.generation)
+        )
 
     def _execute_pending_domain_releases(self, resources: _RunResources) -> None:
         """Drive CTRL_RELEASE_DOMAIN for every queued handle.  Must run
@@ -13512,6 +13604,7 @@ class Worker:
         if self.level == 2:
             assert self._chip_worker is not None
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
+            require_ccu_execution_backend(state.target)
             if getattr(cfg, "output_prefix", ""):
                 _bind_host_log_session_directory()
             submit_options = {} if caller_stream is None else {"caller_stream": caller_stream}

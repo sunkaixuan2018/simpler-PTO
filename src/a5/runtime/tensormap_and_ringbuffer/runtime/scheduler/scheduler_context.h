@@ -158,6 +158,7 @@ private:
     // --- Scheduler binding & per-core runtime state ---
     alignas(64) SchedulerState *sched_{nullptr};
     RuntimeContext *rt_{nullptr};
+    int32_t active_callable_id_{-1};
 
     // Per-core execution state, indexed by core_id (= worker_id)
     CoreExecState core_exec_states_[RUNTIME_MAX_WORKER];
