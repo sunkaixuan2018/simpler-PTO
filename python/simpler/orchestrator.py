@@ -357,6 +357,8 @@ class Orchestrator:
                 worker._child_prov_check_dispatch_locked(c_args, cpp_worker_id, api="submit_next_level")
                 remote_sidecar = worker._prepare_buffer_references(c_args, remote_sidecar, cpp_worker_id)
             final_worker_ids = _remote_data_eligible_worker_ids(remote_sidecar, eligible_worker_ids)
+            if worker is not None and target_namespace == "LOCAL_CHIP":
+                worker._prepare_ccu_submission(digest, c_args, cpp_worker_id)
             if worker is not None:
                 worker._adopt_remote_sidecar_refs((remote_sidecar,))
                 worker._record_touched_identities(c_args)
@@ -471,6 +473,9 @@ class Orchestrator:
                 if remote_sidecars is not None:
                     remote_sidecars[index] = prepared
                     worker_id_sets[index] = _remote_data_eligible_worker_ids(prepared, eligible_worker_ids)
+            if worker is not None and target_namespace == "LOCAL_CHIP":
+                for c_args, worker_id in zip(c_args_list, worker_ids):
+                    worker._prepare_ccu_submission(digest, c_args, worker_id)
             if worker is not None and remote_sidecars is not None:
                 worker._adopt_remote_sidecar_refs(remote_sidecars)
             if worker is not None:
