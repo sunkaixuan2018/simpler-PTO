@@ -191,6 +191,28 @@ def test_direct_chip_submission_refuses_missing_ccu_backend_before_native_launch
         worker.close()
 
 
+def test_native_preparation_refuses_ccu_before_argument_reservation(monkeypatch):
+    worker = Worker(level=2, platform="a5", runtime="tensormap_and_ringbuffer", device_id=0)
+    try:
+        handle = worker.register(_callable())
+        calls = []
+
+        def reserve(*args, **kwargs):
+            calls.append("reserve")
+            raise AssertionError("unsupported CCU reached argument reservation")
+
+        monkeypatch.setattr(worker, "_chip_worker", SimpleNamespace())
+        monkeypatch.setattr(worker, "_operation_lease", lambda _api: contextlib.nullcontext())
+        monkeypatch.setattr(worker, "_prepare_l2_args", reserve)
+        with pytest.raises(RuntimeError, match="cannot execute"):
+            worker.prepare_submission(handle, TaskArgs(), caller_stream=123)
+        assert calls == []
+        assert worker._chip_run_callable_ids == {}
+    finally:
+        worker._chip_worker = None
+        worker.close()
+
+
 @pytest.mark.parametrize(
     "platform,runtime,members,message",
     [

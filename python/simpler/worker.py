@@ -13749,6 +13749,7 @@ class Worker:
         with self._operation_lease("prepare_submission"):
             cfg = config if config is not None else CallConfig()
             state = self._resolve_handle(callable, expected_namespace="LOCAL_CHIP")
+            require_ccu_execution_backend(state.target)
             if getattr(cfg, "output_prefix", ""):
                 _bind_host_log_session_directory()
             run_id, args, chip_args, values = self._prepare_l2_args(
