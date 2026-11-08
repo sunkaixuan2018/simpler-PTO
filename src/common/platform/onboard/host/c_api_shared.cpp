@@ -62,6 +62,17 @@
 #include "host/raii_scope_guard.h"
 #include "runtime.h"
 #include "platform_comm/comm.h"
+#include "platform_comm/ccu/ccu_provider.h"
+
+__attribute__((weak)) int platform_ccu_register(void *, int32_t, const ChipCallable &callable) {
+    return callable.ccu_size_ ? PTO_RUNTIME_ERR_UNSUPPORTED : 0;
+}
+__attribute__((weak)) int platform_ccu_unregister(void *, int32_t) { return 0; }
+__attribute__((weak)) void platform_ccu_forget_runner(void *) {}
+__attribute__((weak)) std::shared_ptr<simpler::ccu::RunLease>
+platform_ccu_acquire_run(void *, int32_t, const ChipStorageTaskArgs &) {
+    return {};
+}
 
 // Forward-declared (rather than `#include "dlog_pub.h"`) so this TU does not
 // require CANN's toolchain include path on the host build. Resolved at link
@@ -820,6 +831,7 @@ int finalize_device(DeviceContextHandle ctx) {
             // Carrier storage is caller-owned and terminally retained. Reset
             // invalidates device readers, not an unknown C++ object lifetime.
             runner->abandon_native_run_owners_after_reset();
+            platform_ccu_forget_runner(runner);
             return 0;
         } catch (...) {
             return PTO_RUNTIME_ERR_INTERNAL;
@@ -839,7 +851,9 @@ int finalize_device(DeviceContextHandle ctx) {
         static_cast<DeviceRunnerBase *>(c)->finish_retained_runs();
     };
     steps.cleanup = [](void *c) {
-        return static_cast<DeviceRunnerBase *>(c)->finalize();
+        const int rc = static_cast<DeviceRunnerBase *>(c)->finalize();
+        if (rc == 0) platform_ccu_forget_runner(c);
+        return rc;
     };
     return run_context_teardown(steps, proof_slot(runner));
 }
@@ -1058,6 +1072,7 @@ static int record_callable_on_runner(
     // hbg's register_callable_impl populates host_dlopen_handle; trb's leaves
     // it null and fills orch_so_data + func_name/config_name.
     if (artifacts.host_dlopen_handle != nullptr) {
+        if (static_cast<const ChipCallable *>(callable)->ccu_size_ != 0) return PTO_RUNTIME_ERR_UNSUPPORTED;
         rc = runner->record_host_orch_callable(
             callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.host_dlopen_handle,
             artifacts.host_orch_func_ptr, std::move(artifacts.signature)
@@ -1068,12 +1083,18 @@ static int record_callable_on_runner(
         return 0;
     }
 
+    rc = platform_ccu_register(runner, callable_id, *static_cast<const ChipCallable *>(callable));
+    if (rc != 0) return rc;
+    auto ccu_registration_guard = RAIIScopeGuard([&]() {
+        (void)platform_ccu_unregister(runner, callable_id);
+    });
     rc = runner->record_device_orch_callable(
         callable_id, artifacts.chip_buffer_hash, artifacts.aicore_image_hash, artifacts.chip_buffer_dev,
         artifacts.orch_so_data, artifacts.orch_so_size, artifacts.func_name.c_str(), artifacts.config_name.c_str(),
         std::move(artifacts.signature)
     );
     if (rc != 0) return rc;
+    ccu_registration_guard.dismiss();
     chip_buffer_guard.dismiss();
     *needs_aicpu_register = true;
     return 0;
@@ -1112,6 +1133,7 @@ static int prepare_kernel_callable_on_runner(
         // callable owned in that case — it is released at close, once the
         // caller has established quiescence.
         if (runner->kernel_execution_state().accepts_dispatch()) {
+            (void)platform_ccu_unregister(runner, callable_id);
             runner->unregister_callable(callable_id);
         } else {
             LOG_ERROR(
@@ -1170,6 +1192,7 @@ register_callable_locked(DeviceContextHandle ctx, int32_t callable_id, const voi
             rc = runner->launch_device_register(callable_id);
             if (rc != 0) {
                 if (!runner->retains_failed_callable_release() || runner->kernel_execution_state().accepts_dispatch()) {
+                    (void)platform_ccu_unregister(runner, callable_id);
                     runner->unregister_callable(callable_id);
                 }
                 return rc;
@@ -2017,6 +2040,8 @@ int simpler_prepare_run(
             );
         }
         if (rc != 0) return cleanup_failed_prepare(state, rc);
+        state->prepared_execution->ccu_readers.lease =
+            platform_ccu_acquire_run(runner, callable_id, *static_cast<const ChipStorageTaskArgs *>(args));
         rc = runner->retain_prepared_run_resources(
             *state->prepared_execution, state->descriptor.arena_bank, callable_id
         );
@@ -2942,6 +2967,8 @@ int simpler_unregister_callable(DeviceContextHandle ctx, int32_t callable_id) {
             );
             return PTO_RUNTIME_ERR_INTERNAL;
         }
+        const int ccu_rc = platform_ccu_unregister(runner, callable_id);
+        if (ccu_rc != 0) return ccu_rc;
         return runner->unregister_callable(callable_id);
     } catch (...) {
         return PTO_RUNTIME_ERR_INTERNAL;
