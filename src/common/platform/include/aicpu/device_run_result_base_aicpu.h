@@ -26,4 +26,6 @@ extern "C" uint64_t get_platform_run_result_epoch();
 // not merely a standalone result prefix. The owner retains it through all use.
 extern "C" int32_t aicpu_begin_native_invocation(int32_t callbacks, uint64_t region_base, uint64_t run_epoch);
 extern "C" bool aicpu_accept_runtime_terminal(RunTerminalSelection selection, const void *payload, size_t bytes);
+// The caller must prove every AICore retired; only the exact CCU failure is accepted.
+extern "C" bool aicpu_accept_retired_ccu_failure(RunTerminalSelection selection, const void *payload, size_t bytes);
 extern "C" int32_t aicpu_finish_native_invocation(int32_t callback_index, int32_t status);
