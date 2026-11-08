@@ -450,11 +450,13 @@ is supported on L3 A5; A2/A3 keeps its Worker-owned SDMA path. Simulation and L4
 domains support synchronous mappings, with no domain-owned asynchronous engines.
 
 Each `CommContext` stores a POD array `workspaces`, indexed by
-`CommWorkspaceKind::{SDMA, URMA, RDMA}`. Kernels use
+`CommWorkspaceKind::{SDMA, URMA, RDMA, CCU}`. Kernels use
 `comm_workspace<CommWorkspaceKind::URMA>(*ctx)` (or the corresponding engine),
 whose template argument is checked at compile time. Host publication rejects
 out-of-range enum values before indexing. An absent backend has zero address
-and size.
+and size. The CCU slot has its own bit and descriptor; a backend without CCU
+support rejects a CCU allocation request before publishing a domain. Its presence
+in the shared layout does not imply that the native provider is available.
 
 Before submitting a URMA task, obtain its context through the checked host API:
 
@@ -513,10 +515,10 @@ capability query or `enable_urma` initialization switch is needed.
 The context is simpler's own 1104-byte host/device ABI. Rank metadata starts
 at offset zero; there is no legacy workspace pair or PTO-compatible prefix.
 PTO session builders receive the chosen workspace address explicitly and do
-not parse this context. The reserved CCU descriptor occupies slot 3; reserving
-the slot does not enable CCU domain allocation, which belongs to its provider.
-The CCU execution contract, including callable-local IDs and domain preparation,
-is described in [CCU interface conformance](zh-cn/design/ccu-pr1-interface-conformance.md).
+not parse this context. The CCU descriptor occupies slot 3; the slot itself does
+not enable CCU allocation, which belongs to its provider. Python obtains the
+workspace count and context size from the native binding and checks its ctypes
+mirror against them.
 
 All runtime libraries, bindings, communication-context producers and compiled
 kernels must come from the same simpler build and be updated together. This

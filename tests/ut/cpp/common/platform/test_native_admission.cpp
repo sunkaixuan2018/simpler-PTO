@@ -28,6 +28,7 @@
 #include "chip_worker.h"
 #undef private
 #include "chip_run_lane.h"
+#include "platform_comm/ccu/ccu_provider.h"
 
 namespace native_admission_test {
 thread_local bool refuse_next_host_allocation = false;
@@ -159,6 +160,7 @@ class FencedCompletionRunner : public Runner {
 public:
     using Runner::Runner;
     std::shared_ptr<simpler::ccu::RunLease> ccu_lease;
+    size_t ccu_acquisitions{0};
     bool publish_success{true};
     int published_error{0};
     bool refuse_retirement_owner{false};
@@ -208,7 +210,6 @@ public:
         int rc = Runner::prepare_execution(runtime, config, slot, identity, out);
         if (rc != 0) return rc;
         (*out)->resources_owned = true;
-        (*out)->ccu_readers.lease = ccu_lease;
         rc = ensure_device_run_result_region(slot, identity.run_epoch, (*out)->kernel_args);
         if (rc != 0) return rc;
         return (*out)->kernel_args.prepare_runtime_args(runtime, mem_alloc_, slot_persistent_args(slot));
@@ -654,6 +655,7 @@ TEST_F(NativeAdmissionTest, CcuReadersKeepNativeCarrierUntilPlatformStops) {
     runner.ccu_lease = lease;
     Attempt active(runner, 0, 10);
     ASSERT_EQ(active.prepare(), 0);
+    ASSERT_EQ(runner.ccu_acquisitions, 1u);
     ASSERT_EQ(simpler_launch_run(&runner, active.storage), 0);
     auto *state = static_cast<NativeRunContext<DeviceRunnerBase> *>(active.storage);
     const auto retained_bytes = control().bytes;
@@ -714,6 +716,7 @@ TEST_F(NativeAdmissionTest, CcuFinalizationReadsBusinessTerminalAfterPhysicalCom
         Attempt active(runner, 0, 10);
         const size_t uploads_before = control().uploads.size();
         ASSERT_EQ(active.prepare(), 0);
+        ASSERT_EQ(runner.ccu_acquisitions, 1u);
         ASSERT_EQ(simpler_launch_run(&runner, active.storage), 0);
         auto *state = static_cast<NativeRunContext<DeviceRunnerBase> *>(active.storage);
         auto *record = reinterpret_cast<DeviceRunResultRegion *>(
@@ -766,6 +769,7 @@ TEST_F(NativeAdmissionTest, CcuFailureSurvivesPhysicalRetirementWithoutHostOutpu
     runner.published_error = -105;
     Attempt active(runner, 0, 10);
     ASSERT_EQ(active.prepare(), 0);
+    ASSERT_EQ(runner.ccu_acquisitions, 1u);
     ASSERT_EQ(simpler_launch_run(&runner, active.storage), 0);
     ASSERT_EQ(simpler_poll_run(&runner, active.storage), SIMPLER_NATIVE_RUN_POLL_COMPLETE);
     const auto *state = static_cast<const NativeRunContext<DeviceRunnerBase> *>(active.storage);
@@ -2496,6 +2500,17 @@ TEST_F(NativeAdmissionTest, FinalizePrefixAllocationFailureKeepsLaunchedOwnerRet
 }
 
 }  // namespace native_admission_test
+
+// Replace only the provider boundary. The C API must acquire and retain the
+// lease itself, just as it does for a real registered CCU callable.
+std::shared_ptr<simpler::ccu::RunLease>
+platform_ccu_acquire_run(void *runner, int32_t callable_id, const ChipStorageTaskArgs &) {
+    auto *completion_runner =
+        dynamic_cast<native_admission_test::FencedCompletionRunner *>(static_cast<DeviceRunnerBase *>(runner));
+    if (completion_runner == nullptr || callable_id != 1) return {};
+    ++completion_runner->ccu_acquisitions;
+    return completion_runner->ccu_lease;
+}
 
 namespace native_admission_test {
 TEST_F(NativeAdmissionTest, EntryCacheQualificationRequiresObservedSuccessAndCurrentPublication) {
