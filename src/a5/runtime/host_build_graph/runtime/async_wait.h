@@ -20,6 +20,7 @@
 #include "host_build_graph/completion_token.h"
 #include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
+#include "platform_comm/ccu/ccu_completion.h"
 
 struct SchedulerState;
 struct CompletionStats;
@@ -78,10 +79,26 @@ inline void sdma_event_record_retire_op(CompletionCondition &cond) {
     retire_sdma_post_done_record(cond.addr, cond.backend_cookie);
 }
 
+inline CompletionPollResult ccu_poll_op(const CompletionCondition &cond) {
+    const auto result = simpler::ccu::poll_completion(
+        reinterpret_cast<const volatile SimplerCcuCompletionSlotV1 *>(cond.addr), cond.backend_cookie
+    );
+    if (result.state == simpler::ccu::CompletionPollState::pending)
+        return {CompletionPollState::PENDING, SIMPLER_ERROR_NONE};
+    if (result.state == simpler::ccu::CompletionPollState::ready)
+        return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
+    return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
+}
+
+inline void ccu_retire_op(CompletionCondition & /*cond*/) {}
+
 inline const CompletionBackendOps *completion_backend_ops_for(int completion_type) {
     static const CompletionBackendOps kOps[] = {
         {counter_poll_op, counter_retire_op},                      // COMPLETION_TYPE_COUNTER = 0
         {sdma_event_record_poll_op, sdma_event_record_retire_op},  // COMPLETION_TYPE_SDMA_EVENT_RECORD = 1
+        {nullptr, nullptr},                                        // Reserved = 2
+        {nullptr, nullptr},                                        // Reserved = 3
+        {ccu_poll_op, ccu_retire_op},                              // COMPLETION_TYPE_CCU = 4
     };
     constexpr int kOpsCount = static_cast<int>(sizeof(kOps) / sizeof(kOps[0]));
     if (completion_type < 0 || completion_type >= kOpsCount) return nullptr;
