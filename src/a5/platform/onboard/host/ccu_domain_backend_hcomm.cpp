@@ -204,10 +204,11 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
     try {
         HcclCommConfig config{};
         HcclCommConfigInit(&config);
+        auto mutable_rank_ids = rank_ids;
         check(
             HcclCreateSubCommConfig(
-                &base_communicator, static_cast<uint32_t>(rank_ids.size()), rank_ids.data(), domain_id, domain_rank,
-                &config, &backend->communicator
+                &base_communicator, static_cast<uint32_t>(mutable_rank_ids.size()), mutable_rank_ids.data(), domain_id,
+                domain_rank, &config, &backend->communicator
             ),
             "HcclCreateSubCommConfig(CCU)"
         );
