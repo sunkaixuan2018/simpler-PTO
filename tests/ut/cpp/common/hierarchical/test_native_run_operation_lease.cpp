@@ -1187,6 +1187,19 @@ TEST(NativeRunOperationLeaseTest, UnpublishedDomainAbortUsesLocalBackendAndHonor
     EXPECT_EQ(g_destroy_context_calls, 0);
 }
 
+TEST(NativeRunOperationLeaseTest, CcuAbortRetainsOwnersWhenFaultedContextRefusesTheSdkCall) {
+    ChipWorker worker;
+    prime(worker);
+    worker.finalize_device_fn_ = stub_finalize_device;
+    g_context_rc = -1;
+    EXPECT_THROW(worker.control_domain_ccu(1, 0, 4, 1), std::runtime_error);
+    EXPECT_TRUE(worker.comm_cleanup_unconfirmed_);
+    g_context_rc = 0;
+    EXPECT_THROW(worker.finalize(), std::runtime_error);
+    EXPECT_EQ(g_device_finalize_calls, 0);
+    EXPECT_EQ(g_destroy_context_calls, 0);
+}
+
 TEST(NativeRunOperationLeaseTest, DomainAllocationFailurePublishesCleanupOwnership) {
     const int results[] = {
         -1,
