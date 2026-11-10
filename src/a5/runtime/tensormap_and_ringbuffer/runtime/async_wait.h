@@ -24,7 +24,7 @@
 #include "completion_token.h"
 #include "platform_comm/ccu/ccu_completion.h"
 #include "runtime_types.h"
-#include "unified_log.h"
+#include "common/unified_log.h"
 
 struct SchedulerState;
 struct CompletionStats;

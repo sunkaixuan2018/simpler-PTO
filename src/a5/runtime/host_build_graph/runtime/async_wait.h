@@ -21,7 +21,7 @@
 #include "host_build_graph/runtime_status.h"
 #include "host_build_graph/runtime_types.h"
 #include "platform_comm/ccu/ccu_completion.h"
-#include "unified_log.h"
+#include "common/unified_log.h"
 
 struct SchedulerState;
 struct CompletionStats;
