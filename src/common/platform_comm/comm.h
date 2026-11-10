@@ -302,6 +302,17 @@ int comm_alloc_host_domain_windows(
 );
 
 /**
+ * Bind one registered callable's native CCU module package to an existing A5
+ * DomainAllocation. This is a prepare transaction, separate from window
+ * allocation: failure publishes no CCU owner, while success keeps the exact
+ * module bytes and every HCOMM/ACL resource alive until domain release.
+ */
+int comm_prepare_domain_ccu(
+    CommHandle h, uint64_t allocation_id, const void *module_package, size_t module_package_size,
+    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32], uint32_t group_id
+);
+
+/**
  * Collectively release a domain window pool allocated by
  * comm_alloc_domain_windows().
  *

@@ -19,6 +19,7 @@
 #include "host_log.h"
 #include "pipeline_contract.h"
 #include "runtime_module.h"
+#include "task_interface/ccu_module_package.h"
 #include "host/raii_scope_guard.h"
 
 #include <dlfcn.h>
@@ -465,6 +466,7 @@ void ChipWorker::init(
             module->optional<CommAllocHostDomainWindowsFn>("comm_alloc_host_domain_windows");
         comm_release_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_release_domain_windows");
         comm_abort_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_abort_domain_windows");
+        comm_prepare_domain_ccu_fn_ = module->optional<CommPrepareDomainCcuFn>("comm_prepare_domain_ccu");
         comm_global_domain_prepare_fn_ = module->required<CommGlobalDomainPrepareFn>("comm_global_domain_prepare");
         comm_global_domain_import_fn_ = module->required<CommGlobalDomainImportFn>("comm_global_domain_import");
         comm_global_domain_release_fn_ = module->required<CommGlobalDomainReleaseFn>("comm_global_domain_release");
@@ -941,6 +943,7 @@ void ChipWorker::clear_runtime_binding(bool release_device_reservation) {
     comm_alloc_host_domain_windows_fn_ = nullptr;
     comm_release_domain_windows_fn_ = nullptr;
     comm_abort_domain_windows_fn_ = nullptr;
+    comm_prepare_domain_ccu_fn_ = nullptr;
     comm_global_domain_prepare_fn_ = nullptr;
     comm_global_domain_import_fn_ = nullptr;
     comm_global_domain_release_fn_ = nullptr;
@@ -2715,6 +2718,25 @@ std::tuple<uint64_t, uint64_t, size_t> ChipWorker::comm_alloc_domain_windows(
         throw std::runtime_error("comm_alloc_domain_windows returned null device_ctx / local_window_base");
     }
     return {device_ctx, local_window_base, actual_window_size};
+}
+
+void ChipWorker::bind_ccu_callable_to_domain(
+    uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
+    const simpler::ccu::ExpectedBuildIdentity &expected_identity
+) {
+    require_comm_cleanup_confirmed();
+    validate_execution_context();
+    if (comm_prepare_domain_ccu_fn_ == nullptr)
+        throw std::runtime_error("this runtime does not support native CCU domain preparation");
+    const auto found = callable_artifacts_.find(callable_id);
+    if (found == callable_artifacts_.end()) throw std::runtime_error("CCU callable ID is not registered");
+    if (found->second.ccu_modules.empty()) throw std::runtime_error("callable has no native CCU modules");
+    const auto package = pack_ccu_modules(found->second.ccu_modules);
+    const int rc = comm_prepare_domain_ccu_fn_(
+        reinterpret_cast<void *>(comm_handle), allocation_id, package.data(), package.size(),
+        expected_identity.sdk.data(), expected_identity.pto_isa.data(), group_id
+    );
+    if (rc != 0) throw std::runtime_error("native CCU domain preparation failed with code " + std::to_string(rc));
 }
 
 void ChipWorker::comm_release_domain_windows(

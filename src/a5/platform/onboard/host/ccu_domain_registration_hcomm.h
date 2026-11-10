@@ -22,6 +22,8 @@ namespace simpler::ccu {
 
 class HcommDomainRegistrationSdk final : public DomainRegistrationSdk {
 public:
+    static constexpr size_t kResourceTypeCount = 8;
+
     HcommDomainRegistrationSdk(uint64_t instance_handle, uint32_t die_id);
 
     int query_resources(const void *entry, const void *const *arguments, uint32_t argument_count) override;
@@ -34,9 +36,9 @@ public:
     int register_end() override;
     int get_task_argument_count(uint64_t program_handle, uint32_t *argument_count) override;
 
-private:
-    static constexpr size_t kResourceTypeCount = 8;
+    const std::array<uint64_t, kResourceTypeCount> &required_resources() const noexcept { return required_resources_; }
 
+private:
     uint64_t instance_handle_{};
     uint32_t die_id_{};
     std::array<uint64_t, kResourceTypeCount> required_resources_{};

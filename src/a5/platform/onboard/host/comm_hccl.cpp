@@ -25,11 +25,14 @@
 #include "platform_comm/comm.h"
 #include "platform_comm/comm_context.h"
 #include "platform_comm/ccu/ccu_domain_owner.h"
+#include "ccu_domain_backend_hcomm.h"
+#include "task_interface/ccu_module_package.h"
 
 #include "common/unified_log.h"
 #include "host/file_marker_handshake.h"
 #include "host/raii_scope_guard.h"
 
+#include <algorithm>
 #include <array>
 #include <chrono>
 #include <cctype>
@@ -112,6 +115,8 @@ struct DomainAllocation {
     bool initialized = false;
     bool cleanup_failed = false;
     std::unique_ptr<simpler::ccu::DomainCcuOwner> ccu;
+    std::vector<simpler::ccu::HcommPreparedMission> ccu_missions;
+    std::vector<uint32_t> rank_ids;
     HcclComm urma_comm = nullptr;
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
     void *urma_workspace_addr = nullptr;
@@ -2030,6 +2035,7 @@ static int allocate_domain_windows(
     auto &alloc = entry->second;
     alloc->rank = static_cast<int>(domain_rank);
     alloc->nranks = static_cast<int>(rank_count);
+    alloc->rank_ids.assign(rank_ids, rank_ids + rank_count);
     int rc = -1;
     try {
         rc = host_shm_name == nullptr ?
@@ -2088,6 +2094,44 @@ extern "C" int comm_alloc_host_domain_windows(
         h, allocation_id, rank_ids, rank_count, domain_rank, window_size, workspace_mask, host_shm_name, device_ctx_out,
         local_window_base_out, actual_window_size_out
     );
+}
+
+extern "C" int comm_prepare_domain_ccu(
+    CommHandle h, uint64_t allocation_id, const void *module_package, size_t module_package_size,
+    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32], uint32_t group_id
+) try {
+    if (h == nullptr || module_package == nullptr || module_package_size == 0 || sdk_build_id == nullptr ||
+        pto_isa_build_id == nullptr || group_id == SIMPLER_CCU_INVALID_GROUP_ID)
+        return -1;
+    auto found = h->domain_allocations.find(allocation_id);
+    if (found == h->domain_allocations.end() || !found->second->initialized || found->second->ccu != nullptr ||
+        found->second->rank_ids.empty())
+        return -1;
+
+    simpler::ccu::ExpectedBuildIdentity identity{};
+    std::copy_n(sdk_build_id, identity.sdk.size(), identity.sdk.begin());
+    std::copy_n(pto_isa_build_id, identity.pto_isa.size(), identity.pto_isa.begin());
+    auto modules = unpack_ccu_modules(module_package, module_package_size);
+    auto prepared = simpler::ccu::prepare_hcomm_ccu_domain(
+        h->hccl_comm, allocation_id, found->second->rank_ids, static_cast<uint32_t>(found->second->rank), group_id,
+        identity, modules, "simpler_callable"
+    );
+    if (!prepared.owner || prepared.missions.empty()) return -1;
+    found->second->ccu_missions = std::move(prepared.missions);
+    found->second->ccu = std::move(prepared.owner);
+    return 0;
+} catch (const std::exception &error) {
+    LOG_ERROR(
+        "[comm] prepare_domain_ccu(allocation_id=%llu) failed: %s", static_cast<unsigned long long>(allocation_id),
+        error.what()
+    );
+    return -1;
+} catch (...) {
+    LOG_ERROR(
+        "[comm] prepare_domain_ccu(allocation_id=%llu) failed with an unknown exception",
+        static_cast<unsigned long long>(allocation_id)
+    );
+    return -1;
 }
 
 static int release_domain_windows(

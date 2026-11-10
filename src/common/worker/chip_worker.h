@@ -32,6 +32,7 @@
 #include "../task_interface/task_args.h"
 #include "host/chip_swimlane_runs.h"
 #include "callable_artifacts.h"
+#include "platform_comm/ccu/ccu_native_module.h"
 #include "native_run_storage_tag.h"
 #include "run_resource_arena.h"
 #include "runtime_c_api.h"
@@ -445,6 +446,10 @@ public:
         size_t window_size, uint32_t workspace_mask = 0, uint64_t *ownership_flag = nullptr,
         const std::string &host_shm_name = {}
     );
+    void bind_ccu_callable_to_domain(
+        uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
+        const simpler::ccu::ExpectedBuildIdentity &expected_identity
+    );
     /// Pair to `comm_alloc_domain_windows`: collectively free the per-rank
     /// pool and the device CommContext, then drop the allocation record.
     /// `rank_count` + `domain_rank` size the subset barrier; the rank list
@@ -648,6 +653,8 @@ private:
         size_t *
     );
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
+    using CommPrepareDomainCcuFn =
+        int (*)(void *, uint64_t, const void *, size_t, const uint8_t *, const uint8_t *, uint32_t);
     using CommGlobalDomainPrepareFn =
         int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
     using CommGlobalDomainImportFn = int (*)(uint64_t, const CommGlobalDomainDescriptor *, size_t, uint64_t *);
@@ -791,6 +798,7 @@ private:
     CommAllocHostDomainWindowsFn comm_alloc_host_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_release_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_abort_domain_windows_fn_ = nullptr;
+    CommPrepareDomainCcuFn comm_prepare_domain_ccu_fn_ = nullptr;
     CommGlobalDomainPrepareFn comm_global_domain_prepare_fn_ = nullptr;
     CommGlobalDomainImportFn comm_global_domain_import_fn_ = nullptr;
     CommGlobalDomainReleaseFn comm_global_domain_release_fn_ = nullptr;
