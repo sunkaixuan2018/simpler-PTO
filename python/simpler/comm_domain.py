@@ -63,6 +63,7 @@ class DomainConfig:
     topology: tuple
     workspace_engines: tuple[str, ...] = ()
     memory_source: AddressSpace = AddressSpace.DEVICE
+    ccu_binding: tuple = ()
 
     @classmethod
     def capture(

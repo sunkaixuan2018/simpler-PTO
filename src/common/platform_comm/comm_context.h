@@ -45,6 +45,8 @@ struct CommContext {
     uint64_t windowsIn[COMM_MAX_RANK_NUM];
     uint64_t windowsOut[COMM_MAX_RANK_NUM];
     CommWorkspace workspaces[COMM_WORKSPACE_COUNT];
+    uint64_t ccu_missions_addr;
+    uint64_t ccu_mission_count;
 };
 
 #if defined(__CCE_AICORE__)
@@ -80,7 +82,7 @@ inline bool set_comm_workspace(CommContext &ctx, CommWorkspaceKind kind, uint64_
 static_assert(std::is_trivially_copyable_v<CommWorkspace> && std::is_standard_layout_v<CommWorkspace>);
 static_assert(std::is_trivially_copyable_v<CommContext> && std::is_standard_layout_v<CommContext>);
 static_assert(sizeof(CommWorkspace) == 16, "CommWorkspace size shifted");
-static_assert(sizeof(CommContext) == 1088, "CommContext size shifted");
+static_assert(sizeof(CommContext) == 1104, "CommContext size shifted");
 static_assert(offsetof(CommContext, rankId) == 0, "CommContext layout drift");
 static_assert(offsetof(CommContext, rankNum) == 4, "CommContext layout drift");
 static_assert(offsetof(CommContext, winSize) == 8, "CommContext layout drift");

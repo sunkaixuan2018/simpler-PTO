@@ -4225,6 +4225,10 @@ NB_MODULE(_task_interface, m) {
             nb::arg("sdk_build_id"), nb::arg("pto_isa_build_id")
         )
         .def(
+            "control_domain_ccu", &ChipWorker::control_domain_ccu, nb::arg("comm_handle"), nb::arg("allocation_id"),
+            nb::arg("operation"), nb::arg("generation")
+        )
+        .def(
             "comm_release_domain_windows", &ChipWorker::comm_release_domain_windows, nb::arg("comm_handle"),
             nb::arg("allocation_id"), nb::arg("rank_count"), nb::arg("domain_rank"),
             "Pair to comm_alloc_domain_windows: collectively release the per-rank pool."

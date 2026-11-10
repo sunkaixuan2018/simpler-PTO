@@ -71,10 +71,12 @@ class _CommContext(ctypes.Structure):
         ("windowsIn", ctypes.c_uint64 * _COMM_MAX_RANK_NUM),
         ("windowsOut", ctypes.c_uint64 * _COMM_MAX_RANK_NUM),
         ("workspaces", _CommWorkspace * 3),
+        ("ccu_missions_addr", ctypes.c_uint64),
+        ("ccu_mission_count", ctypes.c_uint64),
     ]
 
 
-assert ctypes.sizeof(_CommContext) == 1088, "CommContext python mirror drifted from C++ header"
+assert ctypes.sizeof(_CommContext) == 1104, "CommContext python mirror drifted from C++ header"
 
 
 @contextmanager

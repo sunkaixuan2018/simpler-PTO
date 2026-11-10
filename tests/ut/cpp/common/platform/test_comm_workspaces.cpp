@@ -70,7 +70,7 @@ TEST(CommWorkspaces, EnumIndicesMatchSerializedDescriptorOrder) {
     const CommContext &view = ctx;
     EXPECT_EQ(comm_workspace<CommWorkspaceKind::RDMA>(view).addr, 0x12345678u);
     EXPECT_EQ(COMM_WORKSPACE_COUNT, 3u);
-    ASSERT_EQ(sizeof(ctx), 1088u);
+    ASSERT_EQ(sizeof(ctx), 1104u);
     unsigned char image[sizeof(ctx)];
     std::memcpy(image, &ctx, sizeof(ctx));
     uint32_t rank = 0;

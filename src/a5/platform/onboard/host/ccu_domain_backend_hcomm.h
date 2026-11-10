@@ -30,17 +30,25 @@ struct HcommPreparedMission {
     uint64_t trigger_gate_address{};
     uint64_t stop_gate_address{};
     uint64_t stream_handle{};
+    uint32_t group_id{};
+    uint64_t parameter_size{};
+    uint32_t parameter_alignment{};
 };
 
-struct HcommDomainPreparation {
-    std::unique_ptr<DomainCcuOwner> owner;
-    std::vector<HcommPreparedMission> missions;
+class HcommDomainSession : public DomainResourceBackend {
+public:
+    virtual uint64_t
+    begin(DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation) = 0;
+    virtual bool ready() = 0;
+    virtual bool stop() = 0;
+    virtual void abort() = 0;
 };
 
-HcommDomainPreparation prepare_hcomm_ccu_domain(
+std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     HcclComm base_communicator, uint64_t domain_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
     uint32_t group_id, const ExpectedBuildIdentity &expected_identity,
-    const std::vector<std::vector<uint8_t>> &module_bytes, const std::string &program_namespace
+    const std::vector<std::vector<uint8_t>> &module_bytes, const std::string &program_namespace,
+    std::unique_ptr<DomainCcuOwner> &owner, HcommDomainSession *&session
 );
 
 }  // namespace simpler::ccu

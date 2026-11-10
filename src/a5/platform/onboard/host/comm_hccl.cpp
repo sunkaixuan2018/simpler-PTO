@@ -115,6 +115,7 @@ struct DomainAllocation {
     bool initialized = false;
     bool cleanup_failed = false;
     std::unique_ptr<simpler::ccu::DomainCcuOwner> ccu;
+    simpler::ccu::HcommDomainSession *ccu_session = nullptr;
     std::vector<simpler::ccu::HcommPreparedMission> ccu_missions;
     std::vector<uint32_t> rank_ids;
     HcclComm urma_comm = nullptr;
@@ -2112,13 +2113,11 @@ extern "C" int comm_prepare_domain_ccu(
     std::copy_n(sdk_build_id, identity.sdk.size(), identity.sdk.begin());
     std::copy_n(pto_isa_build_id, identity.pto_isa.size(), identity.pto_isa.begin());
     auto modules = unpack_ccu_modules(module_package, module_package_size);
-    auto prepared = simpler::ccu::prepare_hcomm_ccu_domain(
+    found->second->ccu_missions = simpler::ccu::prepare_hcomm_ccu_domain(
         h->hccl_comm, allocation_id, found->second->rank_ids, static_cast<uint32_t>(found->second->rank), group_id,
-        identity, modules, "simpler_callable"
+        identity, modules, "simpler_callable", found->second->ccu, found->second->ccu_session
     );
-    if (!prepared.owner || prepared.missions.empty()) return -1;
-    found->second->ccu_missions = std::move(prepared.missions);
-    found->second->ccu = std::move(prepared.owner);
+    if (!found->second->ccu || found->second->ccu_missions.empty()) return -1;
     return 0;
 } catch (const std::exception &error) {
     LOG_ERROR(
@@ -2132,6 +2131,43 @@ extern "C" int comm_prepare_domain_ccu(
         static_cast<unsigned long long>(allocation_id)
     );
     return -1;
+}
+
+extern "C" int
+comm_control_domain_ccu(CommHandle h, uint64_t allocation_id, uint32_t operation, uint64_t generation) try {
+    if (!h) return -1;
+    auto found = h->domain_allocations.find(allocation_id);
+    if (found == h->domain_allocations.end()) return -1;
+    auto &allocation = *found->second;
+    if (!allocation.ccu || !allocation.ccu_session) return -1;
+    switch (operation) {
+    case 1: {
+        const uint64_t table = allocation.ccu_session->begin(*allocation.ccu, allocation.ccu_missions, generation);
+        const uint64_t metadata[]{table, allocation.ccu_missions.size()};
+        const auto target =
+            reinterpret_cast<uintptr_t>(allocation.device_ctx) + offsetof(CommContext, ccu_missions_addr);
+        if (aclrtMemcpy(
+                reinterpret_cast<void *>(target), sizeof(metadata), metadata, sizeof(metadata),
+                ACL_MEMCPY_HOST_TO_DEVICE
+            ) != ACL_SUCCESS) {
+            allocation.ccu_session->abort();
+            return COMM_RECLAMATION_UNCONFIRMED;
+        }
+        return 0;
+    }
+    case 2:
+        return allocation.ccu_session->ready() ? 0 : 1;
+    case 3:
+        return allocation.ccu_session->stop() ? 0 : 1;
+    case 4:
+        allocation.ccu_session->abort();
+        return COMM_RECLAMATION_UNCONFIRMED;
+    default:
+        return -1;
+    }
+} catch (const std::exception &error) {
+    LOG_ERROR("[comm] CCU control failed: %s", error.what());
+    return COMM_RECLAMATION_UNCONFIRMED;
 }
 
 static int release_domain_windows(

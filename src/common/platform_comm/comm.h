@@ -37,6 +37,9 @@ extern "C" {
 
 typedef struct CommHandle_ *CommHandle;
 
+// Internal CCU run controls: begin=1, poll READY=2, stop/poll=3, abort=4.
+int comm_control_domain_ccu(CommHandle h, uint64_t allocation_id, uint32_t operation, uint64_t generation);
+
 // Domain allocation failures that callers can distinguish from generic ACL errors.
 typedef enum CommDomainStatus {
     COMM_DOMAIN_WORKSPACE_UNSUPPORTED = -2,

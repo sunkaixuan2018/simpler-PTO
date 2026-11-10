@@ -450,6 +450,7 @@ public:
         uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
         const simpler::ccu::ExpectedBuildIdentity &expected_identity
     );
+    int control_domain_ccu(uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation);
     /// Pair to `comm_alloc_domain_windows`: collectively free the per-rank
     /// pool and the device CommContext, then drop the allocation record.
     /// `rank_count` + `domain_rank` size the subset barrier; the rank list
@@ -799,6 +800,8 @@ private:
     CommReleaseDomainWindowsFn comm_release_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_abort_domain_windows_fn_ = nullptr;
     CommPrepareDomainCcuFn comm_prepare_domain_ccu_fn_ = nullptr;
+    using CommControlDomainCcuFn = int (*)(void *, uint64_t, uint32_t, uint64_t);
+    CommControlDomainCcuFn comm_control_domain_ccu_fn_ = nullptr;
     CommGlobalDomainPrepareFn comm_global_domain_prepare_fn_ = nullptr;
     CommGlobalDomainImportFn comm_global_domain_import_fn_ = nullptr;
     CommGlobalDomainReleaseFn comm_global_domain_release_fn_ = nullptr;

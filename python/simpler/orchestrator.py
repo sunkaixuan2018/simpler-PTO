@@ -545,7 +545,7 @@ class Orchestrator:
     # duration of the alloc / release handshake)
     # ------------------------------------------------------------------
 
-    def allocate_domain(
+    def allocate_domain(  # noqa: PLR0913 -- CCU binding carries the callable, group and exact build identities
         self,
         *,
         name: str,
@@ -557,6 +557,10 @@ class Orchestrator:
         workspace_engines: Sequence[str] = (),
         memory_source: AddressSpace = AddressSpace.DEVICE,
         initializer: Callable[[CommDomainHandle], None] | None = None,
+        ccu_callable=None,
+        ccu_group_id=None,
+        ccu_sdk_build_id=None,
+        ccu_pto_isa_build_id=None,
     ) -> CommDomainHandle:
         """Create a domain using L3 chip ids or L4 ``(node, chip)`` members.
 
@@ -592,10 +596,11 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
+            ccu_binding=(ccu_callable, ccu_group_id, ccu_sdk_build_id, ccu_pto_isa_build_id),
             reuse=False,
         )
 
-    def get_or_allocate_domain(
+    def get_or_allocate_domain(  # noqa: PLR0913 -- same configuration contract as allocate_domain
         self,
         *,
         name: str,
@@ -606,6 +611,10 @@ class Orchestrator:
         workspace_engines: Sequence[str] = (),
         memory_source: AddressSpace = AddressSpace.DEVICE,
         initializer: Callable[[CommDomainHandle], None] | None = None,
+        ccu_callable=None,
+        ccu_group_id=None,
+        ccu_sdk_build_id=None,
+        ccu_pto_isa_build_id=None,
     ) -> CommDomainHandle:
         """Return the same live handle on an exact configuration match, otherwise create it.
 
@@ -624,6 +633,7 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
+            ccu_binding=(ccu_callable, ccu_group_id, ccu_sdk_build_id, ccu_pto_isa_build_id),
             reuse=True,
         )
 
@@ -638,6 +648,7 @@ class Orchestrator:
         workspace_engines=(),
         memory_source=AddressSpace.DEVICE,
         initializer=None,
+        ccu_binding=(),
         reuse,
     ):
         if self._worker is None:
@@ -652,6 +663,7 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
+            ccu_binding=ccu_binding,
         )
 
     def get_domain(self, name: str | CommDomainRef) -> CommDomainHandle:

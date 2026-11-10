@@ -12,6 +12,7 @@
 #include "ccu_domain_backend_hcomm.h"
 
 #include <array>
+#include <algorithm>
 #include <dlfcn.h>
 #include <limits>
 #include <stdexcept>
@@ -114,10 +115,11 @@ SimplerCcuRegistrationBindingV1 binding_for(
     };
 }
 
-class HcommDomainResourceBackend final : public DomainResourceBackend {
+class HcommDomainResourceBackend final : public HcommDomainSession {
 public:
     HcclComm communicator{};
     CcuInsHandle unassigned_instance{};
+    CcuInsHandle staging_instance{};
     bool instance_assigned{false};
     ChannelHandle channel{};
     std::vector<HcommMissionStream> streams;
@@ -125,10 +127,97 @@ public:
     aclrtFuncHandle trigger_function{};
     aclrtStream trigger_stream{};
 
+    uint64_t
+    begin(DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation) override {
+        if (run_ && !run_->confirmed_stopped()) throw std::runtime_error("CCU prior run has no confirmed stop");
+        run_.reset();
+        sdk_.reset();
+        release_memory();
+        std::vector<MissionRunResources> resources;
+        std::vector<SimplerCcuMissionDescriptorV1> descriptors;
+        for (const auto &mission : missions) {
+            auto control_address = allocate(sizeof(SimplerCcuRunControlV1), 64);
+            auto parameter_address =
+                allocate(std::max<uint64_t>(mission.parameter_size, 1), mission.parameter_alignment);
+            auto slot_address = allocate(sizeof(SimplerCcuCompletionSlotV1), SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT);
+            SimplerCcuRunControlV1 control{};
+            control.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
+            control.struct_size = sizeof(control);
+            control.run_generation = generation;
+            control.mission_id = mission.mission_id;
+            control.state = SIMPLER_CCU_RUN_STATE_INIT;
+            control.stop_gate_addr = mission.stop_gate_address;
+            control.final_wake_value = (uint64_t{1} << 63) | 1;
+            copy_to_device(control_address, &control, sizeof(control));
+            SimplerCcuCompletionSlotV1 slot{};
+            slot.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
+            slot.struct_size = sizeof(slot);
+            slot.mission_id = mission.mission_id;
+            slot.run_generation = generation;
+            copy_to_device(slot_address, &slot, sizeof(slot));
+            const uint64_t control_token = token(control_address, sizeof(control));
+            const uint64_t parameter_token = token(parameter_address, std::max<uint64_t>(mission.parameter_size, 1));
+            const uint64_t slot_token = token(slot_address, sizeof(slot));
+            SimplerCcuLaunchArgumentsV1 arguments{
+                SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION,
+                generation,
+                mission.mission_id,
+                control_address,
+                control_token,
+                parameter_address,
+                parameter_token,
+                slot_address,
+                slot_token,
+                0
+            };
+            resources.push_back({mission.mission_id, mission.program_handle, mission.stream_handle, arguments});
+            descriptors.push_back(
+                {SIMPLER_CCU_MODULE_ABI_VERSION, sizeof(SimplerCcuMissionDescriptorV1), generation, mission.mission_id,
+                 mission.kernel_id, mission.group_id, 0, parameter_address, mission.parameter_size, control_address,
+                 slot_address, mission.trigger_gate_address, mission.stop_gate_address, control_token, parameter_token,
+                 slot_token, 0}
+            );
+        }
+        const uint64_t table = allocate(descriptors.size() * sizeof(descriptors.front()), 64);
+        copy_to_device(table, descriptors.data(), descriptors.size() * sizeof(descriptors.front()));
+        sdk_ = std::make_unique<HcommRunLifecycleSdk>(streams, [this](uint64_t address, uint64_t value) {
+            uint64_t arguments[]{address, value};
+            int rc = aclrtLaunchKernel(trigger_function, 1, arguments, sizeof(arguments), trigger_stream);
+            if (rc == 0) rc = aclrtSynchronizeStreamWithTimeout(trigger_stream, 10000);
+            return rc;
+        });
+        run_ = owner.begin_run(generation, resources, *sdk_);
+        stopping_ = false;
+        run_->launch_all();
+        return table;
+    }
+
+    bool ready() override {
+        if (!run_) throw std::runtime_error("CCU run is absent");
+        const bool result = run_->poll_ready();
+        if (run_->failed()) throw std::runtime_error("CCU mission failed before READY");
+        return result;
+    }
+
+    bool stop() override {
+        if (!run_) return true;
+        if (!stopping_) {
+            stopping_ = true;
+            run_->stop();
+        }
+        if (run_->failed()) throw std::runtime_error("CCU mission failed during stop");
+        return run_->poll_terminal();
+    }
+
+    void abort() override {
+        if (run_) run_->abort();
+    }
+
     bool drained() const override {
         if (closed_) return false;
+        if (run_ && !run_->confirmed_stopped()) return false;
         for (const auto &mission : streams) {
-            if (mission.stream == nullptr) return false;
+            if (mission.stream == nullptr) continue;
             aclrtStreamStatus state{};
             if (aclrtStreamQuery(mission.stream, &state) != ACL_SUCCESS || state != ACL_STREAM_STATUS_COMPLETE)
                 return false;
@@ -144,6 +233,13 @@ public:
     bool close() override {
         if (closed_) return true;
         if (!drained()) return false;
+        run_.reset();
+        sdk_.reset();
+        release_memory();
+        if (staging_instance != 0) {
+            if (HcommCcuInsDestroy(staging_instance) != CCU_SUCCESS) return false;
+            staging_instance = 0;
+        }
         if (!instance_assigned && unassigned_instance != 0) {
             if (HcommCcuInsDestroy(unassigned_instance) != CCU_SUCCESS) return false;
             unassigned_instance = 0;
@@ -172,16 +268,55 @@ public:
     }
 
 private:
+    static void copy_to_device(uint64_t address, const void *source, size_t bytes) {
+        check(
+            aclrtMemcpy(reinterpret_cast<void *>(address), bytes, source, bytes, ACL_MEMCPY_HOST_TO_DEVICE),
+            "CCU initialize GM"
+        );
+    }
+    uint64_t allocate(uint64_t bytes, uint32_t alignment) {
+        alignment = std::max<uint32_t>(alignment, 64);
+        if (bytes > std::numeric_limits<size_t>::max() - alignment)
+            throw std::overflow_error("CCU GM allocation overflow");
+        void *base{};
+        check(aclrtMalloc(&base, bytes + alignment - 1, ACL_MEM_MALLOC_HUGE_FIRST), "aclrtMalloc(CCU run)");
+        try {
+            allocations_.push_back(base);
+        } catch (...) {
+            (void)aclrtFree(base);
+            throw;
+        }
+        const uint64_t address = reinterpret_cast<uint64_t>(base);
+        return (address + alignment - 1) & ~(uint64_t(alignment) - 1);
+    }
+    static uint64_t token(uint64_t address, uint64_t bytes) {
+        uint64_t result{};
+        check(HcommCcuGetMemToken(address, bytes, &result), "HcommCcuGetMemToken");
+        return result;
+    }
+    void release_memory() {
+        for (auto &allocation : allocations_) {
+            if (allocation) check(aclrtFree(allocation), "aclrtFree(CCU run)");
+            allocation = nullptr;
+        }
+        allocations_.clear();
+    }
+    std::vector<void *> allocations_;
+    std::unique_ptr<HcommRunLifecycleSdk> sdk_;
+    std::unique_ptr<DomainRun> run_;
+    bool stopping_{false};
     bool closed_{false};
 };
 
 }  // namespace
 
-HcommDomainPreparation prepare_hcomm_ccu_domain(
+std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     HcclComm base_communicator, uint64_t domain_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
     uint32_t group_id, const ExpectedBuildIdentity &expected_identity,
-    const std::vector<std::vector<uint8_t>> &module_bytes, const std::string &program_namespace
+    const std::vector<std::vector<uint8_t>> &module_bytes, const std::string &program_namespace,
+    std::unique_ptr<DomainCcuOwner> &owner, HcommDomainSession *&session
 ) {
+    if (owner) throw std::invalid_argument("CCU domain already has an owner");
     if (base_communicator == nullptr || domain_id == 0 || rank_ids.size() < 2 || domain_rank >= rank_ids.size() ||
         group_id == SIMPLER_CCU_INVALID_GROUP_ID || module_bytes.empty() || program_namespace.empty())
         throw std::invalid_argument("invalid A5 CCU domain preparation request");
@@ -197,10 +332,12 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
     }
     if (kernels.empty()) throw std::invalid_argument("the callable has no CCU kernel in the requested group");
 
-    auto backend = std::make_unique<HcommDomainResourceBackend>();
-    auto rollback = [&] {
-        if (!backend->close()) throw std::runtime_error("A5 CCU prepare rollback could not confirm resource release");
-    };
+    auto owned_backend = std::make_unique<HcommDomainResourceBackend>();
+    auto *backend = owned_backend.get();
+    owner = std::make_unique<DomainCcuOwner>(std::move(owned_backend));
+    session = backend;
+    for (auto &module : modules)
+        owner->retain_module(std::move(module));
     try {
         HcclCommConfig config{};
         HcclCommConfigInit(&config);
@@ -215,7 +352,7 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
         backend->channel = acquire_ring_channel(backend->communicator, domain_rank, rank_ids.size());
         const uint32_t die = find_channel_die(backend->channel);
 
-        CcuInsHandle staging{};
+        auto &staging = backend->staging_instance;
         check(HcommCcuInsCreateDefault(nullptr, 0, &staging), "HcommCcuInsCreateDefault(staging)");
         std::vector<std::pair<CcuEventHandle, CcuEventHandle>> staging_events;
         staging_events.reserve(kernels.size());
@@ -261,7 +398,6 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
             }
             check(HcommCcuInsResDescDestroy(descriptor), "HcommCcuInsResDescDestroy(sized)");
         } catch (...) {
-            if (staging != 0) (void)HcommCcuInsDestroy(staging);
             throw;
         }
 
@@ -283,7 +419,9 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
             check(HcommCcuEventGetAddr(stop, 0, &stop_address), "HcommCcuEventGetAddr(stop)");
             request.missions.push_back({kernel.record.kernel_id, trigger, stop});
             missions.push_back(
-                {kernel.record.kernel_id, kernel.record.kernel_id, 0, trigger, stop, trigger_address, stop_address, 0}
+                {static_cast<uint32_t>(missions.size() + 1), kernel.record.kernel_id, 0, trigger, stop, trigger_address,
+                 stop_address, 0, kernel.record.group_id, kernel.record.parameter_size,
+                 kernel.record.parameter_alignment}
             );
         }
 
@@ -328,13 +466,14 @@ HcommDomainPreparation prepare_hcomm_ccu_domain(
         if (assigned_count != 1 || assigned != backend->unassigned_instance)
             throw std::runtime_error("assigned CCU instance does not match the prepared instance");
 
-        auto owner = std::make_unique<DomainCcuOwner>(std::move(backend));
-        for (auto &module : modules)
-            owner->retain_module(std::move(module));
         owner->set_registered_kernels(registered);
-        return {std::move(owner), std::move(missions)};
+        return missions;
     } catch (...) {
-        rollback();
+        // Keep the owner attached to the allocation when SDK cleanup cannot be confirmed.
+        if (owner->close()) {
+            owner.reset();
+            session = nullptr;
+        }
         throw;
     }
 }

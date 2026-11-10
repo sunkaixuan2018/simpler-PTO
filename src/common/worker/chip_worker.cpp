@@ -467,6 +467,7 @@ void ChipWorker::init(
         comm_release_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_release_domain_windows");
         comm_abort_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_abort_domain_windows");
         comm_prepare_domain_ccu_fn_ = module->optional<CommPrepareDomainCcuFn>("comm_prepare_domain_ccu");
+        comm_control_domain_ccu_fn_ = module->optional<CommControlDomainCcuFn>("comm_control_domain_ccu");
         comm_global_domain_prepare_fn_ = module->required<CommGlobalDomainPrepareFn>("comm_global_domain_prepare");
         comm_global_domain_import_fn_ = module->required<CommGlobalDomainImportFn>("comm_global_domain_import");
         comm_global_domain_release_fn_ = module->required<CommGlobalDomainReleaseFn>("comm_global_domain_release");
@@ -944,6 +945,7 @@ void ChipWorker::clear_runtime_binding(bool release_device_reservation) {
     comm_release_domain_windows_fn_ = nullptr;
     comm_abort_domain_windows_fn_ = nullptr;
     comm_prepare_domain_ccu_fn_ = nullptr;
+    comm_control_domain_ccu_fn_ = nullptr;
     comm_global_domain_prepare_fn_ = nullptr;
     comm_global_domain_import_fn_ = nullptr;
     comm_global_domain_release_fn_ = nullptr;
@@ -2737,6 +2739,18 @@ void ChipWorker::bind_ccu_callable_to_domain(
         expected_identity.sdk.data(), expected_identity.pto_isa.data(), group_id
     );
     if (rc != 0) throw std::runtime_error("native CCU domain preparation failed with code " + std::to_string(rc));
+}
+
+int ChipWorker::control_domain_ccu(
+    uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation
+) {
+    validate_execution_context();
+    if (!comm_control_domain_ccu_fn_) throw std::runtime_error("runtime has no CCU run backend");
+    const int result =
+        comm_control_domain_ccu_fn_(reinterpret_cast<void *>(comm_handle), allocation_id, operation, generation);
+    if (result == COMM_RECLAMATION_UNCONFIRMED) retain_unconfirmed_comm_cleanup();
+    if (result < 0) throw std::runtime_error("CCU run control failed with code " + std::to_string(result));
+    return result;
 }
 
 void ChipWorker::comm_release_domain_windows(
