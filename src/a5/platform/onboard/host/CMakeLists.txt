@@ -203,6 +203,8 @@ target_include_directories(host_runtime
         ${ASCEND_ARCH_HOME}/pkg_inc/profiling
         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/asc/include
         ${ASCEND_ARCH_HOME}/asc/include
+        ${ASCEND_ARCH_HOME}/include/hccl
+        ${ASCEND_ARCH_HOME}/include/hcomm/ccu
         ${ASCEND_ARCH_HOME}/include/driver
         ${ASCEND_HOME_PATH}/${CMAKE_SYSTEM_PROCESSOR}-linux/include/driver
 )
