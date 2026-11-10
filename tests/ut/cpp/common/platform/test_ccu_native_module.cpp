@@ -22,6 +22,7 @@
 
 #include "platform_comm/ccu/ccu_native_module.h"
 
+extern "C" int simpler_ccu_test_kernel_a(const SimplerCcuRegistrationBindingV1 *);
 extern "C" {
 int simpler_ccu_test_manifest_variant = 0;
 }
@@ -29,8 +30,9 @@ int simpler_ccu_test_manifest_variant = 0;
 namespace {
 
 std::vector<uint8_t> module_bytes() {
+    if (simpler_ccu_test_kernel_a(nullptr) != 3) throw std::runtime_error("invalid CCU test fixture");
     Dl_info info{};
-    const void *entry = ::dlsym(RTLD_DEFAULT, "simpler_ccu_test_kernel_a");
+    const void *entry = ::dlsym(RTLD_NEXT, "simpler_ccu_test_kernel_a");
     if (entry == nullptr || ::dladdr(entry, &info) == 0 || info.dli_fname == nullptr)
         throw std::runtime_error("cannot locate CCU test module");
     std::ifstream input(info.dli_fname, std::ios::binary);
