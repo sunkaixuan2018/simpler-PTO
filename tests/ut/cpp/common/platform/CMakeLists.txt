@@ -158,6 +158,9 @@ simpler_ut_platform_case(test_ccu_domain_registration.cpp SINGLE BARE
 simpler_ut_platform_case(test_ccu_completion.cpp SINGLE BARE
     INCLUDES ${SIMPLER_SRC}/common)
 
+simpler_ut_platform_case(test_ccu_device_submission.cpp SINGLE BARE
+    INCLUDES ${SIMPLER_SRC}/common)
+
 # Each of these covers a header-only piece of the arch's platform surface and
 # needs nothing compiled in but the CANN platform stand-in.
 platform_cases(

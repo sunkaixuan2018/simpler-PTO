@@ -20,6 +20,7 @@
 #include "intrinsic.h"
 #include "aicore_completion_mailbox_types.h"
 #include "completion_token.h"
+#include "platform_comm/ccu/ccu_device_submission.h"
 #include "runtime_status.h"
 
 #ifndef __aicore__
@@ -138,6 +139,22 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
     slot->_pad = 0;
     *ctx.completion_count = idx + 1;
     return true;
+}
+
+inline __aicore__ bool submit_ccu_mission(
+    AsyncCtx &ctx, const volatile __gm__ SimplerCcuMissionDescriptorV1 *mission, uint64_t operation_sequence,
+    const void *parameters, uint64_t parameter_size
+) {
+    auto register_ccu_completion = [&](uint64_t address, uint64_t sequence) __aicore__ {
+        const CompletionToken token{address, 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, sequence};
+        if (!register_completion_condition(ctx, token)) return false;
+        pto2::detail::defer_flush(ctx);
+        return true;
+    };
+    const bool submitted =
+        simpler::ccu::submit_mission(mission, operation_sequence, parameters, parameter_size, register_ccu_completion);
+    if (!submitted) pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+    return submitted;
 }
 
 inline __aicore__ void
