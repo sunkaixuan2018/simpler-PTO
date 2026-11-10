@@ -110,6 +110,7 @@ private:
     bool terminal_{false};
     bool confirmed_stopped_{false};
     bool abort_attempted_{false};
+    size_t launched_missions_{0};
     bool released_{false};
 };
 

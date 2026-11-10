@@ -29,7 +29,7 @@ public:
     int launch(uint64_t, const uint64_t *, uint32_t argument_count, uint64_t stream) override {
         observations.push_back("launch:" + std::to_string(stream));
         EXPECT_EQ(argument_count, SIMPLER_CCU_TASK_ARGUMENT_COUNT);
-        return launch_error;
+        return launch_calls++ == launch_error_at ? launch_error : 0;
     }
     int read_control(uint64_t address, SimplerCcuRunControlV1 *control) override {
         observations.push_back("read:" + std::to_string(address));
@@ -57,6 +57,7 @@ public:
     }
 
     int launch_error{};
+    int launch_error_at{-1};
     int read_error{};
     int stop_error{};
     int wake_error{};
@@ -66,6 +67,9 @@ public:
     std::map<uint64_t, StreamState> streams;
     std::map<uint64_t, uint64_t> wake_values;
     std::vector<std::string> observations;
+
+private:
+    int launch_calls{};
 };
 
 SimplerCcuRunControlV1 control(uint64_t generation, uint32_t mission, uint32_t state) {
@@ -195,6 +199,32 @@ TEST(CcuRunLifecycle, DestroyingUnconfirmedRunRetainsResources) {
     }
     EXPECT_FALSE(owner.admission_open());
     EXPECT_TRUE(owner.resources_retained());
+}
+
+TEST(CcuRunLifecycle, PartialLaunchFailureAbortsOnlyStartedMissions) {
+    FakeSdk sdk;
+    sdk.launch_error_at = 1;
+    sdk.launch_error = 66;
+    DomainRunLifecycle owner;
+    auto run = owner.begin_run(14, programs(), {mission(14, 1, 101, 11), mission(14, 2, 102, 12)}, sdk);
+
+    EXPECT_THROW(run->launch_all(), std::runtime_error);
+    ASSERT_NE(run->primary_failure(), nullptr);
+    EXPECT_EQ(run->primary_failure()->native_error, 66);
+    EXPECT_EQ(sdk.observations.back(), "abort:11");
+    EXPECT_FALSE(owner.admission_open());
+    EXPECT_TRUE(owner.resources_retained());
+}
+
+TEST(CcuRunLifecycle, UnlaunchedRunCanBeCancelledWithoutPoisoningDomain) {
+    FakeSdk sdk;
+    DomainRunLifecycle owner;
+    { auto run = owner.begin_run(15, programs(), {mission(15, 1, 101, 11)}, sdk); }
+    EXPECT_TRUE(owner.admission_open());
+    EXPECT_FALSE(owner.resources_retained());
+
+    auto retry = owner.begin_run(16, programs(), {mission(16, 1, 101, 11)}, sdk);
+    EXPECT_FALSE(retry->launched());
 }
 
 }  // namespace

@@ -63,7 +63,13 @@ DomainRun::DomainRun(
     sdk_(sdk) {}
 
 DomainRun::~DomainRun() {
-    if (!released_) retain_unconfirmed();
+    if (released_) return;
+    if (launched_missions_ == 0) {
+        owner_.active_ = false;
+        released_ = true;
+        return;
+    }
+    retain_unconfirmed();
 }
 
 void DomainRun::record_failure(std::string operation, int64_t native_error) {
@@ -91,9 +97,10 @@ void DomainRun::launch_all() {
             sdk_.launch(mission.program_handle, words, SIMPLER_CCU_TASK_ARGUMENT_COUNT, mission.stream_handle);
         if (rc != 0) {
             record_failure("HcommCcuKernelLaunch", rc);
-            retain_unconfirmed();
+            abort();
             throw std::runtime_error("CCU mission launch failed");
         }
+        ++launched_missions_;
     }
     launched_ = true;
 }
@@ -190,8 +197,9 @@ bool DomainRun::stop() {
 void DomainRun::abort() {
     if (abort_attempted_) return;
     abort_attempted_ = true;
-    if (launched_) {
-        for (const auto &mission : missions_) {
+    if (launched_missions_ != 0) {
+        for (size_t i = 0; i < launched_missions_; ++i) {
+            const auto &mission = missions_[i];
             const int rc = sdk_.abort_stream(mission.stream_handle);
             if (rc != 0) record_failure("abort CCU stream", rc);
         }
