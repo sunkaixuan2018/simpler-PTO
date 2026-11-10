@@ -347,6 +347,7 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     try {
         HcclCommConfig config{};
         HcclCommConfigInit(&config);
+        config.hcclOpExpansionMode = HCCL_OP_EXPANSION_MODE_CCU_MS;
         auto mutable_rank_ids = rank_ids;
         check(
             HcclCreateSubCommConfig(
