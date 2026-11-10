@@ -94,7 +94,7 @@ def _build_callable(tmp_path):
 @pytest.mark.runtime(_RUNTIME)
 @pytest.mark.device_count(2)
 def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
-    rounds = request.config.getoption("--ccu-rounds")
+    rounds = request.config.getoption("--rounds")
     assert rounds > 0
     target, sdk_id, isa_id = _build_callable(tmp_path)
     worker = Worker(
