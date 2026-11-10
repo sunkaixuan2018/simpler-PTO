@@ -182,7 +182,13 @@ public:
         copy_to_device(table, descriptors.data(), descriptors.size() * sizeof(descriptors.front()));
         sdk_ = std::make_unique<HcommRunLifecycleSdk>(streams, [this](uint64_t address, uint64_t value) {
             uint64_t arguments[]{address, value};
-            int rc = aclrtLaunchKernel(trigger_function, 1, arguments, sizeof(arguments), trigger_stream);
+            aclrtLaunchKernelAttr engine{};
+            engine.id = ACL_RT_LAUNCH_KERNEL_ATTR_ENGINE_TYPE;
+            engine.value.engineType = ACL_RT_ENGINE_TYPE_AIV;
+            aclrtLaunchKernelCfg configuration{&engine, 1};
+            int rc = aclrtLaunchKernelWithHostArgs(
+                trigger_function, 1, trigger_stream, &configuration, arguments, sizeof(arguments), nullptr, 0
+            );
             if (rc == 0) rc = aclrtSynchronizeStreamWithTimeout(trigger_stream, 10000);
             return rc;
         });
