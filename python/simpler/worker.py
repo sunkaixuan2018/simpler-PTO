@@ -10829,7 +10829,7 @@ class Worker:
                 state = self._resolve_handle(callable_handle, expected_namespace="LOCAL_CHIP")
                 if self.level != 3 or self._config.get("platform") != "a5":
                     raise ValueError("CCU domains require an L3 A5 Worker")
-                if not set(config.members) <= set(state.eligible_worker_ids):
+                if state.eligible_worker_ids and not set(config.members) <= set(state.eligible_worker_ids):
                     raise ValueError("CCU callable is not registered on every domain member")
                 group = operator.index(group)
                 if not 0 <= group < 2**32 - 1:
