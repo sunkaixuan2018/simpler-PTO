@@ -53,6 +53,7 @@ def _build_callable(tmp_path):
             str(identities),
             f"-I{common}",
             f"-I{arch / 'include'}",
+            f"-I{arch / 'include/hccl'}",
             f"-I{arch / 'pkg_inc/hcomm/ccu'}",
             f"-I{arch / 'include/hcomm/ccu'}",
             f"-L{sdk / 'lib64'}",

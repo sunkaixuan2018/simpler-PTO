@@ -9,6 +9,8 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
+#pragma once
+
 #include <pto/pto-inst.hpp>
 #include "async_kernel_api.h"
 #include "platform_comm/comm_context.h"
