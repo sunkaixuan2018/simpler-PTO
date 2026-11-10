@@ -10886,9 +10886,8 @@ class Worker:
                     )
                 if config.ccu_binding:
                     self._ccu_domain_collective(handle, 0, config.ccu_binding)
-                handle._config = config
                 handle._use_fn = self._use_domain
-                self._use_domain(handle)
+                self._use_domain(handle, config=config)
                 self._initialize_domain(handle, initializer)
                 handle._config = config
                 return handle
@@ -10906,7 +10905,7 @@ class Worker:
                         raise creation_error from cleanup_error
                 raise
 
-    def _use_domain(self, handle) -> None:
+    def _use_domain(self, handle, *, config=None) -> None:
         handle._require_ready()
         resources = self._building_run_resources if _callback_frame_for(self) is not None else None
         if resources is None:
@@ -10918,14 +10917,15 @@ class Worker:
             table = resources.live_domains if local else resources.live_global_domains
             table[handle.name] = handle
             resources.requires_ordered_cleanup = True
-        if handle._config is not None and handle._config.ccu_binding and handle.name not in resources.ccu_domains:
+        config = config if config is not None else handle._config
+        if config is not None and config.ccu_binding and handle.name not in resources.ccu_domains:
             frame = _callback_frame_for(self)
             if frame is not None and frame.has_submitted_task:
                 raise RuntimeError("CCU READY barrier must precede ordinary task submission")
             resources.ccu_domains[handle.name] = handle
             with self._control_admission("CCU READY barrier"):
                 try:
-                    self._ccu_domain_collective(handle, 1, handle._config.ccu_binding)
+                    self._ccu_domain_collective(handle, 1, config.ccu_binding)
                     self._ccu_domain_wait(handle, 2)
                 except BaseException:
                     self._abort_ccu_domain(handle)

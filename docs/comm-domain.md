@@ -530,10 +530,19 @@ The legacy `device_ctx` field remains a raw address for synchronous consumers;
 it does not declare or validate an asynchronous engine requirement. No compiled
 capability query or `enable_urma` initialization switch is needed.
 
-The context is simpler's own 1088-byte host/device ABI. Rank metadata starts
+The context is simpler's own 1104-byte host/device ABI. Rank metadata starts
 at offset zero; there is no legacy workspace pair or PTO-compatible prefix.
 PTO session builders receive the chosen workspace address explicitly and do
 not parse this context.
+
+The tail contains `ccu_missions_addr` and `ccu_mission_count`. On native A5 CCU
+domains they describe the current run's `SimplerCcuMissionDescriptorV1` table;
+other domains publish zeroes. Domain creation binds a registered callable with
+`ccu_callable`, a `ccu_group_id`, and the exact 32-byte `ccu_sdk_build_id` and
+`ccu_pto_isa_build_id`. All four options are required together. Creation and
+reuse complete every rank's mission READY barrier before ordinary submission.
+Normal run cleanup sends a final wake and requires EXITED plus completed
+streams. Unconfirmed stop closes admission and retains domain resources.
 
 All runtime libraries, bindings, communication-context producers and compiled
 kernels must come from the same simpler build and be updated together. This
