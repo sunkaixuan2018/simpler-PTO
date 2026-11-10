@@ -323,7 +323,7 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     std::unique_ptr<DomainCcuOwner> &owner, HcommDomainSession *&session
 ) {
     if (owner) throw std::invalid_argument("CCU domain already has an owner");
-    if (base_communicator == nullptr || domain_id == 0 || rank_ids.size() < 2 || domain_rank >= rank_ids.size() ||
+    if (base_communicator == nullptr || rank_ids.size() < 2 || domain_rank >= rank_ids.size() ||
         group_id == SIMPLER_CCU_INVALID_GROUP_ID || module_bytes.empty() || program_namespace.empty())
         throw std::invalid_argument("invalid A5 CCU domain preparation request");
 
