@@ -436,6 +436,7 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
 
         HcommDomainRegistrationSdk registration(backend->unassigned_instance, die);
         const auto registered = register_domain_kernels(kernels, request, registration);
+        backend->streams.reserve(missions.size());
         for (auto &mission : missions) {
             for (const auto &kernel : registered)
                 if (kernel.kernel_id == mission.kernel_id) mission.program_handle = kernel.program_handle;
