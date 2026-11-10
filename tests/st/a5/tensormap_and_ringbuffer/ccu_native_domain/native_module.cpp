@@ -71,6 +71,8 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV1 *binding) noexcept 
                 check(ccu::Load(address(args[7], offsetof(SimplerCcuCompletionSlotV1, operation_sequence)), sequence));
                 CCU_IF(value == 0) {
                     store(output, 0, 2971);
+                    check(ccu::NotifyRecord(binding->channel_handle, binding->kernel_id - 1, 1));
+                    check(ccu::NotifyWait(binding->channel_handle, binding->kernel_id - 1, 1));
                     store(args[3], offsetof(SimplerCcuRunControlV1, native_error), 2971);
                     store(args[7], offsetof(SimplerCcuCompletionSlotV1, native_error), 2971);
                     store(
