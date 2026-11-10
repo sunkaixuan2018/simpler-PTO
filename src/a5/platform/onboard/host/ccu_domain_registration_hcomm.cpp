@@ -53,17 +53,32 @@ int HcommDomainRegistrationSdk::query_resources(
 }
 
 int HcommDomainRegistrationSdk::validate_capacity() {
-    HcommCcuResDescHandle descriptor{};
-    int rc = HcommCcuInsResDescCreate(die_id_, &descriptor);
+    HcommCcuResDescHandle instance_descriptor{};
+    int rc = HcommCcuInsResDescCreate(die_id_, &instance_descriptor);
     if (rc != CCU_SUCCESS) return rc;
 
-    rc = HcommCcuInsQueryResDesc(instance_handle_, descriptor);
+    HcommCcuResDescHandle remaining_descriptor{};
+    rc = HcommCcuInsResDescCreate(die_id_, &remaining_descriptor);
+    if (rc != CCU_SUCCESS) return finish_descriptor(instance_descriptor, rc);
+
+    rc = HcommCcuInsQueryResDesc(instance_handle_, instance_descriptor);
+    if (rc == CCU_SUCCESS) rc = HcommCcuQueryRemainResDesc(remaining_descriptor);
     for (size_t i = 0; rc == CCU_SUCCESS && i < required_resources_.size(); ++i) {
+        const auto type = static_cast<HcommCcuResType>(i);
+        // Instance descriptors report resources already reserved by the instance. Instructions are the exception:
+        // HCOMM allocates them while registering a kernel, so their instance count is zero before registration. Check
+        // the device's remaining consecutive instruction space instead. Cascading counters are also absent from the
+        // instance descriptor in the current SDK; registration remains the authoritative capacity check for them.
+        if (type == HCOMM_CCU_RES_TYPE_CASC_CNT) continue;
+        const auto descriptor = type == HCOMM_CCU_RES_TYPE_INSTRUCTION ? remaining_descriptor : instance_descriptor;
         uint32_t available{};
-        rc = HcommCcuInsResDescQueryNum(descriptor, static_cast<HcommCcuResType>(i), &available);
+        rc = HcommCcuInsResDescQueryNum(descriptor, type, &available);
         if (rc == CCU_SUCCESS && required_resources_[i] > available) rc = CCU_E_UNAVAIL;
     }
-    return finish_descriptor(descriptor, rc);
+    const int remaining_cleanup_error = HcommCcuInsResDescDestroy(remaining_descriptor);
+    const int instance_cleanup_error = HcommCcuInsResDescDestroy(instance_descriptor);
+    if (rc != CCU_SUCCESS) return rc;
+    return remaining_cleanup_error != CCU_SUCCESS ? remaining_cleanup_error : instance_cleanup_error;
 }
 
 int HcommDomainRegistrationSdk::register_start() {
