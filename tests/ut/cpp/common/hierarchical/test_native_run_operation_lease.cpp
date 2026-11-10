@@ -1211,6 +1211,7 @@ TEST(NativeRunOperationLeaseTest, ActiveCcuBlocksPoisonedLaneResetWithoutParentA
     worker.comm_reclamation_unconfirmed_ = true;
     EXPECT_THROW(worker.finalize(), std::runtime_error);
     EXPECT_TRUE(worker.comm_cleanup_unconfirmed_);
+    ASSERT_NE(worker.runtime_module_, nullptr);
     EXPECT_FALSE(worker.runtime_module_->unload_allowed_);
     EXPECT_EQ(g_device_finalize_calls, 0);
     EXPECT_EQ(g_destroy_context_calls, 0);

@@ -19,6 +19,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -816,6 +817,8 @@ private:
     std::unordered_map<uint64_t, size_t> comm_session_index_;
     std::unordered_set<uint64_t> global_domain_ids_;
     uint64_t base_comm_handle_ = 0;
+    // Only matching, confirmed stream stop retires a launched CCU generation.
+    std::set<std::tuple<uint64_t, uint64_t, uint64_t>> unstopped_ccu_runs_;
     std::unordered_map<int32_t, CallableArtifacts> callable_artifacts_;
 
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
