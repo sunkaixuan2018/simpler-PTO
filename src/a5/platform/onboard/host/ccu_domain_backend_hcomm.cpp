@@ -23,11 +23,12 @@
 #include "hccl/hccl_rank_graph.h"
 #include "hccl/hccl_res.h"
 #include "hcomm/ccu/ccu_launch.h"
-#include "hcomm/ccu/ccu_primitives.hpp"
 #include "hcomm/ccu/ccu_res.h"
 
 #include "ccu_domain_registration_hcomm.h"
 #include "ccu_run_lifecycle_hcomm.h"
+
+extern "C" CcuResult CcuNotifyWait(ChannelHandle channel, uint32_t local_notify_index, uint16_t mask);
 
 namespace simpler::ccu {
 namespace {
@@ -40,7 +41,7 @@ void check(int code, const char *operation) {
     if (code != 0) fail(operation, code);
 }
 
-CcuResult probe_channel_die(const ChannelHandle *channel) { return AscendC::ccu::NotifyWait(*channel, 0); }
+CcuResult probe_channel_die(const ChannelHandle *channel) { return CcuNotifyWait(*channel, 0, 1); }
 
 std::string sibling_trigger_binary() {
     Dl_info info{};
