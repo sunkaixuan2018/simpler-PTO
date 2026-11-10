@@ -347,7 +347,9 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     try {
         HcclCommConfig config{};
         HcclCommConfigInit(&config);
-        config.hcclOpExpansionMode = HCCL_OP_EXPANSION_MODE_CCU_MS;
+        // HcclCommConfig uses HcclAccelerator values, not HcclOpExpansionMode enum values.
+        constexpr uint32_t ccu_ms_config_mode = 5;
+        config.hcclOpExpansionMode = ccu_ms_config_mode;
         auto mutable_rank_ids = rank_ids;
         check(
             HcclCreateSubCommConfig(
