@@ -155,6 +155,10 @@ simpler_ut_platform_case(test_ccu_domain_registration.cpp SINGLE BARE
     SOURCES ${SIMPLER_SRC}/common/platform_comm/ccu/ccu_domain_registration.cpp
     INCLUDES ${SIMPLER_SRC}/common)
 
+simpler_ut_platform_case(test_ccu_run_lifecycle.cpp SINGLE BARE
+    SOURCES ${SIMPLER_SRC}/common/platform_comm/ccu/ccu_run_lifecycle.cpp
+    INCLUDES ${SIMPLER_SRC}/common)
+
 simpler_ut_platform_case(test_ccu_completion.cpp SINGLE BARE
     INCLUDES ${SIMPLER_SRC}/common)
 

@@ -89,6 +89,7 @@ list(APPEND HOST_RUNTIME_SOURCES
     "${CMAKE_CURRENT_SOURCE_DIR}/comm_hccl.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/ccu_domain_registration_hcomm.cpp"
     "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform_comm/ccu/ccu_domain_registration.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../../../common/platform_comm/ccu/ccu_run_lifecycle.cpp"
 )
 # Add common/aicpu_loader/host sources (LoadAicpuOp)
 list(APPEND HOST_RUNTIME_SOURCES

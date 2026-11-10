@@ -1,0 +1,212 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "ccu_run_lifecycle.h"
+
+#include <map>
+#include <stdexcept>
+#include <utility>
+
+namespace simpler::ccu {
+namespace {
+
+constexpr int64_t kProtocolError = -1;
+
+[[noreturn]] void fail_protocol(const std::string &message) { throw std::invalid_argument(message); }
+
+}  // namespace
+
+std::unique_ptr<DomainRun> DomainRunLifecycle::begin_run(
+    uint64_t generation, const std::vector<RegisteredKernel> &registered,
+    const std::vector<MissionRunResources> &missions, RunLifecycleSdk &sdk
+) {
+    if (!admission_open_) throw std::runtime_error("CCU domain admission is closed");
+    if (active_) throw std::runtime_error("CCU domain already has an active run");
+    if (generation == 0 || missions.empty()) fail_protocol("CCU run generation and missions must be nonzero");
+
+    std::map<uint64_t, bool> programs;
+    for (const auto &kernel : registered) {
+        if (kernel.program_handle == 0 || !programs.emplace(kernel.program_handle, true).second)
+            fail_protocol("invalid or duplicate registered CCU program");
+    }
+    std::map<uint32_t, bool> mission_ids;
+    for (const auto &mission : missions) {
+        if (mission.mission_id == 0 || mission.program_handle == 0 || mission.stream_handle == 0 ||
+            programs.count(mission.program_handle) == 0 ||
+            mission.launch_arguments.layout_version != SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION ||
+            mission.launch_arguments.run_generation != generation ||
+            mission.launch_arguments.mission_id != mission.mission_id ||
+            mission.launch_arguments.run_control_addr == 0 || mission.launch_arguments.parameter_addr == 0 ||
+            mission.launch_arguments.completion_slot_addr == 0 || mission.launch_arguments.reserved != 0 ||
+            !mission_ids.emplace(mission.mission_id, true).second)
+            fail_protocol("invalid or duplicate CCU mission run resources");
+    }
+
+    active_ = true;
+    return std::unique_ptr<DomainRun>(new DomainRun(*this, generation, missions, sdk));
+}
+
+DomainRun::DomainRun(
+    DomainRunLifecycle &owner, uint64_t generation, std::vector<MissionRunResources> missions, RunLifecycleSdk &sdk
+) :
+    owner_(owner),
+    generation_(generation),
+    missions_(std::move(missions)),
+    sdk_(sdk) {}
+
+DomainRun::~DomainRun() {
+    if (!released_) retain_unconfirmed();
+}
+
+void DomainRun::record_failure(std::string operation, int64_t native_error) {
+    failures_.push_back({std::move(operation), native_error});
+}
+
+void DomainRun::finish_confirmed() {
+    confirmed_stopped_ = true;
+    terminal_ = true;
+    released_ = true;
+    owner_.active_ = false;
+}
+
+void DomainRun::retain_unconfirmed() {
+    owner_.admission_open_ = false;
+    owner_.resources_retained_ = true;
+    released_ = true;
+}
+
+void DomainRun::launch_all() {
+    if (launched_) throw std::runtime_error("CCU run already launched");
+    for (const auto &mission : missions_) {
+        const auto *words = reinterpret_cast<const uint64_t *>(&mission.launch_arguments);
+        const int rc =
+            sdk_.launch(mission.program_handle, words, SIMPLER_CCU_TASK_ARGUMENT_COUNT, mission.stream_handle);
+        if (rc != 0) {
+            record_failure("HcommCcuKernelLaunch", rc);
+            retain_unconfirmed();
+            throw std::runtime_error("CCU mission launch failed");
+        }
+    }
+    launched_ = true;
+}
+
+bool DomainRun::read_controls(bool require_ready, bool require_terminal) {
+    bool all_match = true;
+    for (const auto &mission : missions_) {
+        SimplerCcuRunControlV1 control{};
+        const int rc = sdk_.read_control(mission.launch_arguments.run_control_addr, &control);
+        if (rc != 0) {
+            record_failure("read CCU run control", rc);
+            return false;
+        }
+        if (control.abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
+            control.struct_size != sizeof(SimplerCcuRunControlV1) || control.run_generation != generation_ ||
+            control.mission_id != mission.mission_id) {
+            record_failure("validate CCU run control", kProtocolError);
+            return false;
+        }
+        if (control.state == SIMPLER_CCU_RUN_STATE_FAILED) {
+            record_failure("CCU mission", control.native_error != 0 ? control.native_error : kProtocolError);
+            all_match = false;
+            continue;
+        }
+        if (require_ready && control.state != SIMPLER_CCU_RUN_STATE_READY) all_match = false;
+        if (require_terminal && control.state != SIMPLER_CCU_RUN_STATE_EXITED) all_match = false;
+    }
+    return all_match;
+}
+
+bool DomainRun::poll_ready() {
+    if (!launched_) throw std::runtime_error("CCU run has not launched");
+    if (ready_) return true;
+    if (failed()) return false;
+    ready_ = read_controls(true, false);
+    if (failed()) abort();
+    return ready_;
+}
+
+bool DomainRun::poll_terminal() {
+    if (!launched_) throw std::runtime_error("CCU run has not launched");
+    if (terminal_) return true;
+    if (!read_controls(false, true)) {
+        if (failed()) abort();
+        return false;
+    }
+
+    for (const auto &mission : missions_) {
+        StreamState state = StreamState::UNKNOWN;
+        const int rc = sdk_.query_stream(mission.stream_handle, &state);
+        if (rc != 0) {
+            record_failure("query CCU stream", rc);
+            abort();
+            return false;
+        }
+        if (state == StreamState::ERROR) {
+            record_failure("CCU stream", kProtocolError);
+            abort();
+            return false;
+        }
+        if (state != StreamState::COMPLETE) return false;
+    }
+    finish_confirmed();
+    return true;
+}
+
+bool DomainRun::stop() {
+    if (!launched_) throw std::runtime_error("CCU run has not launched");
+    if (confirmed_stopped_) return true;
+
+    for (const auto &mission : missions_) {
+        const int request_rc = sdk_.request_stop(mission.launch_arguments.run_control_addr);
+        if (request_rc != 0) record_failure("request CCU stop", request_rc);
+        SimplerCcuRunControlV1 control{};
+        const int read_rc = sdk_.read_control(mission.launch_arguments.run_control_addr, &control);
+        if (read_rc != 0) {
+            record_failure("read CCU stop gate", read_rc);
+            continue;
+        }
+        if (control.stop_gate_addr == 0 || control.final_wake_value == 0) {
+            record_failure("validate CCU stop gate", kProtocolError);
+            continue;
+        }
+        const int wake_rc = sdk_.wake_stop(control.stop_gate_addr, control.final_wake_value);
+        if (wake_rc != 0) record_failure("wake CCU stop gate", wake_rc);
+    }
+    if (failed()) {
+        abort();
+        return false;
+    }
+    return poll_terminal();
+}
+
+void DomainRun::abort() {
+    if (abort_attempted_) return;
+    abort_attempted_ = true;
+    if (launched_) {
+        for (const auto &mission : missions_) {
+            const int rc = sdk_.abort_stream(mission.stream_handle);
+            if (rc != 0) record_failure("abort CCU stream", rc);
+        }
+    }
+    retain_unconfirmed();
+}
+
+bool all_runs_ready(const std::vector<DomainRun *> &runs) {
+    if (runs.empty()) return false;
+    bool ready = true;
+    for (DomainRun *run : runs) {
+        if (run == nullptr || !run->poll_ready()) ready = false;
+        if (run != nullptr && run->failed()) return false;
+    }
+    return ready;
+}
+
+}  // namespace simpler::ccu
