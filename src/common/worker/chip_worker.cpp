@@ -14,6 +14,7 @@
 
 #include "chip_run_lane.h"
 #include "common/host_log_binding.h"
+#include "../task_interface/chip_callable_layout.h"
 #include "device_fault_monitor_host.h"
 #include "device_execution_owners.h"
 #include "host_log.h"
@@ -954,6 +955,7 @@ void ChipWorker::clear_runtime_binding(bool release_device_reservation) {
     kernel_init_fn_ = nullptr;
     kernel_prepare_callable_fn_ = nullptr;
     kernel_launch_fn_ = nullptr;
+    callable_artifacts_.clear();
     runtime_bufs_.clear();
     runtime_module_.reset();
     pipeline_generations_.reset();
@@ -975,10 +977,13 @@ int32_t ChipWorker::register_callable(const void *callable, size_t callable_size
     validate_execution_context();
     if (register_callable_v2_fn_ == nullptr)
         throw std::runtime_error("runtime does not support versioned callable registration");
+    CallableArtifacts artifacts = CallableArtifacts::capture(callable, callable_size);
     auto registration = [&] {
         int32_t id = -1;
         const int rc = register_callable_v2_fn_(device_ctx_, callable, callable_size, &id);
         if (rc != 0) throw std::runtime_error("callable registration failed with code " + std::to_string(rc));
+        const auto inserted = callable_artifacts_.emplace(id, std::move(artifacts)).second;
+        if (!inserted) throw std::runtime_error("runtime returned an already registered callable ID");
         return id;
     };
     return run_lane_ ? run_lane_->with_callable_addition(registration) : registration();
@@ -992,9 +997,16 @@ void ChipWorker::register_callable(int32_t callable_id, const void *callable) {
         throw std::runtime_error("register_callable: callable must not be null");
     }
     validate_execution_context();
+    if (callable_artifacts_.count(callable_id) != 0) {
+        throw std::runtime_error("callable ID is already registered in the host artifact table");
+    }
+    const auto *chip_callable = static_cast<const ChipCallable *>(callable);
+    const auto layout = compute_chip_callable_layout(chip_callable);
+    CallableArtifacts artifacts = CallableArtifacts::capture(callable, layout.total_size);
     auto registration = [&] {
         const int rc = register_callable_fn_(device_ctx_, callable_id, callable);
         if (rc != 0) throw std::runtime_error("register_callable failed with code " + std::to_string(rc));
+        callable_artifacts_.emplace(callable_id, std::move(artifacts));
         return int32_t{0};
     };
     if (run_lane_) (void)run_lane_->with_callable_addition(registration);
@@ -2258,6 +2270,7 @@ void ChipWorker::unregister_callable(int32_t callable_id) {
     if (rc != 0) {
         throw std::runtime_error("unregister_callable failed with code " + std::to_string(rc));
     }
+    callable_artifacts_.erase(callable_id);
 }
 
 size_t ChipWorker::aicpu_dlopen_count() const {

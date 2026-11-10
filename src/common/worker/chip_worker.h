@@ -31,6 +31,7 @@
 #include "../task_interface/call_config.h"
 #include "../task_interface/task_args.h"
 #include "host/chip_swimlane_runs.h"
+#include "callable_artifacts.h"
 #include "native_run_storage_tag.h"
 #include "run_resource_arena.h"
 #include "runtime_c_api.h"
@@ -804,6 +805,7 @@ private:
     std::unordered_map<uint64_t, size_t> comm_session_index_;
     std::unordered_set<uint64_t> global_domain_ids_;
     uint64_t base_comm_handle_ = 0;
+    std::unordered_map<int32_t, CallableArtifacts> callable_artifacts_;
 
     uint32_t arena_bank_for_slot(uint32_t slot_id) const;
 
