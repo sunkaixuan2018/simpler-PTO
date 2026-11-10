@@ -27,6 +27,9 @@
 
 namespace simpler::ccu {
 
+inline constexpr uint64_t kCkeTriggerMask = 1;
+inline constexpr uint64_t kCkeTriggerValue = (uint64_t{1} << 63) | kCkeTriggerMask;
+
 struct DeviceSubmissionIo {
     static SIMPLER_CCU_SUBMIT_DEVICE uint64_t load_u64(const volatile SIMPLER_CCU_SUBMIT_GM uint64_t *address) {
 #if defined(__CCE_AICORE__)
@@ -95,7 +98,7 @@ SIMPLER_CCU_SUBMIT_DEVICE bool submit_mission(
 
     auto *trigger =
         reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM uint64_t *>(static_cast<uintptr_t>(mission->trigger_gate_addr));
-    *trigger = 1;
+    *trigger = kCkeTriggerValue;
     Io::publish(trigger, sizeof(*trigger));
     return true;
 }

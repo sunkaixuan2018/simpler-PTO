@@ -98,7 +98,7 @@ TEST(CcuDeviceSubmission, RegistersBeforePublishingParametersAndTrigger) {
     EXPECT_EQ(image.parameters, parameters);
     EXPECT_EQ(image.slot.operation_sequence, 1U);
     EXPECT_EQ(image.slot.status, SIMPLER_CCU_COMPLETION_PENDING);
-    EXPECT_EQ(image.trigger, 1U);
+    EXPECT_EQ(image.trigger, simpler::ccu::kCkeTriggerValue);
 }
 
 TEST(CcuDeviceSubmission, RegistrationFailurePublishesNothingAndDoesNotTrigger) {
@@ -180,8 +180,8 @@ TEST(CcuDeviceSubmission, IndependentMissionsCanBeOutstandingTogether) {
     EXPECT_EQ(registered_slots[1], reinterpret_cast<uint64_t>(&mission_b.slot));
     EXPECT_EQ(mission_a.slot.completed_sequence, 0U);
     EXPECT_EQ(mission_b.slot.completed_sequence, 0U);
-    EXPECT_EQ(mission_a.trigger, 1U);
-    EXPECT_EQ(mission_b.trigger, 1U);
+    EXPECT_EQ(mission_a.trigger, simpler::ccu::kCkeTriggerValue);
+    EXPECT_EQ(mission_b.trigger, simpler::ccu::kCkeTriggerValue);
 }
 
 }  // namespace
