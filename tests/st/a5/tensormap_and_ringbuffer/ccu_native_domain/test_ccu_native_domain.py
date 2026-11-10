@@ -153,3 +153,66 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
         assert retained[0].freed
     finally:
         worker.close()
+
+
+@pytest.mark.platforms(["a5"])
+@pytest.mark.runtime(_RUNTIME)
+@pytest.mark.device_count(2)
+def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_device_ids, tmp_path):
+    target, sdk_id, isa_id = _build_callable(tmp_path)
+    worker = Worker(
+        level=3,
+        platform=st_platform,
+        runtime=_RUNTIME,
+        device_ids=[int(device) for device in st_device_ids[:2]],
+        num_sub_workers=0,
+    )
+    callable_handle = worker.register(target)
+    retained = []
+    try:
+        worker.init()
+        outputs = [[worker.create_buffer(64) for _ in range(3)] for _ in range(2)]
+        for rank_outputs in outputs:
+            for output in rank_outputs:
+                output.shm.buf[:] = bytes(64)
+
+        def fail_round(orch, _args, config):
+            domain = orch.allocate_domain(
+                name="failed_ccu",
+                members=[0, 1],
+                window_size=4 * 1024 * 1024,
+                retain_after_run=True,
+                ccu_callable=callable_handle,
+                ccu_group_id=7,
+                ccu_sdk_build_id=sdk_id,
+                ccu_pto_isa_build_id=isa_id,
+            )
+            retained.append(domain)
+            for rank in range(2):
+                args = TaskArgs()
+                for output in outputs[rank]:
+                    args.add_tensor(output.tensor((8,), DataType.UINT64), TensorArgType.OUTPUT_EXISTING)
+                args.add_scalar(domain.device_context(rank))
+                # B adds two: zero explicitly requests native error 2971.
+                args.add_scalar((1 << 64) - 2)
+                orch.submit_next_level(callable_handle, args, config, worker=rank)
+
+        with pytest.raises(RuntimeError):
+            worker.run(fail_round)
+        assert retained and not retained[0].freed
+        assert worker._ordered_cleanup_error is not None
+        for rank_outputs in outputs:
+            assert struct.unpack_from("<Q", rank_outputs[0].shm.buf)[0] == 2971
+            assert struct.unpack_from("<Q", rank_outputs[1].shm.buf)[0] == 0
+        with pytest.raises(RuntimeError):
+            worker.run(lambda *_: None)
+        assert not retained[0].freed
+        print(
+            "CCU native failure observed; sibling A did not execute; admission closed and domain retained", flush=True
+        )
+    finally:
+        try:
+            worker.close()
+        except RuntimeError:
+            # Whole-tree teardown may report the original unconfirmed run error.
+            assert worker._ordered_cleanup_error is not None

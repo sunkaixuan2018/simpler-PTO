@@ -58,8 +58,9 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV1 *binding) noexcept 
             mission | (uint64_t{SIMPLER_CCU_RUN_STATE_READY} << 32)
         );
         ccu::Event trigger(binding->trigger_event_handle);
-        ccu::Variable stop;
+        ccu::Variable stop, failed;
         stop = 0;
+        failed = 0;
         CCU_WHILE(stop == 0) {
             check(ccu::EventWait(trigger, 1));
             check(ccu::Load(address(args[3], offsetof(SimplerCcuRunControlV1, stop_requested)), stop));
@@ -68,21 +69,40 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV1 *binding) noexcept 
                 check(ccu::Load(args[5], output));
                 check(ccu::Load(address(args[5], 8), value));
                 check(ccu::Load(address(args[7], offsetof(SimplerCcuCompletionSlotV1, operation_sequence)), sequence));
-                check(ccu::Store(output, value));
-                store(
-                    args[7], offsetof(SimplerCcuCompletionSlotV1, mission_id),
-                    mission | (uint64_t{SIMPLER_CCU_COMPLETION_SUCCEEDED} << 32)
-                );
+                CCU_IF(value == 0) {
+                    store(output, 0, 2971);
+                    store(args[3], offsetof(SimplerCcuRunControlV1, native_error), 2971);
+                    store(args[7], offsetof(SimplerCcuCompletionSlotV1, native_error), 2971);
+                    store(
+                        args[3], offsetof(SimplerCcuRunControlV1, mission_id),
+                        mission | (uint64_t{SIMPLER_CCU_RUN_STATE_FAILED} << 32)
+                    );
+                    store(
+                        args[7], offsetof(SimplerCcuCompletionSlotV1, mission_id),
+                        mission | (uint64_t{SIMPLER_CCU_COMPLETION_FAILED} << 32)
+                    );
+                    failed = 1;
+                    stop = 1;
+                }
+                CCU_IF(value != 0) {
+                    check(ccu::Store(output, value));
+                    store(
+                        args[7], offsetof(SimplerCcuCompletionSlotV1, mission_id),
+                        mission | (uint64_t{SIMPLER_CCU_COMPLETION_SUCCEEDED} << 32)
+                    );
+                }
                 check(
                     ccu::Store(address(args[3], offsetof(SimplerCcuRunControlV1, last_completed_sequence)), sequence)
                 );
                 check(ccu::Store(address(args[7], offsetof(SimplerCcuCompletionSlotV1, completed_sequence)), sequence));
             }
         }
-        store(
-            args[3], offsetof(SimplerCcuRunControlV1, mission_id),
-            mission | (uint64_t{SIMPLER_CCU_RUN_STATE_EXITED} << 32)
-        );
+        CCU_IF(failed == 0) {
+            store(
+                args[3], offsetof(SimplerCcuRunControlV1, mission_id),
+                mission | (uint64_t{SIMPLER_CCU_RUN_STATE_EXITED} << 32)
+            );
+        }
         return CCU_SUCCESS;
     } catch (...) {
         return CCU_E_INTERNAL;
