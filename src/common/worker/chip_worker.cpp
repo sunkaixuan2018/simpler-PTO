@@ -14,7 +14,6 @@
 
 #include "chip_run_lane.h"
 #include "common/host_log_binding.h"
-#include "../task_interface/chip_callable_layout.h"
 #include "device_fault_monitor_host.h"
 #include "device_execution_owners.h"
 #include "host_log.h"
@@ -1000,9 +999,7 @@ void ChipWorker::register_callable(int32_t callable_id, const void *callable) {
     if (callable_artifacts_.count(callable_id) != 0) {
         throw std::runtime_error("callable ID is already registered in the host artifact table");
     }
-    const auto *chip_callable = static_cast<const ChipCallable *>(callable);
-    const auto layout = compute_chip_callable_layout(chip_callable);
-    CallableArtifacts artifacts = CallableArtifacts::capture(callable, layout.total_size);
+    CallableArtifacts artifacts = CallableArtifacts::capture(*static_cast<const ChipCallable *>(callable));
     auto registration = [&] {
         const int rc = register_callable_fn_(device_ctx_, callable_id, callable);
         if (rc != 0) throw std::runtime_error("register_callable failed with code " + std::to_string(rc));

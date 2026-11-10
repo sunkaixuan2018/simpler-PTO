@@ -25,4 +25,20 @@ struct CallableArtifacts {
         const auto *callable = static_cast<const ChipCallable *>(raw);
         return {callable->ccu_modules()};
     }
+
+    static CallableArtifacts capture(const ChipCallable &callable) {
+        size_t storage_size = callable.binary_size();
+        for (int32_t i = 0; i < callable.child_count(); ++i) {
+            const size_t child_size =
+                CoreCallable::binary_data_offset() + static_cast<size_t>(callable.child(i).binary_size());
+            const size_t child_end = static_cast<size_t>(callable.child_offset(i)) + child_size;
+            if (child_end > storage_size) storage_size = child_end;
+        }
+        if (callable.ccu_modules_size_ != 0) {
+            const size_t modules_end =
+                static_cast<size_t>(callable.ccu_modules_offset_) + static_cast<size_t>(callable.ccu_modules_size_);
+            if (modules_end > storage_size) storage_size = modules_end;
+        }
+        return capture(&callable, offsetof(ChipCallable, storage_) + storage_size);
+    }
 };
