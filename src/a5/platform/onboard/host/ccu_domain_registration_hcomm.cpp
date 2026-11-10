@@ -1,0 +1,94 @@
+/*
+ * Copyright (c) PyPTO Contributors.
+ * This program is free software, you can redistribute it and/or modify it under the terms and conditions of
+ * CANN Open Software License Agreement Version 2.0 (the "License").
+ * Please refer to the License for details. You may not use this file except in compliance with the License.
+ * THIS SOFTWARE IS PROVIDED ON AN "AS IS" BASIS, WITHOUT WARRANTIES OF ANY KIND, EITHER EXPRESS OR IMPLIED,
+ * INCLUDING BUT NOT LIMITED TO NON-INFRINGEMENT, MERCHANTABILITY, OR FITNESS FOR A PARTICULAR PURPOSE.
+ * See LICENSE in the root of the software repository for the full text of the License.
+ * -----------------------------------------------------------------------------------------------------------
+ */
+
+#include "ccu_domain_registration_hcomm.h"
+
+#include <limits>
+
+#include "hcomm/ccu/ccu_launch.h"
+#include "hcomm/ccu/ccu_res.h"
+
+namespace simpler::ccu {
+namespace {
+
+int finish_descriptor(HcommCcuResDescHandle descriptor, int primary_error) {
+    const int cleanup_error = HcommCcuInsResDescDestroy(descriptor);
+    return primary_error != CCU_SUCCESS ? primary_error : cleanup_error;
+}
+
+}  // namespace
+
+HcommDomainRegistrationSdk::HcommDomainRegistrationSdk(uint64_t instance_handle, uint32_t die_id) :
+    instance_handle_(instance_handle),
+    die_id_(die_id) {}
+
+int HcommDomainRegistrationSdk::query_resources(
+    const void *entry, const void *const *arguments, uint32_t argument_count
+) {
+    HcommCcuResDescHandle descriptor{};
+    int rc = HcommCcuInsResDescCreate(die_id_, &descriptor);
+    if (rc != CCU_SUCCESS) return rc;
+
+    rc = HcommCcuKernelQueryResReq(entry, const_cast<const void **>(arguments), argument_count, descriptor);
+    for (size_t i = 0; rc == CCU_SUCCESS && i < required_resources_.size(); ++i) {
+        uint32_t count{};
+        rc = HcommCcuInsResDescQueryNum(descriptor, static_cast<HcommCcuResType>(i), &count);
+        if (rc == CCU_SUCCESS) {
+            if (required_resources_[i] > std::numeric_limits<uint64_t>::max() - count) {
+                rc = CCU_E_PARA;
+            } else {
+                required_resources_[i] += count;
+            }
+        }
+    }
+    return finish_descriptor(descriptor, rc);
+}
+
+int HcommDomainRegistrationSdk::validate_capacity() {
+    HcommCcuResDescHandle descriptor{};
+    int rc = HcommCcuInsResDescCreate(die_id_, &descriptor);
+    if (rc != CCU_SUCCESS) return rc;
+
+    rc = HcommCcuInsQueryResDesc(instance_handle_, descriptor);
+    for (size_t i = 0; rc == CCU_SUCCESS && i < required_resources_.size(); ++i) {
+        uint32_t available{};
+        rc = HcommCcuInsResDescQueryNum(descriptor, static_cast<HcommCcuResType>(i), &available);
+        if (rc == CCU_SUCCESS && required_resources_[i] > available) rc = CCU_E_UNAVAIL;
+    }
+    return finish_descriptor(descriptor, rc);
+}
+
+int HcommDomainRegistrationSdk::register_start() {
+    if (!HcommCcuKernelRegisterStart) return CCU_E_UNAVAIL;
+    return HcommCcuKernelRegisterStart(instance_handle_);
+}
+
+int HcommDomainRegistrationSdk::register_kernel(
+    const std::string &name, const void *entry, const void *const *arguments, uint32_t argument_count,
+    uint64_t *program_handle
+) {
+    if (!HcommCcuKernelRegister) return CCU_E_UNAVAIL;
+    return HcommCcuKernelRegister(
+        instance_handle_, die_id_, name.c_str(), entry, const_cast<const void **>(arguments), argument_count,
+        program_handle
+    );
+}
+
+int HcommDomainRegistrationSdk::register_end() {
+    if (!HcommCcuKernelRegisterEnd) return CCU_E_UNAVAIL;
+    return HcommCcuKernelRegisterEnd(instance_handle_);
+}
+
+int HcommDomainRegistrationSdk::get_task_argument_count(uint64_t program_handle, uint32_t *argument_count) {
+    return HcommCcuGetTaskArgsNum(program_handle, argument_count);
+}
+
+}  // namespace simpler::ccu
