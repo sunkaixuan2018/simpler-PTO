@@ -170,16 +170,18 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
     callable_handle = worker.register(target)
     retained = []
     child_pids = set()
-    child_exits = {}
-    waitpid = os.waitpid
+    exit_reader, exit_writer = os.pipe()
+    os.set_blocking(exit_reader, False)
+    child_exit = os._exit
 
-    def observe_child_exit(pid, options):
-        reaped, status = waitpid(pid, options)
-        if reaped in child_pids:
-            child_exits[reaped] = status
-        return reaped, status
+    def observe_child_exit(code):
+        try:
+            os.write(exit_writer, f"{os.getpid()}:{code}\n".encode())
+        finally:
+            child_exit(code)
 
-    monkeypatch.setattr(os, "waitpid", observe_child_exit)
+    # The native scheduler may reap first; a signal never reaches os._exit.
+    monkeypatch.setattr(os, "_exit", observe_child_exit)
     try:
         worker.init()
         child_pids.update(worker._chip_pids)
@@ -224,12 +226,25 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
         assert not retained[0].freed
         print("CCU native failure observed; admission closed and domain retained", flush=True)
     finally:
+        exit_records = bytearray()
         try:
-            worker.close()
-        except RuntimeError:
-            # Whole-tree teardown may report the original unconfirmed run error.
-            assert worker._ordered_cleanup_error is not None
-        assert child_pids <= child_exits.keys(), "CCU chip children were not reaped"
-        for pid, status in child_exits.items():
-            assert os.WIFEXITED(status), f"CCU chip child {pid} terminated by signal {os.WTERMSIG(status)}"
-            assert os.WEXITSTATUS(status) in (0, 1), f"CCU chip child {pid} has unexpected exit status {status}"
+            try:
+                worker.close()
+            except RuntimeError:
+                # Whole-tree teardown may report the original unconfirmed run error.
+                assert worker._ordered_cleanup_error is not None
+            try:
+                while chunk := os.read(exit_reader, 4096):
+                    exit_records.extend(chunk)
+            except BlockingIOError:
+                pass
+        finally:
+            os.close(exit_reader)
+            os.close(exit_writer)
+        child_exits = {
+            int(pid): int(code) for record in exit_records.decode().splitlines() for pid, code in [record.split(":")]
+        }
+        assert child_pids <= child_exits.keys(), "CCU chip child crashed or did not reach controlled exit"
+        for pid in child_pids:
+            assert child_exits[pid] in (0, 1), f"CCU chip child {pid} has unexpected exit code {child_exits[pid]}"
+        print(f"CCU chip children reached controlled exit: {child_exits}", flush=True)
