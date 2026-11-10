@@ -158,7 +158,7 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
 @pytest.mark.platforms(["a5"])
 @pytest.mark.runtime(_RUNTIME)
 @pytest.mark.device_count(2)
-def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_device_ids, tmp_path):
+def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_device_ids, tmp_path, monkeypatch):
     target, sdk_id, isa_id = _build_callable(tmp_path)
     worker = Worker(
         level=3,
@@ -169,8 +169,21 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
     )
     callable_handle = worker.register(target)
     retained = []
+    child_pids = set()
+    child_exits = {}
+    waitpid = os.waitpid
+
+    def observe_child_exit(pid, options):
+        reaped, status = waitpid(pid, options)
+        if reaped in child_pids:
+            child_exits[reaped] = status
+        return reaped, status
+
+    monkeypatch.setattr(os, "waitpid", observe_child_exit)
     try:
         worker.init()
+        child_pids.update(worker._chip_pids)
+        assert len(child_pids) == 2
         outputs = [[worker.create_buffer(64) for _ in range(3)] for _ in range(2)]
         for rank_outputs in outputs:
             for output in rank_outputs:
@@ -216,3 +229,7 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
         except RuntimeError:
             # Whole-tree teardown may report the original unconfirmed run error.
             assert worker._ordered_cleanup_error is not None
+        assert child_pids <= child_exits.keys(), "CCU chip children were not reaped"
+        for pid, status in child_exits.items():
+            assert os.WIFEXITED(status), f"CCU chip child {pid} terminated by signal {os.WTERMSIG(status)}"
+            assert os.WEXITSTATUS(status) in (0, 1), f"CCU chip child {pid} has unexpected exit status {status}"

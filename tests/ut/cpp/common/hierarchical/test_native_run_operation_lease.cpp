@@ -1200,6 +1200,74 @@ TEST(NativeRunOperationLeaseTest, CcuAbortRetainsOwnersWhenFaultedContextRefuses
     EXPECT_EQ(g_destroy_context_calls, 0);
 }
 
+TEST(NativeRunOperationLeaseTest, ActiveCcuBlocksPoisonedLaneResetWithoutParentAbort) {
+    ChipWorker worker;
+    prime(worker);
+    worker.finalize_device_fn_ = stub_finalize_device;
+    worker.comm_control_domain_ccu_fn_ = [](void *, uint64_t, uint32_t, uint64_t) {
+        return 0;
+    };
+    ASSERT_EQ(worker.control_domain_ccu(1, 2, 1, 3), 0);
+    worker.comm_reclamation_unconfirmed_ = true;
+    EXPECT_THROW(worker.finalize(), std::runtime_error);
+    EXPECT_TRUE(worker.comm_cleanup_unconfirmed_);
+    EXPECT_FALSE(worker.runtime_module_->unload_allowed_);
+    EXPECT_EQ(g_device_finalize_calls, 0);
+    EXPECT_EQ(g_destroy_context_calls, 0);
+}
+
+TEST(NativeRunOperationLeaseTest, CcuStopProofMustCoverEveryDomainAndGeneration) {
+    ChipWorker worker;
+    prime(worker);
+    worker.finalize_device_fn_ = stub_finalize_device;
+    worker.comm_control_domain_ccu_fn_ = [](void *, uint64_t, uint32_t, uint64_t) {
+        return 0;
+    };
+    ASSERT_EQ(worker.control_domain_ccu(1, 2, 1, 3), 0);
+    ASSERT_EQ(worker.control_domain_ccu(1, 4, 1, 3), 0);
+    ASSERT_EQ(worker.control_domain_ccu(1, 2, 3, 3), 0);
+    ASSERT_EQ(worker.control_domain_ccu(1, 4, 3, 2), 0);
+    EXPECT_THROW(worker.finalize(), std::runtime_error);
+    EXPECT_EQ(g_device_finalize_calls, 0);
+}
+
+TEST(NativeRunOperationLeaseTest, ConfirmedCcuStopAllowsDeviceFinalizeAndReuse) {
+    ChipWorker worker;
+    prime(worker);
+    worker.finalize_device_fn_ = stub_finalize_device;
+    worker.comm_control_domain_ccu_fn_ = [](void *, uint64_t, uint32_t, uint64_t) {
+        return 0;
+    };
+    for (uint64_t generation : {3u, 4u}) {
+        ASSERT_EQ(worker.control_domain_ccu(1, 2, 1, generation), 0);
+        ASSERT_EQ(worker.control_domain_ccu(1, 2, 3, generation), 0);
+    }
+    EXPECT_NO_THROW(worker.finalize());
+    EXPECT_EQ(g_device_finalize_calls, 1);
+}
+
+TEST(NativeRunOperationLeaseTest, CcuLaunchFailureAndPendingStopRetainDeviceOwners) {
+    for (bool launch_fails : {false, true}) {
+        ChipWorker worker;
+        prime(worker);
+        worker.finalize_device_fn_ = stub_finalize_device;
+        worker.comm_control_domain_ccu_fn_ = [](void *, uint64_t, uint32_t operation, uint64_t) {
+            return operation == 1 ? -1 : 1;
+        };
+        if (launch_fails) {
+            EXPECT_THROW(worker.control_domain_ccu(1, 2, 1, 3), std::runtime_error);
+        } else {
+            worker.comm_control_domain_ccu_fn_ = [](void *, uint64_t, uint32_t operation, uint64_t) {
+                return operation == 1 ? 0 : 1;
+            };
+            ASSERT_EQ(worker.control_domain_ccu(1, 2, 1, 3), 0);
+            ASSERT_EQ(worker.control_domain_ccu(1, 2, 3, 3), 1);
+        }
+        EXPECT_THROW(worker.finalize(), std::runtime_error);
+        EXPECT_EQ(g_device_finalize_calls, 0);
+    }
+}
+
 TEST(NativeRunOperationLeaseTest, DomainAllocationFailurePublishesCleanupOwnership) {
     const int results[] = {
         -1,
