@@ -58,6 +58,7 @@ public:
 
     bool admission_open() const noexcept { return admission_open_; }
     bool resources_retained() const noexcept { return resources_retained_; }
+    bool has_active_run() const noexcept { return active_; }
 
 private:
     friend class DomainRun;

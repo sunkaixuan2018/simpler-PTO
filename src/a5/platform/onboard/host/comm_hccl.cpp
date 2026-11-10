@@ -24,6 +24,7 @@
 
 #include "platform_comm/comm.h"
 #include "platform_comm/comm_context.h"
+#include "platform_comm/ccu/ccu_domain_owner.h"
 
 #include "common/unified_log.h"
 #include "host/file_marker_handshake.h"
@@ -110,6 +111,7 @@ struct DomainAllocation {
     bool host_registered = false;
     bool initialized = false;
     bool cleanup_failed = false;
+    std::unique_ptr<simpler::ccu::DomainCcuOwner> ccu;
     HcclComm urma_comm = nullptr;
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
     void *urma_workspace_addr = nullptr;
@@ -931,7 +933,7 @@ static bool urma_domain_drained(const DomainAllocation &alloc) {
 static bool domain_drained(const DomainAllocation &alloc) {
     if (alloc.cleanup_failed) return false;
     if (!alloc.initialized) return true;  // Failed initialization never publishes device users.
-    return urma_domain_drained(alloc);
+    return (!alloc.ccu || alloc.ccu->drained()) && urma_domain_drained(alloc);
 }
 
 // Callers establish local/peer quiescence before closing a published domain.
@@ -939,6 +941,8 @@ static bool domain_drained(const DomainAllocation &alloc) {
 static bool close_domain_resources(DomainAllocation &alloc) {
     if (alloc.cleanup_failed) return false;
     alloc.cleanup_failed = true;
+    if (alloc.ccu && !alloc.ccu->close()) return false;
+    alloc.ccu.reset();
     if (alloc.urma_comm != nullptr) {
         if (hccl_comm_destroy(alloc.urma_comm) != HCCL_SUCCESS) return false;
         alloc.urma_comm = nullptr;
