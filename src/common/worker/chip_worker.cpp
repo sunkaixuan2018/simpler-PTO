@@ -775,6 +775,7 @@ bool ChipWorker::teardown_report(SimplerTeardownReport *out) const {
 
 void ChipWorker::finalize() {
     validate_execution_context();
+    require_comm_cleanup_confirmed();
     std::exception_ptr lane_error;
     if (run_lane_ != nullptr) {
         run_lane_->stop_admission();
@@ -2744,6 +2745,8 @@ void ChipWorker::bind_ccu_callable_to_domain(
 int ChipWorker::control_domain_ccu(
     uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation
 ) {
+    validate_execution_process();
+    if (operation == 4) retain_unconfirmed_comm_cleanup();
     validate_execution_context();
     if (!comm_control_domain_ccu_fn_) throw std::runtime_error("runtime has no CCU run backend");
     const int result =

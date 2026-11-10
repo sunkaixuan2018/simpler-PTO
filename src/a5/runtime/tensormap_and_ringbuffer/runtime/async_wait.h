@@ -106,6 +106,11 @@ inline CompletionPollResult ccu_poll_op(const CompletionCondition &cond) {
         return {CompletionPollState::PENDING, SIMPLER_ERROR_NONE};
     if (result.state == simpler::ccu::CompletionPollState::ready)
         return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
+    LOG_ERROR(
+        "CCU completion failed: slot=0x%llx sequence=%llu native_error=%lld",
+        static_cast<unsigned long long>(cond.addr), static_cast<unsigned long long>(cond.backend_cookie),
+        static_cast<long long>(result.native_error)
+    );
     return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
 }
 

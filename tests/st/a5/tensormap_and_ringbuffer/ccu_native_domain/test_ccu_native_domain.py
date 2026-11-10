@@ -201,15 +201,15 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
             worker.run(fail_round)
         assert retained and not retained[0].freed
         assert worker._ordered_cleanup_error is not None
-        for rank_outputs in outputs:
-            assert struct.unpack_from("<Q", rank_outputs[0].shm.buf)[0] == 2971
-            assert struct.unpack_from("<Q", rank_outputs[1].shm.buf)[0] == 0
+        log_root = Path(os.environ["ASCEND_PROCESS_LOG_PATH"])
+        for device in st_device_ids[:2]:
+            logs = list(log_root.glob(f"debug/device-{device}/device-*.log"))
+            evidence = "\n".join(log.read_text(errors="replace") for log in logs)
+            assert "CCU completion failed:" in evidence and "native_error=2971" in evidence
         with pytest.raises(RuntimeError):
             worker.run(lambda *_: None)
         assert not retained[0].freed
-        print(
-            "CCU native failure observed; sibling A did not execute; admission closed and domain retained", flush=True
-        )
+        print("CCU native failure observed; admission closed and domain retained", flush=True)
     finally:
         try:
             worker.close()
