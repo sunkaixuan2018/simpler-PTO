@@ -12,6 +12,7 @@
 #pragma once
 #include <cstdint>
 #include "ccu_native_abi.h"
+#include "platform_comm/comm_context.h"
 
 #if defined(__CCE_AICORE__)
 #define SIMPLER_CCU_SUBMIT_DEVICE __aicore__
@@ -22,6 +23,48 @@
 #endif
 
 namespace simpler::ccu {
+struct CcuCallArg {
+    enum class Kind : uint32_t { Scalar, Window };
+    Kind kind;
+    uint32_t rank;
+    uint64_t value;  // Scalar value or byte offset in W.
+    uint64_t size;
+};
+
+// Positional wire arguments: scalars occupy one word; windows occupy address, token.
+template <size_t N>
+SIMPLER_CCU_SUBMIT_DEVICE bool resolve_call_args(
+    const SIMPLER_CCU_SUBMIT_GM CommContext *domain, const CcuCallArg (&args)[N], uint64_t (&words)[N * 2],
+    uint64_t &bytes
+) {
+    if (domain == nullptr || domain->rankNum == 0 || domain->rankNum > COMM_MAX_RANK_NUM ||
+        domain->rankId >= domain->rankNum)
+        return false;
+    const auto &workspace = comm_workspace<CommWorkspaceKind::CCU>(*domain);
+    size_t count = 0;
+    for (size_t i = 0; i < N; ++i) {
+        const auto &arg = args[i];
+        if (arg.kind == CcuCallArg::Kind::Scalar) {
+            words[count++] = arg.value;
+        } else if (arg.kind == CcuCallArg::Kind::Window) {
+            if (arg.rank >= domain->rankNum || workspace.addr == 0 || workspace.addr % alignof(CommCcuWindow) != 0 ||
+                workspace.size != domain->rankNum * sizeof(CommCcuWindow))
+                return false;
+            const auto *windows = reinterpret_cast<const SIMPLER_CCU_SUBMIT_GM CommCcuWindow *>(workspace.addr);
+            const auto &window = windows[arg.rank];
+            if (window.address == 0 || arg.size == 0 || arg.value > window.size || arg.size > window.size - arg.value ||
+                window.address > UINT64_MAX - arg.value || arg.size - 1 > UINT64_MAX - (window.address + arg.value))
+                return false;
+            words[count++] = window.address + arg.value;
+            words[count++] = window.token;
+        } else {
+            return false;
+        }
+    }
+    bytes = count * sizeof(uint64_t);
+    return true;
+}
+
 inline SIMPLER_CCU_SUBMIT_DEVICE const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuControlV2 *
 ccu_control(const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuWorkspaceV2 *workspace, uint32_t ccu_id) {
     if (workspace == nullptr || workspace->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||

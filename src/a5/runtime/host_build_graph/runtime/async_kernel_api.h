@@ -219,6 +219,19 @@ inline __aicore__ bool submit_ccu_mission(
     return submitted;
 }
 
+template <size_t N>
+inline __aicore__ bool submit_ccu_mission(
+    AsyncCtx &ctx, const __gm__ CommContext *domain, uint32_t ccu_id, const simpler::ccu::CcuCallArg (&call_args)[N]
+) {
+    uint64_t words[N * 2]{};
+    uint64_t bytes = 0;
+    if (!simpler::ccu::resolve_call_args(domain, call_args, words, bytes)) {
+        pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+        return false;
+    }
+    return submit_ccu_mission(ctx, domain, ccu_id, words, bytes);
+}
+
 inline __aicore__ void
 send_notification(volatile __gm__ void *remote_counter_addr, int32_t value, pto::comm::NotifyOp notify_op) {
     __gm__ int32_t *counter = reinterpret_cast<__gm__ int32_t *>(const_cast<__gm__ void *>(remote_counter_addr));

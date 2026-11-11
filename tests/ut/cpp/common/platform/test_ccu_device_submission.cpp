@@ -12,6 +12,45 @@
 #include <gtest/gtest.h>
 #include "platform_comm/ccu/ccu_device_submission.h"
 namespace {
+TEST(CcuDeviceSubmission, ResolvesOwnerWindowCredentialsAndPositionalScalars) {
+    CommCcuWindow windows[]{{0x1000, 1024, 17}, {0x8000, 2048, 29}};
+    CommContext domain{};
+    domain.rankNum = 2;
+    domain.windowsIn[1] = 0xdead0000;
+    set_comm_workspace(domain, CommWorkspaceKind::CCU, reinterpret_cast<uint64_t>(windows), sizeof(windows));
+    using Arg = simpler::ccu::CcuCallArg;
+    const Arg args[]{{Arg::Kind::Window, 0, 64, 128}, {Arg::Kind::Window, 1, 256, 128}, {Arg::Kind::Scalar, 0, 128, 0}};
+    uint64_t words[6]{}, bytes = 0;
+    ASSERT_TRUE(simpler::ccu::resolve_call_args(&domain, args, words, bytes));
+    EXPECT_EQ(bytes, 40u);
+    EXPECT_EQ(words[0], 0x1040u);
+    EXPECT_EQ(words[1], 17u);
+    EXPECT_EQ(words[2], 0x8100u);
+    EXPECT_EQ(words[3], 29u);
+    EXPECT_EQ(words[4], 128u);
+}
+TEST(CcuDeviceSubmission, RejectsInvalidWindowRangesAndAddressOverflow) {
+    CommCcuWindow window{0x1000, 1024, 17};
+    CommContext domain{};
+    domain.rankNum = 1;
+    set_comm_workspace(domain, CommWorkspaceKind::CCU, reinterpret_cast<uint64_t>(&window), sizeof(window));
+    using Arg = simpler::ccu::CcuCallArg;
+    Arg args[]{{Arg::Kind::Window, 0, 960, 64}};
+    uint64_t words[2]{}, bytes = 0;
+    ASSERT_TRUE(simpler::ccu::resolve_call_args(&domain, args, words, bytes));
+    for (const auto &invalid :
+         {Arg{Arg::Kind::Window, 1, 0, 64}, Arg{Arg::Kind::Window, 0, 1024, 1},
+          Arg{Arg::Kind::Window, 0, UINT64_MAX, 64}, Arg{Arg::Kind::Window, 0, 0, 0}}) {
+        args[0] = invalid;
+        EXPECT_FALSE(simpler::ccu::resolve_call_args(&domain, args, words, bytes));
+    }
+    window.address = UINT64_MAX - 32;
+    args[0] = {Arg::Kind::Window, 0, 0, 64};
+    EXPECT_FALSE(simpler::ccu::resolve_call_args(&domain, args, words, bytes));
+    window.address = 0x1000;
+    comm_workspace<CommWorkspaceKind::CCU>(domain).size = 0;
+    EXPECT_FALSE(simpler::ccu::resolve_call_args(&domain, args, words, bytes));
+}
 struct Fixture {
     alignas(64) uint64_t parameters[2]{};
     uint64_t ready{}, trigger{}, done{};

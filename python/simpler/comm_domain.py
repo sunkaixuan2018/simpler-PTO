@@ -31,8 +31,8 @@ def normalize_workspace_engines(workspace_engines) -> tuple[str, ...]:
     if isinstance(workspace_engines, str) or workspace_engines is None:
         raise TypeError("workspace_engines must be a sequence of engine names")
     names = tuple(workspace_engines)
-    if any(name not in ("sdma", "urma", "rdma") for name in names) or len(set(names)) != len(names):
-        raise ValueError("workspace_engines requires distinct names from sdma, urma, rdma")
+    if any(name not in ("sdma", "urma", "rdma", "ccu") for name in names) or len(set(names)) != len(names):
+        raise ValueError("workspace_engines requires distinct names from sdma, urma, rdma, ccu")
     workspace_engines = tuple(sorted(names))
     if "rdma" in workspace_engines and len(workspace_engines) > 1:
         raise ValueError("RDMA domains do not map peer windows; use separate domains for other engines")
@@ -112,7 +112,7 @@ class DomainConfig:
         )
 
     def workspace_mask(self) -> int:
-        return sum(1 << ("sdma", "urma", "rdma").index(name) for name in self.workspace_engines)
+        return sum(1 << ("sdma", "urma", "rdma", "ccu").index(name) for name in self.workspace_engines)
 
     def specs(self) -> list[CommBufferSpec]:
         from .task_interface import CommBufferSpec  # noqa: PLC0415

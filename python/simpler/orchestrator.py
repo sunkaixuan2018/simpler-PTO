@@ -571,7 +571,7 @@ class Orchestrator:
         ``workers`` is the legacy L3 spelling; it cannot be combined with ``members``.
         Retained domains survive successful runs until explicit release or Worker.close().
         Domains provide synchronous mapped-window communication by default.
-        On A5, workspace_engines adds asynchronous resources from sdma/urma/rdma.
+        On A5, workspace_engines adds asynchronous resources from sdma/urma/rdma/ccu.
         SDMA and URMA may share a domain. RDMA requires a separate domain with
         its own low-address window. Explicit selection is limited to L3 A5.
         ``memory_source=AddressSpace.HOST`` creates independent Host windows on

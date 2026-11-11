@@ -136,6 +136,7 @@ struct DomainAllocation {
     void *rdma_workspace_addr = nullptr;
 #endif
     CommContext *device_ctx = nullptr;  // aclrtMalloc'd CommContext mirror
+    void *ccu_windows = nullptr;
     size_t mapping_size = 0;
 };
 
@@ -429,6 +430,8 @@ struct IpcAnnounceFile {
     uint32_t phy_id;
     uint16_t roce_base_port;
     char roce_ip[64];
+    CommCcuWindow ccu_window{};
+    int32_t ccu_status = 0;
 };
 
 // Announce file path shares the `barrier_<prefix>_..._<rank>.ready` shape so
@@ -736,7 +739,8 @@ domain_announce_path(const std::string &rootinfo, uint64_t allocation_id, uint32
 static bool domain_write_announce(
     const std::string &rootinfo, uint64_t allocation_id, uint32_t domain_rank, uint64_t run_token, int32_t pid,
     int32_t device_id, uint64_t shareable_handle, uint64_t symmetric_addr = 0, uint32_t phy_id = 0,
-    uint16_t roce_base_port = 0, const char *roce_ip = nullptr
+    uint16_t roce_base_port = 0, const char *roce_ip = nullptr, const CommCcuWindow *ccu_window = nullptr,
+    int32_t ccu_status = 0
 ) {
     IpcAnnounceFile a{};
     a.magic = kIpcAnnounceMagic;
@@ -747,15 +751,19 @@ static bool domain_write_announce(
     a.device_id = device_id;
     a.phy_id = phy_id;
     a.roce_base_port = roce_base_port;
+    if (ccu_window != nullptr) a.ccu_window = *ccu_window;
+    a.ccu_status = ccu_status;
     if (roce_ip != nullptr) {
         std::snprintf(a.roce_ip, sizeof(a.roce_ip), "%s", roce_ip);
     }
     std::string p = domain_announce_path(rootinfo, allocation_id, domain_rank, run_token);
     std::string tmp = p + ".tmp." + std::to_string(getpid());
     {
-        std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-        f.write(reinterpret_cast<const char *>(&a), sizeof(a));
-        if (!f.good()) {
+        const int fd = open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+        if (fd < 0) return false;
+        const auto bytes = write(fd, &a, sizeof(a));
+        const int closed = close(fd);
+        if (bytes != sizeof(a) || closed != 0) {
             std::remove(tmp.c_str());
             return false;
         }
@@ -852,6 +860,7 @@ extern "C" void dma_workspace_release(void *handle) { (void)handle; }
 
 static uint32_t compiled_comm_workspaces() {
     uint32_t mask = comm_workspace_bit(CommWorkspaceKind::SDMA);
+    mask |= comm_workspace_bit(CommWorkspaceKind::CCU);
     mask |= comm_workspace_bit(CommWorkspaceKind::URMA);
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     mask |= comm_workspace_bit(CommWorkspaceKind::RDMA);
@@ -983,6 +992,10 @@ static bool close_domain_resources(DomainAllocation &alloc) {
     if (alloc.device_ctx != nullptr) {
         if (aclrtFree(alloc.device_ctx) != ACL_SUCCESS) return false;
         alloc.device_ctx = nullptr;
+    }
+    if (alloc.ccu_windows != nullptr) {
+        if (aclrtFree(alloc.ccu_windows) != ACL_SUCCESS) return false;
+        alloc.ccu_windows = nullptr;
     }
     for (auto it = alloc.peer_windows.rbegin(); it != alloc.peer_windows.rend(); ++it) {
         if (!release_domain_window(it->address, it->handle, it->mapped)) return false;
@@ -1574,6 +1587,11 @@ static int domain_alloc_via_ipc(
     }
 
     const int32_t myPid = static_cast<int32_t>(getpid());
+    const bool ccu_requested = (workspace_mask & comm_workspace_bit(CommWorkspaceKind::CCU)) != 0;
+    CommCcuWindow ccu_window{reinterpret_cast<uint64_t>(localBuf), win_size, 0};
+    const int32_t ccu_status =
+        ccu_requested && !simpler::ccu::query_window_token(ccu_window.address, ccu_window.size, ccu_window.token) ? -1 :
+                                                                                                                    0;
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
     RdmaBootstrapInfo rdma_bootstrap{};
     if (rdma_requested &&
@@ -1592,12 +1610,19 @@ static int domain_alloc_via_ipc(
     } else
 #endif
     {
-        if (!domain_write_announce(rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, shareableHandle)) {
+        if (!domain_write_announce(
+                rootinfo, allocation_id, domain_rank, run_token, myPid, myDevice, shareableHandle, 0, 0, 0, nullptr,
+                ccu_requested ? &ccu_window : nullptr, ccu_status
+            )) {
             LOG_ERROR("[comm rank %d] alloc_domain: write_announce failed", h->rank);
             return -1;
         }
     }
     std::vector<IpcAnnounceFile> peers(subset_n);
+    if (ccu_status != 0) {
+        LOG_ERROR("[comm rank %d] alloc_domain: CCU window token acquisition failed", h->rank);
+        return -1;
+    }
     for (int p = 0; p < subset_n; ++p) {
         if (p == my_dr) {
             peers[p].magic = kIpcAnnounceMagic;
@@ -1605,6 +1630,7 @@ static int domain_alloc_via_ipc(
             peers[p].rank = domain_rank;
             peers[p].device_id = myDevice;
             peers[p].shareable_handle = shareableHandle;
+            if (ccu_requested) peers[p].ccu_window = ccu_window;
 #ifdef SIMPLER_ENABLE_PTO_RDMA_WORKSPACE
             if (rdma_requested) {
                 peers[p].symmetric_addr = reinterpret_cast<uint64_t>(localBuf);
@@ -1617,6 +1643,11 @@ static int domain_alloc_via_ipc(
         }
         if (!domain_read_announce(rootinfo, allocation_id, static_cast<uint32_t>(p), run_token, &peers[p])) {
             LOG_ERROR("[comm rank %d] alloc_domain: read_announce(peer_dr=%d) timed out", h->rank, p);
+            return -1;
+        }
+        if (ccu_requested &&
+            (peers[p].ccu_status != 0 || peers[p].ccu_window.address == 0 || peers[p].ccu_window.size != win_size)) {
+            LOG_ERROR("[comm rank %d] alloc_domain: invalid CCU window from peer %d", h->rank, p);
             return -1;
         }
     }
@@ -1681,6 +1712,11 @@ static int domain_alloc_via_ipc(
     if (!file_barrier(rootinfo, my_dr, subset_n, domain_barrier_tag(allocation_id, "p2p_ready"), run_token)) {
         return -1;
     }
+    if (ccu_requested) {
+        // Every peer has consumed the credentials; keep no token-bearing bootstrap file.
+        const auto path = domain_announce_path(rootinfo, allocation_id, domain_rank, run_token);
+        if (std::remove(path.c_str()) != 0) return -1;
+    }
 
     out->rank = my_dr;
     out->nranks = subset_n;
@@ -1690,6 +1726,16 @@ static int domain_alloc_via_ipc(
     ctx.rankId = domain_rank;
     ctx.rankNum = static_cast<uint32_t>(subset_n);
     ctx.winSize = aligned_size;
+    if (ccu_requested) {
+        std::vector<CommCcuWindow> windows;
+        for (const auto &peer : peers)
+            windows.push_back(peer.ccu_window);
+        const size_t bytes = windows.size() * sizeof(CommCcuWindow);
+        if (aclrtMalloc(&out->ccu_windows, bytes, ACL_MEM_MALLOC_HUGE_FIRST) != ACL_SUCCESS ||
+            aclrtMemcpy(out->ccu_windows, bytes, windows.data(), bytes, ACL_MEMCPY_HOST_TO_DEVICE) != ACL_SUCCESS)
+            return -1;
+        set_comm_workspace(ctx, CommWorkspaceKind::CCU, reinterpret_cast<uint64_t>(out->ccu_windows), bytes);
+    }
     if ((workspace_mask & comm_workspace_bit(CommWorkspaceKind::SDMA)) != 0) {
         ensure_sdma_workspace(h);
         if (comm_workspace<CommWorkspaceKind::SDMA>(h->host_ctx).addr == 0) {

@@ -530,10 +530,27 @@ The legacy `device_ctx` field remains a raw address for synchronous consumers;
 it does not declare or validate an asynchronous engine requirement. No compiled
 capability query or `enable_urma` initialization switch is needed.
 
-The context is simpler's own 1104-byte host/device ABI. Rank metadata starts
+The context is simpler's own 1120-byte host/device ABI. Rank metadata starts
 at offset zero; there is no legacy workspace pair or PTO-compatible prefix.
 PTO session builders receive the chosen workspace address explicitly and do
 not parse this context.
+
+On A5, `workspace_engines=("ccu",)` obtains the local device window's CCU token
+at allocation and exchanges owner addresses, byte ranges and tokens with domain
+peers. The CCU workspace references a rank-ordered `CommCcuWindow` table. These
+owner addresses differ from the imported AIV peer mappings in `windowsIn`.
+The table and credentials share the window lifetime; allocation does not launch
+CCU work. Host windows and RDMA combinations are not supported for CCU.
+
+The typed `submit_ccu_mission(async_ctx, comm_ctx, ccu_id, call_args)` overload
+accepts positional `CcuCallArg` scalars and window references (rank, byte offset,
+byte size). It validates all references before admitting completion or triggering,
+then expands each window to two words: owner address plus offset, and window token.
+Scalars expand to one word. The native kernel declares the resulting byte size in
+its V2 manifest. Runtime publishes those words to P; the user never supplies W
+tokens. P's launch token remains independent. Native kernels consume the ordered
+words and issue their own CCU instructions. Channel selection remains separate
+from window resolution; the current native binding provides a ring channel.
 
 The tail contains `ccu_workspace_addr` and `ccu_count`. On native A5 CCU
 domains they describe the current run's `SimplerCcuWorkspaceV2` and kernel count;

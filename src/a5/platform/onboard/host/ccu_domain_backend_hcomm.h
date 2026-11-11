@@ -21,6 +21,8 @@
 
 namespace simpler::ccu {
 
+bool query_window_token(uint64_t address, uint64_t size, uint64_t &token);
+
 struct HcommPreparedMission {
     uint32_t ccu_id{};
     uint32_t kernel_id{};

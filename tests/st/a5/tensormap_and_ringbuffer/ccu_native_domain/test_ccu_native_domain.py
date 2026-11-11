@@ -29,7 +29,7 @@ _ROOT = Path(__file__).resolve().parent
 _RUNTIME = "tensormap_and_ringbuffer"
 
 
-def _build_callable(tmp_path, variant=0):
+def _build_callable(tmp_path, variant=0, source_root=_ROOT):
     tmp_path.mkdir(parents=True, exist_ok=True)
     sdk = Path(os.environ["ASCEND_HOME_PATH"])
     arch = sdk / "aarch64-linux"
@@ -52,7 +52,7 @@ def _build_callable(tmp_path, variant=0):
             "-shared",
             "-fPIC",
             "-O2",
-            str(_ROOT / "native_module.cpp"),
+            str(source_root / "native_module.cpp"),
             str(identities),
             f"-I{common}",
             f"-I{arch / 'include'}",
@@ -73,7 +73,7 @@ def _build_callable(tmp_path, variant=0):
     children = []
     for index, name in enumerate(("trigger_b", "trigger_a", "verify")):
         binary = compiler.compile_incore(
-            str(_ROOT / f"kernels/aiv/{name}.cpp"),
+            str(source_root / f"kernels/aiv/{name}.cpp"),
             core_type="aiv",
             pto_isa_root=str(isa_root),
             extra_include_dirs=compiler.get_orchestration_include_dirs(_RUNTIME),

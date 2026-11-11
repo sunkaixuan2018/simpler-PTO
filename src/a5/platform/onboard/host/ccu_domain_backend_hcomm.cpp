@@ -33,6 +33,10 @@
 extern "C" CcuResult CcuNotifyWait(ChannelHandle channel, uint32_t local_notify_index, uint16_t mask);
 
 namespace simpler::ccu {
+
+bool query_window_token(uint64_t address, uint64_t size, uint64_t &token) {
+    return HcommCcuGetMemToken(address, size, &token) == HCCL_SUCCESS;
+}
 namespace {
 
 [[noreturn]] void fail(const char *operation, int code) {

@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.mark.parametrize(
-    "engines,mask", [((), 0), ([], 0), (["sdma"], 1), (["urma"], 2), (["urma", "sdma"], 3), (["rdma"], 4)]
+    "engines,mask", [((), 0), ([], 0), (["sdma"], 1), (["urma"], 2), (["urma", "sdma"], 3), (["rdma"], 4), (["ccu"], 8)]
 )
 def test_domain_workspace_selection_is_part_of_configuration(engines, mask):
     config = DomainConfig.capture([0, 1], 4096, [], True, (), engines)
@@ -116,6 +116,8 @@ def host_resource_binary(request, tmp_path_factory):
             f"-I{ROOT}/src/a5/platform/onboard/host",
             f"-I{ROOT}/tests/ut/py/support",
             str(ROOT / "tests/ut/py/support/comm_workspaces_host.cpp"),
+            str(ROOT / "src/common/platform_comm/ccu/ccu_domain_owner.cpp"),
+            str(ROOT / "src/common/platform_comm/ccu/ccu_run_lifecycle.cpp"),
             "-ldl",
             "-lrt",
             "-o",

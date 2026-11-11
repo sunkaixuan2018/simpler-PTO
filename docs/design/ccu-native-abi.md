@@ -183,3 +183,18 @@ The hardware smoke uses finite programs with one request per mission per L2
 execution. Host run repetition does not establish dynamic repeated CCU calls
 within one L2 execution. Same-mission repeat within an AIV and the proposed
 generic Tensor call API are outside this integration.
+
+For allocated device windows, `workspace_engines=("ccu",)` publishes a
+rank-ordered `CommCcuWindow` descriptor table through the CCU slot in
+`CommContext::workspaces`. Each descriptor contains the owner's address, the
+requested valid byte range and the token acquired during allocation. Imported
+AIV peer addresses remain separate. The descriptor table is immutable while W
+is alive and is released only after domain quiescence.
+
+The typed AIV submit overload resolves `CcuCallArg` window references against
+that table before completion admission or trigger. A window argument expands
+to two uint64 words (address plus byte offset, token); a scalar expands to one.
+Native modules declare the expanded parameter size and consume the same order.
+This does not alter V2 launch arguments or reuse P's token as a W token.
+The CommContext layout grows to 1120 bytes; all producers and consumers must
+be rebuilt together. The CCU native module V2 layout remains unchanged.
