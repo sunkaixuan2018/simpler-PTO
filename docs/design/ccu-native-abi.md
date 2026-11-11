@@ -148,9 +148,15 @@ acceptance are implemented in the dependent runtime changes, not in this ABI.
 `comm_register_ccu_callable` accepts callable bytes, build identities and rank
 topology, with no allocation ID or window dependency. It loads and validates
 modules, creates HCOMM resources and registers every listed kernel, without
-launching. Exact bytes, build identities and rank topology identify a cached
-registration. HCOMM programs capture channel/Event handles, so different
+launching. A shared collective identity selects a cached registration; exact
+bytes, build identities and rank topology must match it. HCOMM programs capture channel/Event handles, so different
 topologies require different registration resources.
+
+The L3 parent assigns a shared `collective_id` to each callable/topology and
+sends it to every participant. It uses the same identity allocator as windows
+to avoid subcommunicator ID collisions. Rank-local registration cache IDs are
+separate and may differ when ranks have participated in different subsets.
+Binding state is optional: domain ID zero is a valid bound allocation.
 
 `comm_bind_domain_ccu` attaches an existing registration ID to compatible windows;
 it does no module loading or HCOMM registration. Window release detaches the

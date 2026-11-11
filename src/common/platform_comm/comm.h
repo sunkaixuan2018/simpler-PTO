@@ -305,11 +305,13 @@ int comm_alloc_host_domain_windows(
 );
 
 /* Register/cache all callable kernels for a rank topology, independently of window allocation.
- * The communicator owns registration resources until confirmed comm_destroy. */
+ * collective_id is assigned once by the parent across all participating ranks.
+ * The returned registration_id is rank-local. The communicator owns registration
+ * resources until confirmed comm_destroy. */
 int comm_register_ccu_callable(
-    CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, const void *module_package,
-    size_t module_package_size, const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32],
-    uint64_t *registration_id
+    CommHandle h, uint64_t collective_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
+    const void *module_package, size_t module_package_size, const uint8_t sdk_build_id[32],
+    const uint8_t pto_isa_build_id[32], uint64_t *registration_id
 );
 /* Attach a previously registered callable. This performs no HCOMM registration or launch. */
 int comm_bind_domain_ccu(CommHandle h, uint64_t allocation_id, uint64_t registration_id);

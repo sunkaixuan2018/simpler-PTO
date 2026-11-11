@@ -50,6 +50,7 @@
 #include <fstream>
 #include <memory>
 #include <map>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -105,7 +106,8 @@ struct CcuCallableRegistration {
     std::vector<uint8_t> package;
     simpler::ccu::ExpectedBuildIdentity identity{};
     std::vector<uint32_t> rank_ids;
-    uint64_t bound_allocation = 0;
+    uint64_t collective_id = 0;
+    std::optional<uint64_t> bound_allocation;
 };
 
 struct DomainAllocation {
@@ -959,7 +961,7 @@ static bool close_domain_resources(DomainAllocation &alloc) {
     alloc.cleanup_failed = true;
     if (alloc.ccu) {
         if (!alloc.ccu->owner || !alloc.ccu->owner->drained()) return false;
-        alloc.ccu->bound_allocation = 0;
+        alloc.ccu->bound_allocation.reset();
         alloc.ccu = nullptr;
     }
     if (alloc.urma_comm != nullptr) {
@@ -2111,9 +2113,9 @@ extern "C" int comm_alloc_host_domain_windows(
 }
 
 extern "C" int comm_register_ccu_callable(
-    CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, const void *module_package,
-    size_t module_package_size, const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32],
-    uint64_t *registration_id
+    CommHandle h, uint64_t collective_id, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank,
+    const void *module_package, size_t module_package_size, const uint8_t sdk_build_id[32],
+    const uint8_t pto_isa_build_id[32], uint64_t *registration_id
 ) try {
     if (h == nullptr || module_package == nullptr || module_package_size == 0 || sdk_build_id == nullptr ||
         pto_isa_build_id == nullptr || registration_id == nullptr || rank_ids == nullptr || rank_count < 2 ||
@@ -2131,12 +2133,13 @@ extern "C" int comm_register_ccu_callable(
     const auto *raw_package = static_cast<const uint8_t *>(module_package);
     const std::vector<uint8_t> package(raw_package, raw_package + module_package_size);
     for (const auto &[id, cached] : h->ccu_registrations) {
-        if (cached->package == package && cached->identity.sdk == identity.sdk &&
-            cached->identity.pto_isa == identity.pto_isa && cached->rank_ids == ranks) {
-            if (!cached->owner || !cached->owner->drained()) return COMM_RECLAMATION_UNCONFIRMED;
-            *registration_id = id;
-            return 0;
-        }
+        if (cached->collective_id != collective_id) continue;
+        if (cached->package != package || cached->identity.sdk != identity.sdk ||
+            cached->identity.pto_isa != identity.pto_isa || cached->rank_ids != ranks)
+            return -1;
+        if (!cached->owner || !cached->owner->drained()) return COMM_RECLAMATION_UNCONFIRMED;
+        *registration_id = id;
+        return 0;
     }
     const uint64_t id = h->next_ccu_registration++;
     auto &slot = h->ccu_registrations[id];
@@ -2144,8 +2147,9 @@ extern "C" int comm_register_ccu_callable(
     slot->package = package;
     slot->identity = identity;
     slot->rank_ids = ranks;
+    slot->collective_id = collective_id;
     slot->controls = simpler::ccu::prepare_hcomm_ccu_domain(
-        h->hccl_comm, 0x40000000ULL + id, ranks, domain_rank, identity, modules, "simpler_callable", slot->owner,
+        h->hccl_comm, collective_id, ranks, domain_rank, identity, modules, "simpler_callable", slot->owner,
         slot->session
     );
     if (!slot->owner || slot->controls.empty()) return -1;
@@ -2171,11 +2175,11 @@ extern "C" int comm_bind_domain_ccu(CommHandle h, uint64_t allocation_id, uint64
     auto &target = *allocation->second;
     auto &binding = *registered->second;
     if (!binding.owner || !binding.owner->drained() || target.rank_ids != binding.rank_ids ||
-        (binding.bound_allocation != 0 && binding.bound_allocation != allocation_id))
+        (binding.bound_allocation.has_value() && *binding.bound_allocation != allocation_id))
         return -1;
     if (target.ccu) {
         if (!target.ccu->owner->drained()) return COMM_RECLAMATION_UNCONFIRMED;
-        target.ccu->bound_allocation = 0;
+        target.ccu->bound_allocation.reset();
     }
     target.ccu = &binding;
     binding.bound_allocation = allocation_id;

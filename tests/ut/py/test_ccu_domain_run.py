@@ -9,6 +9,7 @@
 
 """CPU coverage for rank joins, READY admission, and retained stop failures."""
 
+import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any
@@ -29,16 +30,55 @@ def test_registration_collective_needs_topology_but_no_allocation():
         allocation, generation, operation, digest, result = worker_mod._CCU_DOMAIN_REQUEST.unpack_from(payload)
         assert (allocation, generation, operation, digest, result) == (0, 0, 5, b"c" * 32, 0)
         tail = worker_mod._CCU_DOMAIN_REQUEST.size
-        assert worker_mod.struct.unpack_from("<II2I", payload, tail) == (2, chip, 0, 1)
+        assert worker_mod.struct.unpack_from("<QII2I", payload, tail) == (0, 2, chip, 0, 1)
         observed.append(chip)
         reply = bytearray(payload)
         worker_mod.struct.pack_into("<i", reply, tail - 4, 17)
         return reply
 
-    worker: Any = SimpleNamespace(_worker=SimpleNamespace(control_payload=control), _py_control_timeout_s=1)
+    worker: Any = SimpleNamespace(
+        _worker=SimpleNamespace(control_payload=control),
+        _py_control_timeout_s=1,
+        _alloc_id_lock=threading.Lock(),
+        _next_alloc_id=0,
+        _ccu_registration_collectives={},
+    )
     topology = SimpleNamespace(workers=(0, 1), allocation_id=0)
     assert Worker._ccu_domain_collective(worker, topology, 5, b"c" * 32) == [17, 17]
     assert sorted(observed) == [0, 1]
+
+
+def test_registration_collective_identity_survives_different_rank_histories():
+    requests = []
+    local_caches = {rank: {} for rank in range(3)}
+
+    def control(_kind, chip, _command, payload, _timeout):
+        tail = worker_mod._CCU_DOMAIN_REQUEST.size
+        collective, count, domain_rank = worker_mod.struct.unpack_from("<QII", payload, tail)
+        members = worker_mod.struct.unpack_from(f"<{count}I", payload, tail + 16)
+        assert members[domain_rank] == chip
+        requests.append((chip, collective, members))
+        cache = local_caches[chip]
+        registration = cache.setdefault(collective, len(cache) + 1)
+        reply = bytearray(payload)
+        worker_mod.struct.pack_into("<i", reply, tail - 4, registration)
+        return reply
+
+    worker: Any = SimpleNamespace(
+        _worker=SimpleNamespace(control_payload=control),
+        _py_control_timeout_s=1,
+        _alloc_id_lock=threading.Lock(),
+        _next_alloc_id=7,
+        _ccu_registration_collectives={},
+    )
+    first = SimpleNamespace(workers=(0, 1), allocation_id=0)
+    second = SimpleNamespace(workers=(1, 2), allocation_id=1)
+    assert Worker._ccu_domain_collective(worker, first, 5, b"c" * 32) == [1, 1]
+    assert Worker._ccu_domain_collective(worker, second, 5, b"c" * 32) == [2, 1]
+    assert {identity for _, identity, ranks in requests if ranks == (0, 1)} == {7}
+    assert {identity for _, identity, ranks in requests if ranks == (1, 2)} == {8}
+    assert Worker._ccu_domain_collective(worker, first, 5, b"c" * 32) == [1, 1]
+    assert worker._next_alloc_id == 9
 
 
 def _domain():

@@ -92,6 +92,76 @@ def _build_callable(tmp_path, variant=0):
 @pytest.mark.platforms(["a5"])
 @pytest.mark.runtime(_RUNTIME)
 @pytest.mark.device_count(2)
+def test_registration_bound_to_domain_zero_rejects_second_live_domain(st_platform, st_device_ids, tmp_path):
+    worker = Worker(
+        level=3,
+        platform=st_platform,
+        runtime=_RUNTIME,
+        device_ids=[int(device) for device in st_device_ids[:2]],
+        num_sub_workers=0,
+    )
+    callable_handle = worker.register(_build_callable(tmp_path))
+    domains = []
+    try:
+        worker.init()
+
+        def allocate(orch, _args, _config):
+            for name in ("first", "second"):
+                domains.append(
+                    orch.allocate_domain(
+                        name=name,
+                        members=[0, 1],
+                        window_size=4 * 1024 * 1024,
+                        retain_after_run=True,
+                    )
+                )
+
+        worker.run(allocate)
+        first, second = domains
+        assert first.allocation_id == 0
+        worker._ccu_domain_collective(first, 0, callable_handle.digest)
+        worker._ccu_domain_collective(first, 0, callable_handle.digest)
+        with pytest.raises(RuntimeError, match="CCU domain binding failed"):
+            worker._ccu_domain_collective(second, 0, callable_handle.digest)
+        first.release()
+        assert first.freed
+        worker._ccu_domain_collective(second, 0, callable_handle.digest)
+        second.release()
+        assert second.freed
+    finally:
+        worker.close()
+
+
+@pytest.mark.platforms(["a5"])
+@pytest.mark.runtime(_RUNTIME)
+@pytest.mark.device_count(3)
+def test_registration_overlapping_members_uses_shared_collective_identity(st_platform, st_device_ids, tmp_path):
+    worker = Worker(
+        level=3,
+        platform=st_platform,
+        runtime=_RUNTIME,
+        device_ids=[int(device) for device in st_device_ids[:3]],
+        num_sub_workers=0,
+    )
+    callable_handle = worker.register(_build_callable(tmp_path))
+    try:
+        worker.init()
+        worker._ensure_comm_base()
+        first = SimpleNamespace(workers=(0, 1), allocation_id=0)
+        second = SimpleNamespace(workers=(1, 2), allocation_id=0)
+        initial = worker._ccu_domain_collective(first, 5, callable_handle.digest)
+        overlapping = worker._ccu_domain_collective(second, 5, callable_handle.digest)
+        assert all(registration > 0 for registration in initial + overlapping)
+        assert overlapping[0] != overlapping[1]
+        assert worker._ccu_domain_collective(first, 5, callable_handle.digest) == initial
+        assert worker._ccu_domain_collective(second, 5, callable_handle.digest) == overlapping
+    finally:
+        worker.close()
+
+
+@pytest.mark.platforms(["a5"])
+@pytest.mark.runtime(_RUNTIME)
+@pytest.mark.device_count(2)
 @pytest.mark.parametrize("replace_callable", [False, True])
 def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request, replace_callable):
     rounds = request.config.getoption("--rounds")

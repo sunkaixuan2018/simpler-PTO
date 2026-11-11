@@ -448,8 +448,8 @@ public:
         const std::string &host_shm_name = {}
     );
     uint64_t register_ccu_callable(
-        uint64_t comm_handle, int32_t callable_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
-        const simpler::ccu::ExpectedBuildIdentity &expected_identity
+        uint64_t comm_handle, uint64_t collective_id, int32_t callable_id, const std::vector<uint32_t> &rank_ids,
+        uint32_t domain_rank, const simpler::ccu::ExpectedBuildIdentity &expected_identity
     );
     void bind_ccu_callable_to_domain(uint64_t comm_handle, uint64_t allocation_id, uint64_t registration_id);
     int control_domain_ccu(uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation);
@@ -657,7 +657,8 @@ private:
     );
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
     using CommRegisterCcuCallableFn = int (*)(
-        void *, const uint32_t *, size_t, uint32_t, const void *, size_t, const uint8_t *, const uint8_t *, uint64_t *
+        void *, uint64_t, const uint32_t *, size_t, uint32_t, const void *, size_t, const uint8_t *, const uint8_t *,
+        uint64_t *
     );
     using CommBindDomainCcuFn = int (*)(void *, uint64_t, uint64_t);
     using CommGlobalDomainPrepareFn =

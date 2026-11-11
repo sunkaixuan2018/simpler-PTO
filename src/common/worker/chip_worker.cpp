@@ -2728,8 +2728,8 @@ std::tuple<uint64_t, uint64_t, size_t> ChipWorker::comm_alloc_domain_windows(
 }
 
 uint64_t ChipWorker::register_ccu_callable(
-    uint64_t comm_handle, int32_t callable_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
-    const simpler::ccu::ExpectedBuildIdentity &expected_identity
+    uint64_t comm_handle, uint64_t collective_id, int32_t callable_id, const std::vector<uint32_t> &rank_ids,
+    uint32_t domain_rank, const simpler::ccu::ExpectedBuildIdentity &expected_identity
 ) {
     require_comm_cleanup_confirmed();
     validate_execution_context();
@@ -2741,8 +2741,8 @@ uint64_t ChipWorker::register_ccu_callable(
     const auto package = pack_ccu_modules(found->second.ccu_modules);
     uint64_t registration_id = 0;
     const int rc = comm_register_ccu_callable_fn_(
-        reinterpret_cast<void *>(comm_handle), rank_ids.data(), rank_ids.size(), domain_rank, package.data(),
-        package.size(), expected_identity.sdk.data(), expected_identity.pto_isa.data(), &registration_id
+        reinterpret_cast<void *>(comm_handle), collective_id, rank_ids.data(), rank_ids.size(), domain_rank,
+        package.data(), package.size(), expected_identity.sdk.data(), expected_identity.pto_isa.data(), &registration_id
     );
     if (rc == COMM_RECLAMATION_UNCONFIRMED) retain_unconfirmed_comm_cleanup();
     if (rc != 0 || registration_id == 0)

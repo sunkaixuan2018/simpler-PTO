@@ -3667,10 +3667,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     result = 0
                     if operation in (0, 5):
                         tail = _CCU_DOMAIN_REQUEST.size
-                        rank_count, domain_rank = struct.unpack_from("<II", payload, tail)
-                        if size != tail + 8 + rank_count * 4 or rank_count < 2 or domain_rank >= rank_count:
+                        collective_id, rank_count, domain_rank = struct.unpack_from("<QII", payload, tail)
+                        if size != tail + 16 + rank_count * 4 or rank_count < 2 or domain_rank >= rank_count:
                             raise ValueError("invalid CCU registration topology")
-                        rank_ids = list(struct.unpack_from(f"<{rank_count}I", payload, tail + 8))
+                        rank_ids = list(struct.unpack_from(f"<{rank_count}I", payload, tail + 16))
                         cid = identity_table.get(digest)
                         if cid is None:
                             raise RuntimeError("CCU callable is not registered on this chip")
@@ -3680,7 +3680,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         if binding is not None and binding.active:
                             raise RuntimeError("cannot replace an active CCU domain registration")
                         sdk_id, isa_id = runtime_build_identity()
-                        result = cw.register_ccu_callable(comm, int(cid), rank_ids, domain_rank, sdk_id, isa_id)
+                        result = cw.register_ccu_callable(
+                            comm, collective_id, int(cid), rank_ids, domain_rank, sdk_id, isa_id
+                        )
                         if operation == 0:
                             cw.bind_ccu_callable_to_domain(comm, allocation, result)
                             ccu_bindings[allocation] = binding or ChipCcuBinding(cw, comm, allocation, 120.0)
@@ -6100,6 +6102,7 @@ class Worker:
         # two concurrent allocations don't share a marker file.  Wraps after
         # 2^64 allocations — far beyond any realistic Worker lifetime.
         self._next_alloc_id: int = 0
+        self._ccu_registration_collectives: dict[tuple[bytes, tuple[int, ...]], int] = {}
         # Exactly one caller drives CTRL_RELEASE_DOMAIN for a given allocation,
         # and every other caller waits for its outcome. Several paths can reach
         # one handle at once — an end-of-run or close() sweep working from its
@@ -10980,6 +10983,14 @@ class Worker:
         native = self._worker
         if native is None:
             raise RuntimeError("CCU domain requires an initialized Worker")
+        collective_id = 0
+        if operation in (0, 5):
+            key = (digest, tuple(handle.workers))
+            with self._alloc_id_lock:
+                if key not in self._ccu_registration_collectives:
+                    self._ccu_registration_collectives[key] = self._next_alloc_id
+                    self._next_alloc_id += 1
+                collective_id = self._ccu_registration_collectives[key]
         results: list[int] = [0] * len(handle.workers)
         errors: list[BaseException | None] = [None] * len(handle.workers)
 
@@ -10987,7 +10998,7 @@ class Worker:
             try:
                 payload = _CCU_DOMAIN_REQUEST.pack(handle.allocation_id, generation, operation, digest, 0)
                 if operation in (0, 5):
-                    payload += struct.pack("<II", len(handle.workers), index)
+                    payload += struct.pack("<QII", collective_id, len(handle.workers), index)
                     payload += struct.pack(f"<{len(handle.workers)}I", *handle.workers)
                 reply = native.control_payload(
                     WorkerType.NEXT_LEVEL, chip, _CTRL_CCU_DOMAIN, payload, self._py_control_timeout_s
