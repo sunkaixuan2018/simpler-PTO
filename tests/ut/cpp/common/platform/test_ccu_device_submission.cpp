@@ -15,12 +15,11 @@ namespace {
 struct Fixture {
     alignas(64) uint64_t parameters[2]{};
     uint64_t ready{}, trigger{}, done{};
-    SimplerCcuMissionDescriptorV2 mission{};
+    SimplerCcuControlV2 mission{};
     Fixture() {
         mission.abi_version = 2;
         mission.struct_size = sizeof(mission);
         mission.run_generation = 7;
-        mission.kernel_id = 3;
         mission.parameter_alignment = 64;
         mission.parameter_addr = reinterpret_cast<uint64_t>(parameters);
         mission.parameter_size = sizeof(parameters);
@@ -52,21 +51,35 @@ TEST(CcuDeviceSubmission, RegistrationFailureDoesNotPublishParametersOrTrigger) 
     EXPECT_EQ(f.parameters[0], 0U);
     EXPECT_EQ(f.trigger, 0U);
 }
-TEST(CcuDeviceSubmission, ValidatesWorkspaceGenerationAndAmbiguousKernelIds) {
+TEST(CcuDeviceSubmission, DirectCallableIndexChecksBoundsAndGeneration) {
     Fixture f;
-    SimplerCcuMissionDescriptorV2 missions[]{f.mission, f.mission};
-    missions[1].mission_index = 1;
-    missions[1].kernel_id = 4;
+    SimplerCcuControlV2 missions[]{f.mission, f.mission};
+    missions[1].ccu_id = 1;
     SimplerCcuWorkspaceV2 workspace{
-        2,     sizeof(SimplerCcuWorkspaceV2), 2, 2, 7, reinterpret_cast<uint64_t>(missions), sizeof(missions[0]), 0, 91,
+        2,
+        sizeof(SimplerCcuWorkspaceV2),
+        SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION,
+        2,
+        7,
+        reinterpret_cast<uint64_t>(missions),
+        sizeof(missions[0]),
+        0,
+        91,
         {0, 0}
     };
-    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 4), &missions[1]);
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 0), &missions[0]);
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 1), &missions[1]);
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 2), nullptr);
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, UINT32_MAX), nullptr);
     missions[1].run_generation = 6;
-    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 4), nullptr);
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 1), nullptr);
     missions[1].run_generation = 7;
-    missions[1].kernel_id = 3;
-    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 3), nullptr);
+    missions[0].run_generation = 0;
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 1), &missions[1]);
+    missions[1].ccu_id = 0;
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 1), nullptr);
+    workspace.layout_version = 2;
+    EXPECT_EQ(simpler::ccu::ccu_control(&workspace, 0), nullptr);
 }
 TEST(CcuDeviceSubmission, RejectsAliasedEventsBeforeRegisteringCompletion) {
     Fixture f;

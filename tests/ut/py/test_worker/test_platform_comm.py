@@ -72,7 +72,7 @@ class _CommContext(ctypes.Structure):
         ("windowsOut", ctypes.c_uint64 * _COMM_MAX_RANK_NUM),
         ("workspaces", _CommWorkspace * 3),
         ("ccu_workspace_addr", ctypes.c_uint64),
-        ("ccu_mission_count", ctypes.c_uint64),
+        ("ccu_count", ctypes.c_uint64),
     ]
 
 

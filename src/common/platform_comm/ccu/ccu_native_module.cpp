@@ -156,12 +156,12 @@ NativeModule::load(std::vector<uint8_t> module_bytes, const ExpectedBuildIdentit
     if (manifest == nullptr) fail("manifest entry returned null");
     if (manifest->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
         manifest->struct_size != sizeof(SimplerCcuModuleManifestV2) ||
-        manifest->kernel_record_size != sizeof(SimplerCcuKernelRecordV2) ||
-        manifest->instance_record_size != sizeof(SimplerCcuMissionInstanceV2))
+        manifest->kernel_record_size != sizeof(SimplerCcuKernelRecordV2))
         fail("unsupported ABI version or struct size");
     if (manifest->manifest_size < sizeof(SimplerCcuModuleManifestV2) || manifest->manifest_size > kMaxManifestSize ||
         manifest->kernel_count == 0 || manifest->kernel_count > kMaxKernelCount || manifest->capability_flags != 0 ||
-        manifest->instance_count == 0 || manifest->instance_count > kMaxKernelCount || !all_zero(manifest->reserved, 3))
+        manifest->reserved0 != 0 || manifest->reserved1 != 0 || manifest->reserved2 != 0 ||
+        !all_zero(manifest->reserved, 3))
         fail("invalid manifest fields or reserved values");
     if (!std::equal(
             std::begin(manifest->sdk_build_id), std::end(manifest->sdk_build_id), expected_identity.sdk.begin()
@@ -175,23 +175,12 @@ NativeModule::load(std::vector<uint8_t> module_bytes, const ExpectedBuildIdentit
     const uint64_t records_size = static_cast<uint64_t>(manifest->kernel_count) * sizeof(SimplerCcuKernelRecordV2);
     const uint64_t records_end = static_cast<uint64_t>(manifest->kernel_records_offset) + records_size;
     const uint64_t strings_end = static_cast<uint64_t>(manifest->string_table_offset) + manifest->string_table_size;
-    const uint64_t instances_end =
-        static_cast<uint64_t>(manifest->instance_records_offset) +
-        static_cast<uint64_t>(manifest->instance_count) * sizeof(SimplerCcuMissionInstanceV2);
     if (manifest->kernel_records_offset < sizeof(SimplerCcuModuleManifestV2) ||
         manifest->kernel_records_offset % alignof(SimplerCcuKernelRecordV2) != 0 ||
         records_end > manifest->manifest_size || manifest->string_table_size == 0 ||
         manifest->string_table_offset < sizeof(SimplerCcuModuleManifestV2) || strings_end > manifest->manifest_size ||
         ranges_overlap(manifest->kernel_records_offset, records_end, manifest->string_table_offset, strings_end))
         fail("manifest record or string-table range is invalid");
-    if (manifest->instance_records_offset < sizeof(SimplerCcuModuleManifestV2) ||
-        manifest->instance_records_offset % alignof(SimplerCcuMissionInstanceV2) != 0 ||
-        instances_end > manifest->manifest_size ||
-        ranges_overlap(
-            manifest->instance_records_offset, instances_end, manifest->kernel_records_offset, records_end
-        ) ||
-        ranges_overlap(manifest->instance_records_offset, instances_end, manifest->string_table_offset, strings_end))
-        fail("manifest instance-table range is invalid");
 
     const auto *manifest_data = reinterpret_cast<const uint8_t *>(manifest);
     module->manifest_bytes_.assign(manifest_data, manifest_data + manifest->manifest_size);
@@ -225,22 +214,6 @@ NativeModule::load(std::vector<uint8_t> module_bytes, const ExpectedBuildIdentit
         if (!valid_symbol(entry_symbol)) fail("kernel entry is not a valid C symbol");
         module->kernels_.push_back({record, entry_symbol, find_symbol(handle, entry_symbol)});
     }
-
-    std::set<uint32_t> instantiated_kernels;
-    module->instances_.reserve(manifest->instance_count);
-    for (uint32_t i = 0; i < manifest->instance_count; ++i) {
-        SimplerCcuMissionInstanceV2 record{};
-        std::memcpy(
-            &record, module->manifest_bytes_.data() + manifest->instance_records_offset + i * sizeof(record),
-            sizeof(record)
-        );
-        if (record.struct_size != sizeof(record) || record.mission_index != i ||
-            kernel_ids.count(record.kernel_id) == 0 || record.flags != 0 || !all_zero(record.reserved, 2))
-            fail("invalid logical mission index, kernel binding, or reserved field");
-        instantiated_kernels.insert(record.kernel_id);
-        module->instances_.push_back(record);
-    }
-    if (instantiated_kernels != kernel_ids) fail("every kernel requires at least one logical instance");
 
     append_bytes(module->cache_identity_, module->module_bytes_.data(), module->module_bytes_.size());
     append_bytes(module->cache_identity_, module->manifest_bytes_.data(), module->manifest_bytes_.size());

@@ -55,22 +55,16 @@ std::vector<RegisteredKernel> register_domain_kernels(
     if (request.channel_handle == 0) fail_protocol("CCU channel binding");
     if (request.program_namespace.empty()) fail_protocol("CCU program namespace");
 
-    std::map<uint32_t, const NativeKernelDefinition *> definitions;
-    for (const auto &kernel : kernels) {
-        if (!definitions.emplace(kernel.record.kernel_id, &kernel).second) fail_protocol("duplicate CCU kernel ID");
-    }
+    if (kernels.empty() || request.missions.size() != kernels.size()) fail_protocol("CCU control count");
     std::vector<const NativeKernelDefinition *> selected;
     std::vector<SimplerCcuRegistrationBindingV2> bindings;
     for (const auto &mission : request.missions) {
-        if (mission.mission_index != bindings.size()) fail_protocol("non-dense CCU mission index");
         if (mission.ready_event_handle == 0 || mission.trigger_event_handle == 0 || mission.done_event_handle == 0 ||
             mission.ready_event_handle == mission.trigger_event_handle ||
             mission.ready_event_handle == mission.done_event_handle ||
             mission.trigger_event_handle == mission.done_event_handle)
             fail_protocol("CCU mission event binding");
-        const auto found = definitions.find(mission.kernel_id);
-        if (found == definitions.end()) fail_protocol("unknown CCU mission binding");
-        const auto &kernel = *found->second;
+        const auto &kernel = kernels[bindings.size()];
         if (kernel.entry == nullptr ||
             kernel.record.registration_binding_layout_version != SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION ||
             kernel.record.registration_binding_size != sizeof(SimplerCcuRegistrationBindingV2) ||
@@ -83,8 +77,8 @@ std::vector<RegisteredKernel> register_domain_kernels(
             {SIMPLER_CCU_MODULE_ABI_VERSION,
              sizeof(SimplerCcuRegistrationBindingV2),
              SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION,
-             kernel.record.kernel_id,
-             mission.mission_index,
+             static_cast<uint32_t>(bindings.size()),
+             0,
              request.rank_id,
              request.rank_count,
              0,
@@ -94,11 +88,6 @@ std::vector<RegisteredKernel> register_domain_kernels(
              mission.done_event_handle,
              {0, 0, 0, 0}}
         );
-    }
-    if (selected.empty()) fail_protocol("empty CCU callable");
-    for (const auto &[id, definition] : definitions) {
-        if (std::find(selected.begin(), selected.end(), definition) == selected.end())
-            fail_protocol("missing CCU mission binding");
     }
 
     for (size_t i = 0; i < selected.size(); ++i) {
@@ -119,12 +108,12 @@ std::vector<RegisteredKernel> register_domain_kernels(
             const void *arguments[] = {&bindings[i]};
             uint64_t program_handle{};
             const int rc = sdk.register_kernel(
-                program_name(request, *selected[i]) + "_m" + std::to_string(bindings[i].mission_index),
-                selected[i]->entry, arguments, SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT, &program_handle
+                program_name(request, *selected[i]) + "_m" + std::to_string(bindings[i].ccu_id), selected[i]->entry,
+                arguments, SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT, &program_handle
             );
             if (rc != 0 || program_handle == 0)
                 throw DomainRegistrationError("HcommCcuKernelRegister", rc != 0 ? rc : kProtocolError);
-            registered.push_back({selected[i]->record.kernel_id, bindings[i].mission_index, program_handle});
+            registered.push_back({selected[i]->record.kernel_id, bindings[i].ccu_id, program_handle});
         }
     } catch (const DomainRegistrationError &error) {
         const int cleanup = sdk.register_end();

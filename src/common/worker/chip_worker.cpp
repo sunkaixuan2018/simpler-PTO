@@ -466,7 +466,8 @@ void ChipWorker::init(
             module->optional<CommAllocHostDomainWindowsFn>("comm_alloc_host_domain_windows");
         comm_release_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_release_domain_windows");
         comm_abort_domain_windows_fn_ = module->required<CommReleaseDomainWindowsFn>("comm_abort_domain_windows");
-        comm_prepare_domain_ccu_fn_ = module->optional<CommPrepareDomainCcuFn>("comm_prepare_domain_ccu");
+        comm_register_ccu_callable_fn_ = module->optional<CommRegisterCcuCallableFn>("comm_register_ccu_callable");
+        comm_bind_domain_ccu_fn_ = module->optional<CommBindDomainCcuFn>("comm_bind_domain_ccu");
         comm_control_domain_ccu_fn_ = module->optional<CommControlDomainCcuFn>("comm_control_domain_ccu");
         comm_global_domain_prepare_fn_ = module->required<CommGlobalDomainPrepareFn>("comm_global_domain_prepare");
         comm_global_domain_import_fn_ = module->required<CommGlobalDomainImportFn>("comm_global_domain_import");
@@ -947,7 +948,8 @@ void ChipWorker::clear_runtime_binding(bool release_device_reservation) {
     comm_alloc_host_domain_windows_fn_ = nullptr;
     comm_release_domain_windows_fn_ = nullptr;
     comm_abort_domain_windows_fn_ = nullptr;
-    comm_prepare_domain_ccu_fn_ = nullptr;
+    comm_register_ccu_callable_fn_ = nullptr;
+    comm_bind_domain_ccu_fn_ = nullptr;
     comm_control_domain_ccu_fn_ = nullptr;
     comm_global_domain_prepare_fn_ = nullptr;
     comm_global_domain_import_fn_ = nullptr;
@@ -2725,24 +2727,36 @@ std::tuple<uint64_t, uint64_t, size_t> ChipWorker::comm_alloc_domain_windows(
     return {device_ctx, local_window_base, actual_window_size};
 }
 
-void ChipWorker::bind_ccu_callable_to_domain(
-    uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
+uint64_t ChipWorker::register_ccu_callable(
+    uint64_t comm_handle, int32_t callable_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
     const simpler::ccu::ExpectedBuildIdentity &expected_identity
 ) {
     require_comm_cleanup_confirmed();
     validate_execution_context();
-    if (comm_prepare_domain_ccu_fn_ == nullptr)
-        throw std::runtime_error("this runtime does not support native CCU domain preparation");
+    if (comm_register_ccu_callable_fn_ == nullptr)
+        throw std::runtime_error("this runtime does not support native CCU registration");
     const auto found = callable_artifacts_.find(callable_id);
     if (found == callable_artifacts_.end()) throw std::runtime_error("CCU callable ID is not registered");
     if (found->second.ccu_modules.empty()) throw std::runtime_error("callable has no native CCU modules");
     const auto package = pack_ccu_modules(found->second.ccu_modules);
-    const int rc = comm_prepare_domain_ccu_fn_(
-        reinterpret_cast<void *>(comm_handle), allocation_id, package.data(), package.size(),
-        expected_identity.sdk.data(), expected_identity.pto_isa.data()
+    uint64_t registration_id = 0;
+    const int rc = comm_register_ccu_callable_fn_(
+        reinterpret_cast<void *>(comm_handle), rank_ids.data(), rank_ids.size(), domain_rank, package.data(),
+        package.size(), expected_identity.sdk.data(), expected_identity.pto_isa.data(), &registration_id
     );
     if (rc == COMM_RECLAMATION_UNCONFIRMED) retain_unconfirmed_comm_cleanup();
-    if (rc != 0) throw std::runtime_error("native CCU domain preparation failed with code " + std::to_string(rc));
+    if (rc != 0 || registration_id == 0)
+        throw std::runtime_error("native CCU registration failed with code " + std::to_string(rc));
+    return registration_id;
+}
+
+void ChipWorker::bind_ccu_callable_to_domain(uint64_t comm_handle, uint64_t allocation_id, uint64_t registration_id) {
+    require_comm_cleanup_confirmed();
+    validate_execution_context();
+    if (!comm_bind_domain_ccu_fn_) throw std::runtime_error("runtime has no CCU binding backend");
+    const int rc = comm_bind_domain_ccu_fn_(reinterpret_cast<void *>(comm_handle), allocation_id, registration_id);
+    if (rc == COMM_RECLAMATION_UNCONFIRMED) retain_unconfirmed_comm_cleanup();
+    if (rc != 0) throw std::runtime_error("CCU domain binding failed with code " + std::to_string(rc));
 }
 
 int ChipWorker::control_domain_ccu(

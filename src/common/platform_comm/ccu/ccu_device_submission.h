@@ -22,27 +22,20 @@
 #endif
 
 namespace simpler::ccu {
-inline SIMPLER_CCU_SUBMIT_DEVICE const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *
-find_mission(const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuWorkspaceV2 *workspace, uint32_t kernel_id) {
+inline SIMPLER_CCU_SUBMIT_DEVICE const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuControlV2 *
+ccu_control(const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuWorkspaceV2 *workspace, uint32_t ccu_id) {
     if (workspace == nullptr || workspace->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
         workspace->struct_size != sizeof(*workspace) ||
         workspace->layout_version != SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION || workspace->run_generation == 0 ||
-        workspace->missions_addr == 0 || workspace->missions_addr % alignof(SimplerCcuMissionDescriptorV2) != 0 ||
-        workspace->mission_count == 0 || workspace->mission_descriptor_size != sizeof(SimplerCcuMissionDescriptorV2) ||
+        workspace->controls_addr == 0 || workspace->controls_addr % alignof(SimplerCcuControlV2) != 0 ||
+        ccu_id >= workspace->ccu_count || workspace->control_size != sizeof(SimplerCcuControlV2) ||
         workspace->flags != 0 || workspace->reserved[0] != 0 || workspace->reserved[1] != 0)
         return nullptr;
-    const auto *missions = reinterpret_cast<const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *>(
-        workspace->missions_addr
-    );
-    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *found = nullptr;
-    for (uint32_t i = 0; i < workspace->mission_count; ++i) {
-        if (missions[i].kernel_id != kernel_id) continue;
-        if (found != nullptr || missions[i].mission_index != i ||
-            missions[i].run_generation != workspace->run_generation)
-            return nullptr;
-        found = &missions[i];
-    }
-    return found;
+    const auto *controls =
+        reinterpret_cast<const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuControlV2 *>(workspace->controls_addr);
+    const auto *control = &controls[ccu_id];
+    if (control->ccu_id != ccu_id || control->run_generation != workspace->run_generation) return nullptr;
+    return control;
 }
 
 struct DeviceSubmissionIo {
@@ -61,13 +54,13 @@ struct DeviceSubmissionIo {
 
 template <typename Io = DeviceSubmissionIo, typename RegisterCompletion>
 SIMPLER_CCU_SUBMIT_DEVICE bool submit_mission(
-    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *mission, const void *parameters,
-    uint64_t parameter_size, RegisterCompletion &&register_completion
+    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuControlV2 *mission, const void *parameters, uint64_t parameter_size,
+    RegisterCompletion &&register_completion
 ) {
     if (mission == nullptr || mission->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
         mission->struct_size != sizeof(*mission) || mission->run_generation == 0 || mission->flags != 0 ||
-        mission->reserved0 != 0 || mission->parameter_addr == 0 || mission->parameter_alignment == 0 ||
-        (mission->parameter_alignment & (mission->parameter_alignment - 1)) != 0 ||
+        mission->reserved0 != 0 || mission->reserved1 != 0 || mission->parameter_addr == 0 ||
+        mission->parameter_alignment == 0 || (mission->parameter_alignment & (mission->parameter_alignment - 1)) != 0 ||
         mission->parameter_addr % mission->parameter_alignment != 0 || mission->parameter_size != parameter_size ||
         (parameter_size != 0 && parameters == nullptr))
         return false;

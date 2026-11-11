@@ -4209,9 +4209,9 @@ NB_MODULE(_task_interface, m) {
             "responsibility before result conversion or an allocation error; it does not imply a usable context."
         )
         .def(
-            "bind_ccu_callable_to_domain",
-            [](ChipWorker &self, uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
-               const nb::bytes &sdk_build_id, const nb::bytes &pto_isa_build_id) {
+            "register_ccu_callable",
+            [](ChipWorker &self, uint64_t comm_handle, int32_t callable_id, const std::vector<uint32_t> &rank_ids,
+               uint32_t domain_rank, const nb::bytes &sdk_build_id, const nb::bytes &pto_isa_build_id) {
                 if (sdk_build_id.size() != SIMPLER_CCU_BUILD_ID_SIZE ||
                     pto_isa_build_id.size() != SIMPLER_CCU_BUILD_ID_SIZE) {
                     throw std::invalid_argument("CCU build identities must each contain exactly 32 bytes");
@@ -4219,10 +4219,14 @@ NB_MODULE(_task_interface, m) {
                 simpler::ccu::ExpectedBuildIdentity identity{};
                 std::memcpy(identity.sdk.data(), sdk_build_id.c_str(), identity.sdk.size());
                 std::memcpy(identity.pto_isa.data(), pto_isa_build_id.c_str(), identity.pto_isa.size());
-                self.bind_ccu_callable_to_domain(comm_handle, allocation_id, callable_id, identity);
+                return self.register_ccu_callable(comm_handle, callable_id, rank_ids, domain_rank, identity);
             },
-            nb::arg("comm_handle"), nb::arg("allocation_id"), nb::arg("callable_id"), nb::arg("sdk_build_id"),
-            nb::arg("pto_isa_build_id")
+            nb::arg("comm_handle"), nb::arg("callable_id"), nb::arg("rank_ids"), nb::arg("domain_rank"),
+            nb::arg("sdk_build_id"), nb::arg("pto_isa_build_id")
+        )
+        .def(
+            "bind_ccu_callable_to_domain", &ChipWorker::bind_ccu_callable_to_domain, nb::arg("comm_handle"),
+            nb::arg("allocation_id"), nb::arg("registration_id")
         )
         .def(
             "control_domain_ccu", &ChipWorker::control_domain_ccu, nb::arg("comm_handle"), nb::arg("allocation_id"),

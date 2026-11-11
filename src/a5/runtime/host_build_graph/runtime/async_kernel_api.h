@@ -202,12 +202,12 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
 }
 
 inline __aicore__ bool submit_ccu_mission(
-    AsyncCtx &ctx, const __gm__ CommContext *domain, uint32_t kernel_id, const void *parameters, uint64_t parameter_size
+    AsyncCtx &ctx, const __gm__ CommContext *domain, uint32_t ccu_id, const void *parameters, uint64_t parameter_size
 ) {
     const auto *workspace =
         domain == nullptr ? nullptr :
                             reinterpret_cast<const volatile __gm__ SimplerCcuWorkspaceV2 *>(domain->ccu_workspace_addr);
-    const auto *mission = simpler::ccu::find_mission(workspace, kernel_id);
+    const auto *mission = simpler::ccu::ccu_control(workspace, ccu_id);
     auto register_ccu_completion = [&](uint64_t address, uint64_t mask) __aicore__ {
         const CompletionToken token{address, 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, mask};
         if (!register_completion_condition(ctx, token)) return false;

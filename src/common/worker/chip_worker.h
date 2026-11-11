@@ -447,10 +447,11 @@ public:
         size_t window_size, uint32_t workspace_mask = 0, uint64_t *ownership_flag = nullptr,
         const std::string &host_shm_name = {}
     );
-    void bind_ccu_callable_to_domain(
-        uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
+    uint64_t register_ccu_callable(
+        uint64_t comm_handle, int32_t callable_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
         const simpler::ccu::ExpectedBuildIdentity &expected_identity
     );
+    void bind_ccu_callable_to_domain(uint64_t comm_handle, uint64_t allocation_id, uint64_t registration_id);
     int control_domain_ccu(uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation);
     /// Pair to `comm_alloc_domain_windows`: collectively free the per-rank
     /// pool and the device CommContext, then drop the allocation record.
@@ -655,7 +656,10 @@ private:
         size_t *
     );
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
-    using CommPrepareDomainCcuFn = int (*)(void *, uint64_t, const void *, size_t, const uint8_t *, const uint8_t *);
+    using CommRegisterCcuCallableFn = int (*)(
+        void *, const uint32_t *, size_t, uint32_t, const void *, size_t, const uint8_t *, const uint8_t *, uint64_t *
+    );
+    using CommBindDomainCcuFn = int (*)(void *, uint64_t, uint64_t);
     using CommGlobalDomainPrepareFn =
         int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
     using CommGlobalDomainImportFn = int (*)(uint64_t, const CommGlobalDomainDescriptor *, size_t, uint64_t *);
@@ -799,7 +803,8 @@ private:
     CommAllocHostDomainWindowsFn comm_alloc_host_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_release_domain_windows_fn_ = nullptr;
     CommReleaseDomainWindowsFn comm_abort_domain_windows_fn_ = nullptr;
-    CommPrepareDomainCcuFn comm_prepare_domain_ccu_fn_ = nullptr;
+    CommRegisterCcuCallableFn comm_register_ccu_callable_fn_ = nullptr;
+    CommBindDomainCcuFn comm_bind_domain_ccu_fn_ = nullptr;
     using CommControlDomainCcuFn = int (*)(void *, uint64_t, uint32_t, uint64_t);
     CommControlDomainCcuFn comm_control_domain_ccu_fn_ = nullptr;
     CommGlobalDomainPrepareFn comm_global_domain_prepare_fn_ = nullptr;

@@ -535,15 +535,18 @@ at offset zero; there is no legacy workspace pair or PTO-compatible prefix.
 PTO session builders receive the chosen workspace address explicitly and do
 not parse this context.
 
-The tail contains `ccu_workspace_addr` and `ccu_mission_count`. On native A5 CCU
-domains they describe the current run's `SimplerCcuWorkspaceV2` and instance count;
+The tail contains `ccu_workspace_addr` and `ccu_count`. On native A5 CCU
+domains they describe the current run's `SimplerCcuWorkspaceV2` and kernel count;
 other domains publish zeroes. Domain creation only allocates communication
 resources. A `ChipCallable` carries its CCU modules alongside its AIV children;
-submission prepares those modules against the one used domain covering its
-workers. SDK and ISA build identities are checked internally. Each L2 execution
+submission registers those modules for the participating workers and binds the
+registration to the one used domain. Registration is independent of window
+allocation and survives window release; matching callable bytes and topology
+reuse the same SDK programs. SDK and ISA build identities are checked internally. Each L2 execution
 launches CCU and confirms local READY before activating ordinary device work.
-Device submission selects a callable-local kernel ID, with unique IDs required
-across all modules. The AICPU observes and clears each done Event before releasing
+Device submission selects `controls[ccu_id]`, where `ccu_id` is the position in
+the L2 callable's kernel list, without an extra instance table or ID scan.
+The AICPU observes and clears each done Event before releasing
 dependent tasks. Finite programs return normally; completed mission streams are
 required before publishing execution completion. Unconfirmed stop
 closes admission and retains domain resources. Borrowing a retained domain alone

@@ -97,15 +97,15 @@ uint32_t find_channel_die(ChannelHandle channel) {
 }
 
 SimplerCcuRegistrationBindingV2 binding_for(
-    const NativeKernelDefinition &kernel, uint32_t rank, uint32_t rank_count, ChannelHandle channel,
-    uint32_t mission_index, const std::array<CcuEventHandle, 3> &events
+    uint32_t rank, uint32_t rank_count, ChannelHandle channel, uint32_t ccu_id,
+    const std::array<CcuEventHandle, 3> &events
 ) {
     return {
         SIMPLER_CCU_MODULE_ABI_VERSION,
         sizeof(SimplerCcuRegistrationBindingV2),
         SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION,
-        kernel.record.kernel_id,
-        mission_index,
+        ccu_id,
+        0,
         rank,
         rank_count,
         0,
@@ -130,8 +130,10 @@ public:
     aclrtFuncHandle trigger_function{};
     aclrtStream trigger_stream{};
 
-    uint64_t
-    begin(DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation) override {
+    uint64_t begin(
+        DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation,
+        uint64_t allocation_id
+    ) override {
         if (run_ && !run_->confirmed_stopped()) throw std::runtime_error("CCU prior run has no confirmed stop");
         run_.reset();
         sdk_.reset();
@@ -155,7 +157,7 @@ public:
             return rc;
         };
         std::vector<MissionRunResources> resources;
-        std::vector<SimplerCcuMissionDescriptorV2> descriptors;
+        std::vector<SimplerCcuControlV2> descriptors;
         for (const auto &mission : missions) {
             for (uint64_t address :
                  {mission.ready_gate_address, mission.trigger_gate_address, mission.done_gate_address}) {
@@ -170,18 +172,17 @@ public:
                 SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION, parameter_address, parameter_token, 0
             };
             resources.push_back(
-                {mission.mission_index,
+                {mission.ccu_id,
                  mission.program_handle,
                  mission.stream_handle,
                  arguments,
                  {mission.ready_gate_address, SIMPLER_CCU_EVENT_MASK}}
             );
-            SimplerCcuMissionDescriptorV2 descriptor{};
+            SimplerCcuControlV2 descriptor{};
             descriptor.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
             descriptor.struct_size = sizeof(descriptor);
             descriptor.run_generation = generation;
-            descriptor.mission_index = mission.mission_index;
-            descriptor.kernel_id = mission.kernel_id;
+            descriptor.ccu_id = mission.ccu_id;
             descriptor.module_index = mission.module_index;
             descriptor.parameter_alignment = mission.parameter_alignment;
             descriptor.parameter_addr = parameter_address;
@@ -198,11 +199,11 @@ public:
         workspace.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
         workspace.struct_size = sizeof(workspace);
         workspace.layout_version = SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION;
-        workspace.mission_count = descriptors.size();
+        workspace.ccu_count = descriptors.size();
         workspace.run_generation = generation;
-        workspace.missions_addr = table;
-        workspace.mission_descriptor_size = sizeof(descriptors.front());
-        workspace.domain_id = domain_id;
+        workspace.controls_addr = table;
+        workspace.control_size = sizeof(descriptors.front());
+        workspace.domain_id = allocation_id;
         const uint64_t workspace_address = allocate(sizeof(workspace), 64);
         copy_to_device(workspace_address, &workspace, sizeof(workspace));
         sdk_ = std::make_unique<HcommRunLifecycleSdk>(
@@ -355,27 +356,16 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     static NativeModuleCache module_cache;
     std::vector<std::shared_ptr<NativeModule>> modules;
     std::vector<NativeKernelDefinition> kernels;
-    std::vector<NativeKernelDefinition> instance_kernels;
-    std::vector<uint32_t> instance_modules;
-    std::set<uint32_t> kernel_ids;
+    std::vector<uint32_t> kernel_modules;
     for (const auto &bytes : module_bytes) {
         auto module = module_cache.load(bytes, expected_identity);
         for (const auto &kernel : module->kernels()) {
-            if (!kernel_ids.insert(kernel.record.kernel_id).second)
-                throw std::invalid_argument("CCU kernel IDs must be unique within a ChipCallable");
             kernels.push_back(kernel);
-        }
-        for (const auto &instance : module->instances()) {
-            const auto found =
-                std::find_if(module->kernels().begin(), module->kernels().end(), [&](const auto &kernel) {
-                    return kernel.record.kernel_id == instance.kernel_id;
-                });
-            instance_kernels.push_back(*found);
-            instance_modules.push_back(static_cast<uint32_t>(modules.size()));
+            kernel_modules.push_back(static_cast<uint32_t>(modules.size()));
         }
         modules.push_back(std::move(module));
     }
-    if (instance_kernels.size() > 1024) throw std::invalid_argument("too many CCU instances");
+    if (kernels.size() > 1024) throw std::invalid_argument("too many CCU kernels");
     if (kernels.empty()) throw std::invalid_argument("the callable has no CCU kernels");
 
     auto owned_backend = std::make_unique<HcommDomainResourceBackend>();
@@ -403,22 +393,32 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
         const uint32_t die = find_channel_die(backend->channel);
 
         auto &staging = backend->staging_instance;
-        check(HcommCcuInsCreateDefault(nullptr, 0, &staging), "HcommCcuInsCreateDefault(staging)");
+        HcommCcuResDescHandle staging_descriptor{};
+        check(HcommCcuInsResDescCreate(die, &staging_descriptor), "create staging resource descriptor");
+        try {
+            // Query executes definitions without reserving their program resources; only bound Events are live.
+            check(
+                HcommCcuInsResDescSetNum(staging_descriptor, HCOMM_CCU_RES_TYPE_EVENT, kernels.size() * 3),
+                "size staging Events"
+            );
+            const HcommCcuResDescHandle descriptors[]{staging_descriptor};
+            check(HcommCcuInsCreate(descriptors, 1, &staging), "HcommCcuInsCreate(staging Events)");
+        } catch (...) {
+            (void)HcommCcuInsResDescDestroy(staging_descriptor);
+            throw;
+        }
+        check(HcommCcuInsResDescDestroy(staging_descriptor), "destroy staging resource descriptor");
         try {
             HcommDomainRegistrationSdk sizing(staging, die);
-            for (uint32_t i = 0; i < instance_kernels.size(); ++i) {
+            for (uint32_t i = 0; i < kernels.size(); ++i) {
                 std::array<CcuEventHandle, 3> events{};
                 for (auto &event : events)
                     check(HcommCcuEventAlloc(staging, die, 1, &event), "allocate sizing Event");
-                const auto binding = binding_for(
-                    instance_kernels[i], domain_rank, static_cast<uint32_t>(rank_ids.size()), backend->channel, i,
-                    events
-                );
+                const auto binding =
+                    binding_for(domain_rank, static_cast<uint32_t>(rank_ids.size()), backend->channel, i, events);
                 const void *arguments[] = {&binding};
                 check(
-                    sizing.query_resources(
-                        instance_kernels[i].entry, arguments, SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT
-                    ),
+                    sizing.query_resources(kernels[i].entry, arguments, SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT),
                     "HcommCcuKernelQueryResReq(sizing)"
                 );
             }
@@ -428,7 +428,7 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
             try {
                 for (size_t type = 0; type < sizing.required_resources().size(); ++type) {
                     uint64_t count = sizing.required_resources()[type];
-                    if (type == HCOMM_CCU_RES_TYPE_EVENT) count += instance_kernels.size() * 3;
+                    if (type == HCOMM_CCU_RES_TYPE_EVENT) count += kernels.size() * 3;
                     if (count > std::numeric_limits<uint32_t>::max())
                         throw std::overflow_error("CCU resource requirement exceeds SDK width");
                     check(
@@ -458,20 +458,20 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
         request.channel_handle = backend->channel;
         request.program_namespace = program_namespace;
         std::vector<HcommPreparedMission> missions;
-        missions.reserve(instance_kernels.size());
-        for (uint32_t i = 0; i < instance_kernels.size(); ++i) {
+        missions.reserve(kernels.size());
+        for (uint32_t i = 0; i < kernels.size(); ++i) {
             std::array<CcuEventHandle, 3> events{};
             std::array<uint64_t, 3> addresses{};
             for (uint32_t j = 0; j < 3; ++j) {
                 check(HcommCcuEventAlloc(backend->unassigned_instance, die, 1, &events[j]), "allocate CCU Event");
                 check(HcommCcuEventGetAddr(events[j], 0, &addresses[j]), "map CCU Event");
             }
-            const auto &kernel = instance_kernels[i];
-            request.missions.push_back({kernel.record.kernel_id, events[0], events[1], events[2], i});
+            const auto &kernel = kernels[i];
+            request.missions.push_back({events[0], events[1], events[2]});
             HcommPreparedMission mission{};
-            mission.mission_index = i;
+            mission.ccu_id = i;
             mission.kernel_id = kernel.record.kernel_id;
-            mission.module_index = instance_modules[i];
+            mission.module_index = kernel_modules[i];
             mission.ready_event_handle = events[0];
             mission.trigger_event_handle = events[1];
             mission.done_event_handle = events[2];
@@ -487,8 +487,7 @@ std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
         const auto registered = register_domain_kernels(kernels, request, registration);
         backend->streams.reserve(missions.size());
         for (auto &mission : missions) {
-            for (const auto &kernel : registered)
-                if (kernel.mission_index == mission.mission_index) mission.program_handle = kernel.program_handle;
+            mission.program_handle = registered.at(mission.ccu_id).program_handle;
             if (mission.program_handle == 0) throw std::runtime_error("missing registered CCU mission program");
             HcommMissionStream stream{};
             stream.handle = static_cast<uint64_t>(backend->streams.size() + 1);

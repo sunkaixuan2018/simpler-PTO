@@ -46,7 +46,7 @@ struct CommContext {
     uint64_t windowsOut[COMM_MAX_RANK_NUM];
     CommWorkspace workspaces[COMM_WORKSPACE_COUNT];
     uint64_t ccu_workspace_addr;
-    uint64_t ccu_mission_count;
+    uint64_t ccu_count;
 };
 
 #if defined(__CCE_AICORE__)

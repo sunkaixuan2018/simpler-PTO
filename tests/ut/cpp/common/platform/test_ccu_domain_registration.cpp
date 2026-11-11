@@ -110,7 +110,7 @@ NativeKernelDefinition kernel(uint32_t kernel_id, uint32_t, uintptr_t entry) {
 }
 
 DomainRegistrationRequest request() {
-    return {91, 1, 2, 0xabc, "test_ccu", {{3, 0x300, 0x301, 0x302, 0}, {4, 0x400, 0x401, 0x402, 1}}};
+    return {91, 1, 2, 0xabc, "test_ccu", {{0x300, 0x301, 0x302}, {0x400, 0x401, 0x402}}};
 }
 
 TEST(CcuDomainRegistration, QueriesBeforeOneRegistrationTransactionAndBindsEachMission) {
@@ -134,7 +134,8 @@ TEST(CcuDomainRegistration, QueriesBeforeOneRegistrationTransactionAndBindsEachM
     EXPECT_EQ(sdk.observations[6].operation, "end");
     EXPECT_EQ(sdk.observations[7].operation, "task_args");
     EXPECT_EQ(sdk.observations[8].operation, "task_args");
-    EXPECT_EQ(sdk.observations[0].binding.kernel_id, 3U);
+    EXPECT_EQ(sdk.observations[0].binding.ccu_id, 0U);
+    EXPECT_EQ(sdk.observations[1].binding.ccu_id, 1U);
     EXPECT_EQ(sdk.observations[0].binding.rank_id, 1U);
     EXPECT_EQ(sdk.observations[0].binding.rank_count, 2U);
     EXPECT_EQ(sdk.observations[0].binding.channel_handle, 0xabcU);
@@ -225,13 +226,24 @@ TEST(CcuDomainRegistration, MissingOrDuplicateMissionBindingsFailBeforeSdkCalls)
     EXPECT_TRUE(duplicate_sdk.observations.empty());
 
     auto unknown = request();
-    unknown.missions.push_back({99, 0x991, 0x992});
+    unknown.missions.push_back({0x990, 0x991, 0x992});
     FakeSdk unknown_sdk;
     EXPECT_THROW(
         (void)simpler::ccu::register_domain_kernels({kernel(3, 7, 0x103), kernel(4, 7, 0x104)}, unknown, unknown_sdk),
         DomainRegistrationError
     );
     EXPECT_TRUE(unknown_sdk.observations.empty());
+}
+
+TEST(CcuDomainRegistration, ListPositionDefinesIdEvenWhenModuleKernelIdsMatch) {
+    FakeSdk sdk;
+    const auto registered =
+        simpler::ccu::register_domain_kernels({kernel(99, 0, 0x103), kernel(99, 0, 0x104)}, request(), sdk);
+    ASSERT_EQ(registered.size(), 2U);
+    EXPECT_EQ(registered[0].ccu_id, 0U);
+    EXPECT_EQ(registered[1].ccu_id, 1U);
+    EXPECT_EQ(sdk.observations[0].entry, reinterpret_cast<const void *>(0x103));
+    EXPECT_EQ(sdk.observations[1].entry, reinterpret_cast<const void *>(0x104));
 }
 
 }  // namespace

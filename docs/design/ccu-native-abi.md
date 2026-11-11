@@ -14,11 +14,16 @@ V2 is incompatible with V1. A module exports:
 const SimplerCcuModuleManifestV2 *simpler_ccu_module_manifest_v2(void);
 ```
 
-The entry must not throw and returns an immutable contiguous manifest. Kernel,
-logical instance and string tables use byte offsets from its base. All reserved
+The entry must not throw and returns an immutable contiguous manifest. Kernel
+and string tables use byte offsets from its base. All reserved
 fields and flags must be zero unless an explicit capability is required.
 Kernel records require `SIMPLER_CCU_KERNEL_CAP_THREE_EVENTS` and V2 registration
 and task layouts. Group selection is deferred; all declared kernels are prepared.
+
+The simplified V2 registration/workspace layout tag is `0x00020001`. Task
+arguments remain layout 2. Old V2 instance-table fields are now reserved and
+must be zero, so old modules fail validation instead of being misinterpreted.
+Modules and device wrappers must be rebuilt together for this revision.
 
 The package envelope remains version 1 because its byte layout is unchanged;
 each module record now requires ABI version 2. An old package record, V1-only
@@ -35,25 +40,18 @@ The backing file descriptor stays alive until after `dlclose`, preventing its
 currently loads and validates a candidate first, including its returned manifest;
 it shares validated module ownership rather than avoiding all loader work.
 
-## Kernel definitions and logical instances
+## Kernel List And Callable Index
 
 `SimplerCcuKernelRecordV2` describes a kernel's native entry, parameter size and
 alignment, and supported layouts. Kernel IDs must be unique within a module.
 The entry name must be a valid C symbol exported by that module.
 
-`SimplerCcuMissionInstanceV2` separately binds each logical `mission_index` to
-a kernel ID. Its index must equal its table position, starting at zero without
-gaps. Multiple instances may reference one kernel; every kernel requires at
-least one instance. There is no implicit default instance: a single-instance
-module explicitly declares index 0. Instances require independent mutable
-parameters, Events and execution resources.
-
-For a callable with multiple modules, the domain concatenates instance tables
-in package order. Its global mission index is the module's prefix instance
-count plus the module-local index. This mapping is fixed for that callable and
-does not depend on SDK registration order or hardware mission IDs. The runtime
-checks aggregate limits before allocating resources. Module-local kernel IDs
-are interpreted together with the descriptor's `module_index`.
+One listed kernel owns one local execution resource set. There is no separate
+instance table or configurable mapping. For multiple modules, kernel records
+are concatenated in module package order and record order. Their zero-based
+position is `ccu_id`, scoped to that L2 callable. Module-local kernel IDs are
+metadata; equal IDs in different modules are allowed and never select device
+resources. Registration and workspace construction preserve list order.
 
 ## Registration and launch
 
@@ -64,8 +62,8 @@ int32_t entry(const SimplerCcuRegistrationBindingV2 *binding);
 ```
 
 It must not throw. Query and registration receive the same one-element argument
-array `{&binding}`. The Host-only binding identifies the kernel, domain-global
-mission index and rank, with a channel and three distinct opaque Event handles:
+array `{&binding}`. The Host-only binding identifies the callable-local `ccu_id`
+and rank, with a channel and three distinct opaque Event handles:
 `ready_event_handle`, `trigger_event_handle`, `done_event_handle`. These handles
 are SDK values, not device addresses. Each Event uses bit 0.
 
@@ -88,17 +86,18 @@ completion-slot launch words.
 ## Domain workspace
 
 The domain runtime context publishes `SimplerCcuWorkspaceV2`: ABI/layout version,
-domain identity, run generation, mission count, descriptor stride and device
-address of a dense `SimplerCcuMissionDescriptorV2` array. It is a read-only view
-for the duration of the run. Each descriptor supplies its global mission index,
-module/kernel identity, matching run generation, parameter address/size/alignment
+domain identity, run generation, `ccu_count`, control stride and `controls_addr`
+pointing to ordered `SimplerCcuControlV2` entries. It is a read-only view
+for the duration of the run. Each control supplies its callable-local `ccu_id`,
+module metadata, matching run generation, parameter address/size/alignment
 and token, and three `{address, mask}` Event descriptors. Masks equal
 `SIMPLER_CCU_EVENT_MASK` (1). Addresses are opaque platform mappings; register
 encoding, cache maintenance and clear confirmation belong in platform helpers.
 
 The runtime validates versions, sizes, domain/run identity, indexes, parameter
 ranges/alignment and distinct Event mappings before admitting submissions.
-The AIV looks up `missions[mission_index]` through this workspace. Orchestration
+The AIV resolves `comm_ctx -> workspace -> controls[ccu_id]` with bounds and
+generation checks. It never scans kernel IDs or translates another index. Orchestration
 does not pass individual resource addresses in business arguments.
 
 ## Submission and completion
@@ -146,19 +145,33 @@ acceptance are implemented in the dependent runtime changes, not in this ABI.
 
 ## A5 runtime integration
 
-Domain allocation is independent from callable registration. Submission prepares
-all instances against the one used domain covering its workers; L2 activation
-launches the instances and gates ordinary work on ready observation and confirmed
+`comm_register_ccu_callable` accepts callable bytes, build identities and rank
+topology, with no allocation ID or window dependency. It loads and validates
+modules, creates HCOMM resources and registers every listed kernel, without
+launching. Exact bytes, build identities and rank topology identify a cached
+registration. HCOMM programs capture channel/Event handles, so different
+topologies require different registration resources.
+
+`comm_bind_domain_ccu` attaches an existing registration ID to compatible windows;
+it does no module loading or HCOMM registration. Window release detaches the
+registration. The enclosing communicator retains and reuses its programs,
+Events and streams until confirmed communicator teardown. The cache retains
+one resource set per distinct callable/topology for that communicator lifetime.
+Registering a different callable does not overwrite another callable's resources.
+
+The Python submission path lazily registers the selected callable for the domain's
+rank topology, then binds it. The native registration API also supports registration
+before any windows exist. L2 activation
+launches its resources and gates ordinary work on ready observation and confirmed
 clear. The startup helper observes mapped Events on the device; asynchronous
 done polling and clearing run on the AICPU. Normal completion requires the
 dedicated mission streams to terminate. Abort without confirmed stop retains
 owners and closes admission.
 
-The prototype exposes callable-local kernel IDs and resolves them through the V2
-workspace. It requires unique kernel IDs across modules and rejects ambiguous
-IDs with multiple instances. Multiple matching domains, overlapping runs on one
+The prototype exposes callable-local list indexes through the revised V2
+workspace. Multiple matching domains, overlapping runs on one
 domain and different callables on one domain within a parent run are unsupported.
-V2 instance indexes remain internal to registration and workspace descriptors.
+One registration cannot be attached to two live domain allocations simultaneously.
 
 The hardware smoke uses finite programs with one request per mission per L2
 execution. Host run repetition does not establish dynamic repeated CCU calls

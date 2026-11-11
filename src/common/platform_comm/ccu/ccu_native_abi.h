@@ -20,9 +20,9 @@ extern "C" {
 #endif
 
 #define SIMPLER_CCU_MODULE_ABI_VERSION 2U
-#define SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION 2U
+#define SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION 0x00020001U
 #define SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION 2U
-#define SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION 2U
+#define SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION 0x00020001U
 #define SIMPLER_CCU_MODULE_MANIFEST_SYMBOL "simpler_ccu_module_manifest_v2"
 #define SIMPLER_CCU_BUILD_ID_SIZE 32U
 #define SIMPLER_CCU_EVENT_MASK 1ULL
@@ -42,11 +42,11 @@ typedef struct SimplerCcuModuleManifestV2 {
     uint32_t string_table_offset;
     uint32_t string_table_size;
     uint32_t capability_flags;
-    uint32_t instance_record_size;
+    uint32_t reserved0;
     uint8_t sdk_build_id[SIMPLER_CCU_BUILD_ID_SIZE];
     uint8_t pto_isa_build_id[SIMPLER_CCU_BUILD_ID_SIZE];
-    uint32_t instance_count;
-    uint32_t instance_records_offset;
+    uint32_t reserved1;
+    uint32_t reserved2;
     uint64_t reserved[3];
 } SimplerCcuModuleManifestV2;
 
@@ -67,21 +67,12 @@ typedef struct SimplerCcuKernelRecordV2 {
     uint32_t reserved[2];
 } SimplerCcuKernelRecordV2;
 
-/* Table position is the module-local logical index, independent of SDK registration order. */
-typedef struct SimplerCcuMissionInstanceV2 {
-    uint32_t struct_size;
-    uint32_t mission_index;
-    uint32_t kernel_id;
-    uint32_t flags;
-    uint64_t reserved[2];
-} SimplerCcuMissionInstanceV2;
-
 typedef struct SimplerCcuRegistrationBindingV2 {
     uint32_t abi_version;
     uint32_t struct_size;
     uint32_t layout_version;
-    uint32_t kernel_id;
-    uint32_t mission_index;
+    uint32_t ccu_id;
+    uint32_t reserved0;
     uint32_t rank_id;
     uint32_t rank_count;
     uint32_t flags;
@@ -104,12 +95,12 @@ typedef struct SimplerCcuEventDescriptorV2 {
     uint64_t mask;
 } SimplerCcuEventDescriptorV2;
 
-typedef struct SimplerCcuMissionDescriptorV2 {
+typedef struct SimplerCcuControlV2 {
     uint32_t abi_version;
     uint32_t struct_size;
     uint64_t run_generation;
-    uint32_t mission_index;
-    uint32_t kernel_id;
+    uint32_t ccu_id;
+    uint32_t reserved1;
     uint32_t parameter_alignment;
     uint32_t flags;
     uint64_t parameter_addr;
@@ -120,17 +111,17 @@ typedef struct SimplerCcuMissionDescriptorV2 {
     SimplerCcuEventDescriptorV2 done;
     uint32_t module_index;
     uint32_t reserved0;
-} SimplerCcuMissionDescriptorV2;
+} SimplerCcuControlV2;
 
-/* Published through the domain runtime context; missions_addr points to a dense descriptor array. */
+/* Published through the domain runtime context; controls_addr points to ccu_id-indexed controls. */
 typedef struct SimplerCcuWorkspaceV2 {
     uint32_t abi_version;
     uint32_t struct_size;
     uint32_t layout_version;
-    uint32_t mission_count;
+    uint32_t ccu_count;
     uint64_t run_generation;
-    uint64_t missions_addr;
-    uint32_t mission_descriptor_size;
+    uint64_t controls_addr;
+    uint32_t control_size;
     uint32_t flags;
     uint64_t domain_id;
     uint64_t reserved[2];
@@ -149,18 +140,16 @@ SIMPLER_CCU_ASSERT_POD(SimplerCcuModuleManifestV2);
 SIMPLER_CCU_ASSERT_POD(SimplerCcuKernelRecordV2);
 SIMPLER_CCU_ASSERT_POD(SimplerCcuRegistrationBindingV2);
 SIMPLER_CCU_ASSERT_POD(SimplerCcuLaunchArgumentsV2);
-SIMPLER_CCU_ASSERT_POD(SimplerCcuMissionInstanceV2);
 SIMPLER_CCU_ASSERT_POD(SimplerCcuEventDescriptorV2);
-SIMPLER_CCU_ASSERT_POD(SimplerCcuMissionDescriptorV2);
+SIMPLER_CCU_ASSERT_POD(SimplerCcuControlV2);
 SIMPLER_CCU_ASSERT_POD(SimplerCcuWorkspaceV2);
 
 static_assert(sizeof(SimplerCcuModuleManifestV2) == 136, "CCU manifest ABI size changed");
 static_assert(sizeof(SimplerCcuKernelRecordV2) == 64, "CCU kernel record ABI size changed");
 static_assert(sizeof(SimplerCcuRegistrationBindingV2) == 96, "CCU registration binding ABI size changed");
 static_assert(sizeof(SimplerCcuLaunchArgumentsV2) == 32, "CCU launch arguments ABI size changed");
-static_assert(sizeof(SimplerCcuMissionInstanceV2) == 32, "CCU instance ABI size changed");
 static_assert(sizeof(SimplerCcuEventDescriptorV2) == 16, "CCU Event descriptor ABI size changed");
-static_assert(sizeof(SimplerCcuMissionDescriptorV2) == 112, "CCU mission descriptor ABI size changed");
+static_assert(sizeof(SimplerCcuControlV2) == 112, "CCU mission descriptor ABI size changed");
 static_assert(sizeof(SimplerCcuWorkspaceV2) == 64, "CCU workspace ABI size changed");
 
 #undef SIMPLER_CCU_ASSERT_POD

@@ -22,7 +22,7 @@
 namespace simpler::ccu {
 
 struct HcommPreparedMission {
-    uint32_t mission_index{};
+    uint32_t ccu_id{};
     uint32_t kernel_id{};
     uint64_t program_handle{};
     uint64_t trigger_event_handle{};
@@ -39,8 +39,10 @@ struct HcommPreparedMission {
 
 class HcommDomainSession : public DomainResourceBackend {
 public:
-    virtual uint64_t
-    begin(DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation) = 0;
+    virtual uint64_t begin(
+        DomainCcuOwner &owner, const std::vector<HcommPreparedMission> &missions, uint64_t generation,
+        uint64_t domain_id
+    ) = 0;
     virtual bool ready() = 0;
     virtual bool stop() = 0;
     virtual void abort() = 0;

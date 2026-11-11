@@ -50,7 +50,6 @@ public:
     const std::vector<uint8_t> &module_bytes() const { return module_bytes_; }
     const std::vector<uint8_t> &manifest_bytes() const { return manifest_bytes_; }
     const std::vector<NativeKernelDefinition> &kernels() const { return kernels_; }
-    const std::vector<SimplerCcuMissionInstanceV2> &instances() const { return instances_; }
     const std::vector<uint8_t> &cache_identity() const { return cache_identity_; }
 
 private:
@@ -61,7 +60,6 @@ private:
     std::vector<uint8_t> module_bytes_;
     std::vector<uint8_t> manifest_bytes_;
     std::vector<NativeKernelDefinition> kernels_;
-    std::vector<SimplerCcuMissionInstanceV2> instances_;
     std::vector<uint8_t> cache_identity_;
 };
 

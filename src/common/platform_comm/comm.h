@@ -304,16 +304,15 @@ int comm_alloc_host_domain_windows(
     uint64_t *local_window_base_out, size_t *actual_window_size_out
 );
 
-/**
- * Bind one registered callable's native CCU module package to an existing A5
- * DomainAllocation. This is a prepare transaction, separate from window
- * allocation: failure publishes no CCU owner, while success keeps the exact
- * module bytes and every HCOMM/ACL resource alive until domain release.
- */
-int comm_prepare_domain_ccu(
-    CommHandle h, uint64_t allocation_id, const void *module_package, size_t module_package_size,
-    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32]
+/* Register/cache all callable kernels for a rank topology, independently of window allocation.
+ * The communicator owns registration resources until confirmed comm_destroy. */
+int comm_register_ccu_callable(
+    CommHandle h, const uint32_t *rank_ids, size_t rank_count, uint32_t domain_rank, const void *module_package,
+    size_t module_package_size, const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32],
+    uint64_t *registration_id
 );
+/* Attach a previously registered callable. This performs no HCOMM registration or launch. */
+int comm_bind_domain_ccu(CommHandle h, uint64_t allocation_id, uint64_t registration_id);
 
 /**
  * Collectively release a domain window pool allocated by

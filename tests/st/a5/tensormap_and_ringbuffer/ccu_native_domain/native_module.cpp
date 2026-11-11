@@ -49,8 +49,8 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV2 *binding) noexcept 
         ccu::Event ready(binding->ready_event_handle);
         ccu::Event trigger(binding->trigger_event_handle);
         ccu::Event done(binding->done_event_handle);
-        check(ccu::NotifyRecord(binding->channel_handle, binding->mission_index, 1));
-        check(ccu::NotifyWait(binding->channel_handle, binding->mission_index, 1));
+        check(ccu::NotifyRecord(binding->channel_handle, binding->ccu_id, 1));
+        check(ccu::NotifyWait(binding->channel_handle, binding->ccu_id, 1));
         check(ccu::EventRecord(ready, 1));
         check(ccu::EventWait(trigger, 1));
         ccu::Variable output, value;
@@ -62,8 +62,8 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV2 *binding) noexcept 
         }
         CCU_ELSE {
             check(ccu::Store(output, value));
-            check(ccu::NotifyRecord(binding->channel_handle, binding->mission_index, 1));
-            check(ccu::NotifyWait(binding->channel_handle, binding->mission_index, 1));
+            check(ccu::NotifyRecord(binding->channel_handle, binding->ccu_id, 1));
+            check(ccu::NotifyWait(binding->channel_handle, binding->ccu_id, 1));
             check(ccu::EventRecord(done, 1));
         }
         return CCU_SUCCESS;
@@ -75,7 +75,6 @@ int32_t native_mission(const SimplerCcuRegistrationBindingV2 *binding) noexcept 
 struct Manifest {
     SimplerCcuModuleManifestV2 header;
     SimplerCcuKernelRecordV2 kernels[2];
-    SimplerCcuMissionInstanceV2 instances[2];
     char symbols[26];
 };
 
@@ -86,9 +85,6 @@ Manifest make_manifest() {
     result.header.manifest_size = sizeof(result);
     result.header.kernel_record_size = sizeof(result.kernels[0]);
     result.header.kernel_count = 2;
-    result.header.instance_count = 2;
-    result.header.instance_record_size = sizeof(result.instances[0]);
-    result.header.instance_records_offset = offsetof(Manifest, instances);
     result.header.kernel_records_offset = offsetof(Manifest, kernels);
     result.header.string_table_offset = offsetof(Manifest, symbols);
     result.header.string_table_size = sizeof(result.symbols);
@@ -114,7 +110,6 @@ Manifest make_manifest() {
             SIMPLER_CCU_TASK_ARGUMENT_COUNT,
             {0, 0}
         };
-        result.instances[i] = {sizeof(SimplerCcuMissionInstanceV2), i, i + 1, 0, {0, 0}};
     }
     return result;
 }

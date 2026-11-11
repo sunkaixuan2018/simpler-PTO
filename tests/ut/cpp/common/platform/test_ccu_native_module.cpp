@@ -67,11 +67,7 @@ TEST(CcuNativeModuleTest, LoadsExactBytesWithLocalEntriesAndStableCacheIdentity)
     EXPECT_EQ(first->kernels()[0].entry_symbol, "simpler_ccu_test_kernel_a");
     EXPECT_NE(first->kernels()[0].entry, nullptr);
     EXPECT_FALSE(first->cache_identity().empty());
-    ASSERT_EQ(first->instances().size(), 3U);
-    EXPECT_EQ(first->instances()[0].mission_index, 0U);
-    EXPECT_EQ(first->instances()[1].mission_index, 1U);
-    EXPECT_EQ(first->instances()[0].kernel_id, first->instances()[1].kernel_id);
-    EXPECT_EQ(first->instances()[2].kernel_id, 4U);
+    EXPECT_EQ(first->kernels()[1].record.kernel_id, 4U);
 }
 
 TEST(CcuNativeModuleTest, BuildIdentityParticipatesInValidation) {
@@ -102,7 +98,7 @@ TEST(CcuNativeModuleTest, DistinctLiveModulesExecuteTheirOwnExactBytes) {
 }
 
 TEST(CcuNativeModuleTest, RejectsVersionReservedKernelAndEntryViolations) {
-    for (int variant = 1; variant <= 24; ++variant) {
+    for (int variant = 1; variant <= 15; ++variant) {
         simpler_ccu_test_manifest_variant = variant;
         EXPECT_THROW(simpler::ccu::NativeModule::load(module_bytes(), expected_identity()), std::invalid_argument)
             << "variant=" << variant;
@@ -132,10 +128,10 @@ TEST(CcuNativeAbiTest, PinsRegistrationAndLaunchWordContracts) {
     static_assert(offsetof(SimplerCcuRegistrationBindingV2, ready_event_handle) == 40);
     static_assert(offsetof(SimplerCcuRegistrationBindingV2, trigger_event_handle) == 48);
     static_assert(offsetof(SimplerCcuRegistrationBindingV2, done_event_handle) == 56);
-    static_assert(offsetof(SimplerCcuMissionDescriptorV2, parameter_token) == 48);
-    static_assert(offsetof(SimplerCcuMissionDescriptorV2, ready) == 56);
-    static_assert(offsetof(SimplerCcuMissionDescriptorV2, trigger) == 72);
-    static_assert(offsetof(SimplerCcuMissionDescriptorV2, done) == 88);
+    static_assert(offsetof(SimplerCcuControlV2, parameter_token) == 48);
+    static_assert(offsetof(SimplerCcuControlV2, ready) == 56);
+    static_assert(offsetof(SimplerCcuControlV2, trigger) == 72);
+    static_assert(offsetof(SimplerCcuControlV2, done) == 88);
 
     const SimplerCcuLaunchArgumentsV2 arguments{SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION, 20, 30, 0};
     const auto *words = reinterpret_cast<const uint64_t *>(&arguments);

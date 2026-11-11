@@ -22,6 +22,25 @@ from simpler.task_interface import CommDomainHandle
 from simpler.worker import Worker
 
 
+def test_registration_collective_needs_topology_but_no_allocation():
+    observed = []
+
+    def control(_kind, chip, _command, payload, _timeout):
+        allocation, generation, operation, digest, result = worker_mod._CCU_DOMAIN_REQUEST.unpack_from(payload)
+        assert (allocation, generation, operation, digest, result) == (0, 0, 5, b"c" * 32, 0)
+        tail = worker_mod._CCU_DOMAIN_REQUEST.size
+        assert worker_mod.struct.unpack_from("<II2I", payload, tail) == (2, chip, 0, 1)
+        observed.append(chip)
+        reply = bytearray(payload)
+        worker_mod.struct.pack_into("<i", reply, tail - 4, 17)
+        return reply
+
+    worker: Any = SimpleNamespace(_worker=SimpleNamespace(control_payload=control), _py_control_timeout_s=1)
+    topology = SimpleNamespace(workers=(0, 1), allocation_id=0)
+    assert Worker._ccu_domain_collective(worker, topology, 5, b"c" * 32) == [17, 17]
+    assert sorted(observed) == [0, 1]
+
+
 def _domain():
     handle = CommDomainHandle(name="ccu", workers=(0, 1), allocation_id=9, _release_fn=lambda _: None)
     handle._config = DomainConfig((0, 1), 4096, (), True, ())

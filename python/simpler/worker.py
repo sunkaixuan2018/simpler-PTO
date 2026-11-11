@@ -3660,12 +3660,17 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             elif sub_cmd == _CTRL_CCU_DOMAIN:
                 staged, payload, size = _open_ctrl_payload(buf, what="CCU domain")
                 try:
-                    if size != _CCU_DOMAIN_REQUEST.size:
+                    if size < _CCU_DOMAIN_REQUEST.size:
                         raise ValueError("CCU domain control payload size mismatch")
                     allocation, generation, operation, digest, _ = _CCU_DOMAIN_REQUEST.unpack_from(payload)
                     comm = _require_base_communicator(base_comm_handle)
                     result = 0
-                    if operation == 0:
+                    if operation in (0, 5):
+                        tail = _CCU_DOMAIN_REQUEST.size
+                        rank_count, domain_rank = struct.unpack_from("<II", payload, tail)
+                        if size != tail + 8 + rank_count * 4 or rank_count < 2 or domain_rank >= rank_count:
+                            raise ValueError("invalid CCU registration topology")
+                        rank_ids = list(struct.unpack_from(f"<{rank_count}I", payload, tail + 8))
                         cid = identity_table.get(digest)
                         if cid is None:
                             raise RuntimeError("CCU callable is not registered on this chip")
@@ -3675,13 +3680,17 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                         if binding is not None and binding.active:
                             raise RuntimeError("cannot replace an active CCU domain registration")
                         sdk_id, isa_id = runtime_build_identity()
-                        cw.bind_ccu_callable_to_domain(comm, allocation, int(cid), sdk_id, isa_id)
-                        ccu_bindings[allocation] = binding or ChipCcuBinding(cw, comm, allocation, 120.0)
-                        for old_digest, old_allocation in list(ccu_callable_domains.items()):
-                            if old_allocation == allocation:
-                                del ccu_callable_domains[old_digest]
-                        ccu_callable_domains[digest] = allocation
+                        result = cw.register_ccu_callable(comm, int(cid), rank_ids, domain_rank, sdk_id, isa_id)
+                        if operation == 0:
+                            cw.bind_ccu_callable_to_domain(comm, allocation, result)
+                            ccu_bindings[allocation] = binding or ChipCcuBinding(cw, comm, allocation, 120.0)
+                            for old_digest, old_allocation in list(ccu_callable_domains.items()):
+                                if old_allocation == allocation:
+                                    del ccu_callable_domains[old_digest]
+                            ccu_callable_domains[digest] = allocation
                     else:
+                        if size != _CCU_DOMAIN_REQUEST.size:
+                            raise ValueError("CCU run control payload size mismatch")
                         result = cw.control_domain_ccu(comm, allocation, operation, generation)
                     struct.pack_into("<i", payload, _CCU_DOMAIN_REQUEST.size - 4, result)
                 finally:
@@ -10977,10 +10986,13 @@ class Worker:
         def send(index, chip):
             try:
                 payload = _CCU_DOMAIN_REQUEST.pack(handle.allocation_id, generation, operation, digest, 0)
+                if operation in (0, 5):
+                    payload += struct.pack("<II", len(handle.workers), index)
+                    payload += struct.pack(f"<{len(handle.workers)}I", *handle.workers)
                 reply = native.control_payload(
                     WorkerType.NEXT_LEVEL, chip, _CTRL_CCU_DOMAIN, payload, self._py_control_timeout_s
                 )
-                results[index] = _CCU_DOMAIN_REQUEST.unpack(reply)[-1]
+                results[index] = _CCU_DOMAIN_REQUEST.unpack_from(reply)[-1]
             except BaseException as error:
                 errors[index] = error
 

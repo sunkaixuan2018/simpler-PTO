@@ -14,6 +14,7 @@ import os
 import struct
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from simpler.task_interface import ArgDirection as D
@@ -110,6 +111,12 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request, 
     retained = []
     try:
         worker.init()
+        worker._ensure_comm_base()
+        topology = SimpleNamespace(workers=(0, 1), allocation_id=0)
+        # No allocation exists yet: this must perform real HCOMM registration without launching.
+        registrations = worker._ccu_domain_collective(topology, 5, callable_handle.digest)
+        assert all(registration > 0 for registration in registrations)
+        assert worker._ccu_domain_collective(topology, 5, callable_handle.digest) == registrations
         outputs = [[worker.create_buffer(64) for _ in range(3)] for _ in range(2)]
 
         def run_round(orch, _args, config):
@@ -146,6 +153,12 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request, 
                     f"CCU round={round_index}/{rounds}: B-before-A, dynamic parameters and confirmed stop passed",
                     flush=True,
                 )
+            if round_index == max(1, rounds // 2) and rounds > 1:
+                retained[0].release()
+                assert retained[0].freed
+                retained.clear()
+                assert worker._ccu_domain_collective(topology, 5, callable_handle.digest) == registrations
+                print("CCU registration survived domain release; next round allocates a new window", flush=True)
         # Merely borrowing a retained domain does not launch CCU work.
         worker.run(lambda orch, _args, _cfg: orch.get_domain("native_ccu"))
         retained[0].release()

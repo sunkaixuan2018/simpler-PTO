@@ -22,7 +22,6 @@ namespace {
 struct TestManifest {
     SimplerCcuModuleManifestV2 manifest;
     SimplerCcuKernelRecordV2 records[2];
-    SimplerCcuMissionInstanceV2 instances[3];
     char strings[50];
 };
 
@@ -34,12 +33,6 @@ TestManifest make_manifest() {
     result.manifest.kernel_record_size = sizeof(SimplerCcuKernelRecordV2);
     result.manifest.kernel_count = 2;
     result.manifest.kernel_records_offset = offsetof(TestManifest, records);
-    result.manifest.instance_record_size = sizeof(SimplerCcuMissionInstanceV2);
-    result.manifest.instance_count = 3;
-    result.manifest.instance_records_offset = offsetof(TestManifest, instances);
-    result.instances[0] = {sizeof(SimplerCcuMissionInstanceV2), 0, 3, 0, {0, 0}};
-    result.instances[1] = {sizeof(SimplerCcuMissionInstanceV2), 1, 3, 0, {0, 0}};
-    result.instances[2] = {sizeof(SimplerCcuMissionInstanceV2), 2, 4, 0, {0, 0}};
     result.manifest.string_table_offset = offsetof(TestManifest, strings);
     result.manifest.string_table_size = sizeof(result.strings);
     std::memset(result.manifest.sdk_build_id, 0x11, SIMPLER_CCU_BUILD_ID_SIZE);
@@ -133,43 +126,16 @@ extern "C" const SimplerCcuModuleManifestV2 *simpler_ccu_module_manifest_v2() no
         manifest.manifest.abi_version = 1;
         break;
     case 12:
-        manifest.instances[1].mission_index = 0;
+        manifest.manifest.reserved0 = 32;
         break;
     case 13:
-        manifest.instances[1].mission_index = 3;
+        manifest.manifest.reserved1 = 3;
         break;
     case 14:
-        manifest.instances[1].kernel_id = 99;
+        manifest.manifest.reserved2 = sizeof(manifest.manifest);
         break;
     case 15:
-        manifest.instances[2].kernel_id = 3;
-        break;
-    case 16:
-        manifest.manifest.instance_records_offset = manifest.manifest.kernel_records_offset;
-        break;
-    case 17:
-        manifest.manifest.instance_records_offset = manifest.manifest.string_table_offset;
-        break;
-    case 18:
-        manifest.manifest.instance_count = 0;
-        break;
-    case 19:
-        manifest.manifest.instance_records_offset = UINT32_MAX;
-        break;
-    case 20:
-        ++manifest.manifest.instance_record_size;
-        break;
-    case 21:
-        manifest.instances[1].flags = 1;
-        break;
-    case 22:
-        manifest.instances[1].reserved[0] = 1;
-        break;
-    case 23:
-        ++manifest.instances[1].struct_size;
-        break;
-    case 24:
-        ++manifest.manifest.instance_records_offset;
+        manifest.records[0].registration_binding_layout_version = 2;
         break;
     default:
         break;

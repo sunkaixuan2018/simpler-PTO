@@ -16,11 +16,11 @@
 #include "platform_comm/comm_context.h"
 #include "tensor.h"
 
-inline __aicore__ void trigger_mission(__gm__ int64_t *args, uint32_t offset, uint32_t kernel_id) {
+inline __aicore__ void trigger_mission(__gm__ int64_t *args, uint32_t offset, uint32_t ccu_id) {
     auto *output = reinterpret_cast<__gm__ Tensor *>(args[offset]);
     auto *comm = reinterpret_cast<__gm__ CommContext *>(args[offset + 1]);
     const uint64_t value = args[offset + 2];
     AsyncCtx ctx = get_async_ctx(args);
     uint64_t parameters[]{output->buffer.addr + output->start_offset * sizeof(uint64_t), value};
-    (void)submit_ccu_mission(ctx, comm, kernel_id, parameters, sizeof(parameters));
+    (void)submit_ccu_mission(ctx, comm, ccu_id, parameters, sizeof(parameters));
 }
