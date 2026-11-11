@@ -12,55 +12,34 @@
 #include <gtest/gtest.h>
 
 #include "async_wait.h"
-
 namespace {
-
-struct alignas(SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT) Slot {
-    SimplerCcuCompletionSlotV1 value{};
-};
-
-void publish(Slot &slot, uint64_t sequence) {
-    slot.value.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
-    slot.value.struct_size = sizeof(SimplerCcuCompletionSlotV1);
-    slot.value.status = SIMPLER_CCU_COMPLETION_SUCCEEDED;
-    slot.value.operation_sequence = sequence;
-    slot.value.completed_sequence = sequence;
-}
-
-CompletionCondition condition(Slot &slot, uint64_t sequence) {
+CompletionCondition condition(uint64_t &event) {
     CompletionCondition cond;
     cond.engine = ASYNC_ENGINE_CCU;
     cond.completion_type = COMPLETION_TYPE_CCU;
-    cond.addr = reinterpret_cast<uint64_t>(&slot.value);
-    cond.backend_cookie = sequence;
+    cond.addr = reinterpret_cast<uint64_t>(&event);
+    cond.backend_cookie = 1;
     return cond;
 }
-
-TEST(TmrCcuCompletion, KeepsMissionSlotsIndependentInReverseCompletionOrder) {
-    constexpr uint64_t kSequence = (uint64_t{1} << 40) + 3;
-    Slot mission_a;
-    Slot mission_b;
-    auto cond_a = condition(mission_a, kSequence);
-    auto cond_b = condition(mission_b, kSequence);
-
-    publish(mission_b, kSequence);
-    EXPECT_EQ(cond_a.test().state, CompletionPollState::PENDING);
-    EXPECT_EQ(cond_b.test().state, CompletionPollState::READY);
-
-    publish(mission_a, kSequence);
-    EXPECT_EQ(cond_a.test().state, CompletionPollState::READY);
-    cond_b.retire();
-    EXPECT_TRUE(cond_b.retired);
-    EXPECT_FALSE(cond_a.retired);
+TEST(TmrCcuCompletion, WaitsForIndependentEventsAndConfirmsClearBeforeRetirement) {
+    uint64_t a{}, b{1};
+    auto first = condition(a);
+    auto second = condition(b);
+    EXPECT_EQ(first.test().state, CompletionPollState::PENDING);
+    EXPECT_EQ(second.test().state, CompletionPollState::READY);
+    EXPECT_EQ(b, 0U);
+    a = 1;
+    EXPECT_EQ(first.test().state, CompletionPollState::READY);
+    EXPECT_EQ(a, 0U);
+    second.retire();
+    EXPECT_TRUE(second.retired);
+    EXPECT_FALSE(first.retired);
 }
-
-TEST(TmrCcuCompletion, RejectsSequenceJump) {
-    Slot slot;
-    auto cond = condition(slot, 4);
-    publish(slot, 5);
-    const auto result = cond.test();
-    EXPECT_EQ(result.state, CompletionPollState::FAILED);
-    EXPECT_EQ(result.error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
+TEST(TmrCcuCompletion, RejectsInvalidEventMask) {
+    uint64_t event{1};
+    auto cond = condition(event);
+    cond.backend_cookie = 2;
+    EXPECT_EQ(cond.test().state, CompletionPollState::FAILED);
 }
 
 }  // namespace

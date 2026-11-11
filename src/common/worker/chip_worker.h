@@ -448,7 +448,7 @@ public:
         const std::string &host_shm_name = {}
     );
     void bind_ccu_callable_to_domain(
-        uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
+        uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
         const simpler::ccu::ExpectedBuildIdentity &expected_identity
     );
     int control_domain_ccu(uint64_t comm_handle, uint64_t allocation_id, uint32_t operation, uint64_t generation);
@@ -655,8 +655,7 @@ private:
         size_t *
     );
     using CommReleaseDomainWindowsFn = int (*)(void *, uint64_t, size_t, uint32_t);
-    using CommPrepareDomainCcuFn =
-        int (*)(void *, uint64_t, const void *, size_t, const uint8_t *, const uint8_t *, uint32_t);
+    using CommPrepareDomainCcuFn = int (*)(void *, uint64_t, const void *, size_t, const uint8_t *, const uint8_t *);
     using CommGlobalDomainPrepareFn =
         int (*)(uint64_t, uint32_t, uint32_t, size_t, uint32_t, CommGlobalDomainDescriptor *, uint64_t *);
     using CommGlobalDomainImportFn = int (*)(uint64_t, const CommGlobalDomainDescriptor *, size_t, uint64_t *);

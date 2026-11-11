@@ -1,164 +1,166 @@
-# Native CCU module and completion ABI
+# Native CCU module and three-Event ABI
 
-This contract packages native HCOMM CCU definitions with a `ChipCallable`.
-The module owns the communication algorithm and control flow. Simpler loads and
-checks the module, then later runtime layers may pass its native entry addresses
-to HCOMM query and registration APIs.
+ABI V2 packages native HCOMM CCU definitions with a `ChipCallable`. The module
+owns the algorithm and its control flow. Simpler validates exact module bytes
+and provides domain resources and asynchronous completion through later runtime
+layers. The public C/POD layouts are in
+`src/common/platform_comm/ccu/ccu_native_abi.h`.
 
-This ABI does not contain `CcuBuildContext`, a builder callback, an algorithm
-DSL, a shared service program, or a Host request queue. It also does not define
-HCOMM domain preparation, registration, launch, or TMR scheduling behavior.
+## Version and packaging
 
-## Callable package
-
-`ChipCallable` stores a versioned module table after its orchestration binary
-and AICore children. Every table reference is a byte offset from the table
-base. A module record contains the exact ELF bytes supplied by the caller; it
-does not contain a path or a Host pointer.
-
-The loader writes those same bytes to a private unlinked file and opens its
-`/proc/self/fd` path with `RTLD_NOW | RTLD_LOCAL`. The cache identity includes:
-
-- the exact ELF bytes;
-- the complete returned manifest bytes;
-- every native entry symbol;
-- the HCOMM SDK and PTO-ISA build identities.
-
-Changing any item produces a different cache identity.
-
-## Module exports
-
-A version-1 module exports this C symbol:
+V2 is incompatible with V1. A module exports:
 
 ```c
-const SimplerCcuModuleManifestV1 *
-simpler_ccu_module_manifest_v1(void);
+const SimplerCcuModuleManifestV2 *simpler_ccu_module_manifest_v2(void);
 ```
 
-The function must not throw across the C boundary. It returns one immutable,
-packed manifest. Kernel records and entry names are reached through offsets
-inside that manifest. Each entry name resolves to a native CCU definition
-function in the same ELF. The later registration layer passes that function
-address directly to `HcommCcuKernelQueryResReq` and
-`HcommCcuKernelRegister`.
+The entry must not throw and returns an immutable contiguous manifest. Kernel,
+logical instance and string tables use byte offsets from its base. All reserved
+fields and flags must be zero unless an explicit capability is required.
+Kernel records require `SIMPLER_CCU_KERNEL_CAP_THREE_EVENTS` and V2 registration
+and task layouts. Group selection is deferred; all declared kernels are prepared.
 
-The loader rejects an unknown version or capability, a changed struct size,
-a nonzero reserved field, duplicate or invalid kernel IDs, an invalid group,
-an unsupported registration or task-argument layout/count, a bad parameter
-size/alignment, an out-of-range or invalid C entry name, a missing symbol, and
-an SDK or PTO-ISA build identity mismatch. These checks complete before domain
-preparation. Version 1 requires both completion-slot and stop-gate
-capabilities.
+The package envelope remains version 1 because its byte layout is unchanged;
+each module record now requires ABI version 2. An old package record, V1-only
+export, old manifest version, invalid layout, unknown capability or mismatched
+SDK/PTO-ISA build identity is rejected before resource preparation. Packaging
+preserves opaque bytes; it does not inspect ELF exports. The native loader
+performs manifest validation when opening the module.
 
-The exact field layouts and sizes are defined by
-`src/common/platform_comm/ccu/ccu_native_abi.h`. All shared records are C/POD,
-use fixed-width integers, and contain no Host pointers.
+The loader opens exact ELF bytes through a private unlinked file with
+`RTLD_NOW | RTLD_LOCAL`. Cache identity includes those bytes, the complete
+manifest, native entry names and both build identities.
+The backing file descriptor stays alive until after `dlclose`, preventing its
+`/proc/self/fd` path from being reused by another live module. Cache lookup
+currently loads and validates a candidate first, including its returned manifest;
+it shares validated module ownership rather than avoiding all loader work.
 
-## Registration binding
+## Kernel definitions and logical instances
 
-Every native definition entry has this fixed C signature:
+`SimplerCcuKernelRecordV2` describes a kernel's native entry, parameter size and
+alignment, and supported layouts. Kernel IDs must be unique within a module.
+The entry name must be a valid C symbol exported by that module.
+
+`SimplerCcuMissionInstanceV2` separately binds each logical `mission_index` to
+a kernel ID. Its index must equal its table position, starting at zero without
+gaps. Multiple instances may reference one kernel; every kernel requires at
+least one instance. There is no implicit default instance: a single-instance
+module explicitly declares index 0. Instances require independent mutable
+parameters, Events and execution resources.
+
+For a callable with multiple modules, the domain concatenates instance tables
+in package order. Its global mission index is the module's prefix instance
+count plus the module-local index. This mapping is fixed for that callable and
+does not depend on SDK registration order or hardware mission IDs. The runtime
+checks aggregate limits before allocating resources. Module-local kernel IDs
+are interpreted together with the descriptor's `module_index`.
+
+## Registration and launch
+
+The native definition signature is:
 
 ```c
-int32_t entry(const SimplerCcuRegistrationBindingV1 *binding);
+int32_t entry(const SimplerCcuRegistrationBindingV2 *binding);
 ```
 
-It must not throw across the C boundary. For both
-`HcommCcuKernelQueryResReq` and `HcommCcuKernelRegister`, the adapter supplies
-the same one-element argument array:
+It must not throw. Query and registration receive the same one-element argument
+array `{&binding}`. The Host-only binding identifies the kernel, domain-global
+mission index and rank, with a channel and three distinct opaque Event handles:
+`ready_event_handle`, `trigger_event_handle`, `done_event_handle`. These handles
+are SDK values, not device addresses. Each Event uses bit 0.
 
-```c
-const void *registration_args[] = {&binding};
-```
+`SimplerCcuLaunchArgumentsV2` contains four 64-bit words, passed directly to
+`HcommCcuKernelLaunch`:
 
-The Host-only binding contains the kernel/group/rank identity, one domain
-channel handle, and separate trigger and stop event handles. Handles are opaque
-64-bit SDK values, not Host pointers. The binding is used only while HCOMM
-builds the native definition; it is never uploaded as launch data. Version 1
-does not admit adapter-specific extra registration arguments.
+| Word | Value |
+| ---- | ----- |
+| 0 | `layout_version` = 2 |
+| 1 | `parameter_addr` |
+| 2 | `parameter_token` |
+| 3 | `reserved` = 0 |
 
-The Host event handles are deliberately separate from the device event
-addresses stored in `SimplerCcuMissionDescriptorV1`. A handle is consumed by
-the native definition at registration. A device address is consumed by the
-triggering AIV or by Host stop/final-wake logic.
+The native definition loads all four words; `HcommCcuGetTaskArgsNum` must report
+4. The address and access token are per-run values for the kernel's declared
+parameter region, and must not be captured in cached registration. Ready,
+trigger and done are bound through registration. There are no run-control or
+completion-slot launch words.
 
-## Launch word layout
+## Domain workspace
 
-After registration, `HcommCcuGetTaskArgsNum` must report exactly
-`SIMPLER_CCU_TASK_ARGUMENT_COUNT` (10) words. The adapter passes the bytes of
-`SimplerCcuLaunchArgumentsV1` directly to `HcommCcuKernelLaunch`. Native code
-loads these 64-bit words in this fixed order:
+The domain runtime context publishes `SimplerCcuWorkspaceV2`: ABI/layout version,
+domain identity, run generation, mission count, descriptor stride and device
+address of a dense `SimplerCcuMissionDescriptorV2` array. It is a read-only view
+for the duration of the run. Each descriptor supplies its global mission index,
+module/kernel identity, matching run generation, parameter address/size/alignment
+and token, and three `{address, mask}` Event descriptors. Masks equal
+`SIMPLER_CCU_EVENT_MASK` (1). Addresses are opaque platform mappings; register
+encoding, cache maintenance and clear confirmation belong in platform helpers.
 
-| Index | Field |
-| ----- | ----- |
-| 0 | `layout_version` |
-| 1 | `run_generation` |
-| 2 | `mission_id` |
-| 3 | `run_control_addr` |
-| 4 | `run_control_token` |
-| 5 | `parameter_addr` |
-| 6 | `parameter_token` |
-| 7 | `completion_slot_addr` |
-| 8 | `completion_slot_token` |
-| 9 | `reserved` (must be 0) |
+The runtime validates versions, sizes, domain/run identity, indexes, parameter
+ranges/alignment and distinct Event mappings before admitting submissions.
+The AIV looks up `missions[mission_index]` through this workspace. Orchestration
+does not pass individual resource addresses in business arguments.
 
-The address/token pairs are per-run launch values. They must not be captured in
-a domain-cached registration. The parameter size is fixed by the kernel record;
-the registration adapter obtains each access token for the matching address and
-size before launch.
+## Submission and completion
 
-## Run and mission records
+1. Host safely resets Events and launches the missions. After required
+   initialization, CCU records ready. AICPU observes, clears and confirms ready
+   before admitting ordinary tasks.
+2. AIV resolves its mission and registers its task's done completion condition
+   before writing parameters. It publishes parameter/input visibility, records
+   trigger with the required synchronization, and returns immediately.
+3. CCU waits for and consumes trigger, reads parameters, executes the algorithm
+   and completes data movement and required cross-rank synchronization before
+   publishing done with output visibility.
+4. The existing asynchronous task mechanism waits for both ordinary execution
+   completion and done. The completion adapter clears done and confirms the
+   clear before retiring the condition and releasing dependent tasks.
 
-Each run owns one `SimplerCcuRunControlV1` per mission. Its state moves in this
-direction:
+There is no consumed Event, acknowledgement wait, GM completion sequence,
+mandatory stop/final-wake protocol, or CCU-published EXITED state. Trigger means
+submission has been issued; it does not prove CCU has consumed the parameters.
+Task IDs, owner generations and error reporting belong to the runtime, not to
+a CCU-written completion slot. Event bits do not encode native error codes.
 
-```text
-INIT -> LAUNCHED -> READY -> EXITING -> EXITED
-                       \-> FAILED
-```
+Users serialize operations on one mission through the entire asynchronous
+task's completion, including before the next parameter write. Parameters and
+referenced data stay alive until then. Waiting only for AIV return is
+insufficient. Repeated submission to the same mission within one AIV is outside
+this contract. Independent missions may execute concurrently. The initial
+implementation provides no owner/busy detection or queue; an atomic owner claim
+before parameter writes is a separate extension.
 
-`HcommCcuKernelLaunch` returning is not READY evidence. A native kernel may
-publish READY only after its task arguments, trigger gate, stop gate, and run
-memory are usable. A blocked `EventWait` must be woken through the stop gate or
-the agreed final wake value; changing `stop_requested` in GM alone cannot wake
-it.
+## Exit and failure
 
-`SimplerCcuMissionDescriptorV1` identifies the run generation, mission,
-kernel, group, parameter region, run control, completion slot, and trigger/stop
-gates. It carries the run-control, parameter, and completion access tokens that
-also appear in the launch words. Address fields are integer device addresses.
-They are not Host pointers.
+The user's finite kernel control flow returns normally. Host confirms termination
+using the mission's dedicated stream query or bounded synchronization. Final done
+does not prove stream termination. The runtime rejects overlapping runs sharing
+mutable resources and reuses them only after confirmed termination.
 
-## Completion publication
+Startup, completion and final stream waits have bounded failure handling through
+runtime/SDK error channels. A failure may terminate the whole run. If stopping
+cannot be confirmed, submissions remain disabled and module, Event, parameter,
+window, token and stream resources remain alive. Neither a timeout nor a clear
+attempt authorizes resource reuse. These runtime obligations and hardware
+acceptance are implemented in the dependent runtime changes, not in this ABI.
 
-Every mission has a separate `SimplerCcuCompletionSlotV1`. Operations on one
-mission use monotonically increasing 64-bit `operation_sequence` values. The
-producer writes status and the native error, makes result data visible, and
-commits `completed_sequence` last.
+## A5 runtime integration
 
-The TMR token contract is:
+Domain allocation is independent from callable registration. Submission prepares
+all instances against the one used domain covering its workers; L2 activation
+launches the instances and gates ordinary work on ready observation and confirmed
+clear. The startup helper observes mapped Events on the device; asynchronous
+done polling and clearing run on the AICPU. Normal completion requires the
+dedicated mission streams to terminate. Abort without confirmed stop retains
+owners and closes admission.
 
-| Token field | Value |
-| ----------- | ----- |
-| `addr` | address of the mission's completion slot |
-| `backend_cookie` | expected 64-bit operation sequence |
-| `engine` | CCU |
-| `expected_value` | `0` (reserved) |
+The prototype exposes callable-local kernel IDs and resolves them through the V2
+workspace. It requires unique kernel IDs across modules and rejects ambiguous
+IDs with multiple instances. Multiple matching domains, overlapping runs on one
+domain and different callables on one domain within a parent run are unsupported.
+V2 instance indexes remain internal to registration and workspace descriptors.
 
-Polling compares the complete 64-bit sequence. A value below the expected
-sequence is pending. An equal value uses the slot status to return success or
-failure. A greater value is a protocol error, not success.
-
-Operation completion releases that operation's dependency. Mission EXITED is
-separate evidence and is required before run resources can be reclaimed.
-
-## Version-1 concurrency limit
-
-One mission may have at most one unfinished operation at a time. Its previous
-TMR condition must complete and retire before another producer triggers that
-mission.
-
-Version 1 does not support multiple producers for one mission, trigger
-queueing, automatic parameter snapshots, or a multi-slot completion protocol.
-Different missions have different control blocks, gates, and completion slots
-and may operate independently. Violating the single-unfinished-operation rule
-has no defined queueing or recovery behavior.
+The hardware smoke uses finite programs with one request per mission per L2
+execution. Host run repetition does not establish dynamic repeated CCU calls
+within one L2 execution. Same-mission repeat within an AIV and the proposed
+generic Tensor call API are outside this integration.

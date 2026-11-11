@@ -81,17 +81,14 @@ inline void sdma_event_record_retire_op(CompletionCondition &cond) {
 }
 
 inline CompletionPollResult ccu_poll_op(const CompletionCondition &cond) {
-    const auto result = simpler::ccu::poll_completion(
-        reinterpret_cast<const volatile SimplerCcuCompletionSlotV1 *>(cond.addr), cond.backend_cookie
-    );
+    const auto result = simpler::ccu::poll_completion(cond.addr, cond.backend_cookie);
     if (result.state == simpler::ccu::CompletionPollState::pending)
         return {CompletionPollState::PENDING, SIMPLER_ERROR_NONE};
     if (result.state == simpler::ccu::CompletionPollState::ready)
         return {CompletionPollState::READY, SIMPLER_ERROR_NONE};
     LOG_ERROR(
-        "CCU completion failed: slot=0x%llx sequence=%llu native_error=%lld",
-        static_cast<unsigned long long>(cond.addr), static_cast<unsigned long long>(cond.backend_cookie),
-        static_cast<long long>(result.native_error)
+        "CCU completion failed: event=0x%llx mask=%llu native_error=%lld", static_cast<unsigned long long>(cond.addr),
+        static_cast<unsigned long long>(cond.backend_cookie), static_cast<long long>(result.native_error)
     );
     return {CompletionPollState::FAILED, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID};
 }

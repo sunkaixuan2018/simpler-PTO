@@ -2726,7 +2726,7 @@ std::tuple<uint64_t, uint64_t, size_t> ChipWorker::comm_alloc_domain_windows(
 }
 
 void ChipWorker::bind_ccu_callable_to_domain(
-    uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
+    uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
     const simpler::ccu::ExpectedBuildIdentity &expected_identity
 ) {
     require_comm_cleanup_confirmed();
@@ -2739,8 +2739,9 @@ void ChipWorker::bind_ccu_callable_to_domain(
     const auto package = pack_ccu_modules(found->second.ccu_modules);
     const int rc = comm_prepare_domain_ccu_fn_(
         reinterpret_cast<void *>(comm_handle), allocation_id, package.data(), package.size(),
-        expected_identity.sdk.data(), expected_identity.pto_isa.data(), group_id
+        expected_identity.sdk.data(), expected_identity.pto_isa.data()
     );
+    if (rc == COMM_RECLAMATION_UNCONFIRMED) retain_unconfirmed_comm_cleanup();
     if (rc != 0) throw std::runtime_error("native CCU domain preparation failed with code " + std::to_string(rc));
 }
 

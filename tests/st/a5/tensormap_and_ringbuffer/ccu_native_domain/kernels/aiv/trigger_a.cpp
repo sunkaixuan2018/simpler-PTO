@@ -12,5 +12,5 @@
 #include "trigger_common.h"
 
 extern "C" __aicore__ __attribute__((always_inline)) void kernel_entry(__gm__ int64_t *args) {
-    trigger_mission(args, 1, 0);
+    trigger_mission(args, 1, 1);
 }

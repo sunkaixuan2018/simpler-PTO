@@ -10,72 +10,28 @@
  */
 
 #include <gtest/gtest.h>
-
-#include <cstdint>
-
 #include "platform_comm/ccu/ccu_completion.h"
-
 namespace {
-
-using simpler::ccu::CompletionPollState;
-
-struct alignas(SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT) Slot {
-    SimplerCcuCompletionSlotV1 value{};
+using namespace simpler::ccu;
+TEST(CcuCompletion, ClearsDoneBeforePublishingCompletionAndSupportsReuse) {
+    uint64_t event = 0;
+    const auto address = reinterpret_cast<uint64_t>(&event);
+    EXPECT_EQ(poll_completion(address, 1).state, CompletionPollState::pending);
+    for (int i = 0; i < 1000; ++i) {
+        event = 1;
+        EXPECT_EQ(poll_completion(address, 1).state, CompletionPollState::ready);
+        EXPECT_EQ(event, 0U);
+        EXPECT_EQ(poll_completion(address, 1).state, CompletionPollState::pending);
+    }
+}
+struct StuckIo {
+    static uint64_t load(uint64_t) { return 1; }
+    static void clear(uint64_t) {}
 };
-
-void publish(Slot &slot, uint32_t mission_id, uint64_t sequence, uint32_t status, int64_t native_error = 0) {
-    slot.value.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
-    slot.value.struct_size = sizeof(SimplerCcuCompletionSlotV1);
-    slot.value.mission_id = mission_id;
-    slot.value.status = status;
-    slot.value.run_generation = 7;
-    slot.value.operation_sequence = sequence;
-    slot.value.native_error = native_error;
-    slot.value.completed_sequence = sequence;
+TEST(CcuCompletion, RejectsUnconfirmedClearAndInvalidMapping) {
+    EXPECT_EQ(poll_completion<StuckIo>(8, 1).state, CompletionPollState::protocol_error);
+    EXPECT_EQ(poll_completion(0, 1).state, CompletionPollState::protocol_error);
+    EXPECT_EQ(poll_completion(8, 2).state, CompletionPollState::protocol_error);
+    EXPECT_EQ(poll_completion(9, 1).state, CompletionPollState::protocol_error);
 }
-
-TEST(CcuCompletion, UsesExactSequenceComparison) {
-    Slot slot;
-
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 2).state, CompletionPollState::pending);
-    publish(slot, 3, 2, SIMPLER_CCU_COMPLETION_SUCCEEDED);
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 2).state, CompletionPollState::ready);
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 1).state, CompletionPollState::protocol_error);
-}
-
-TEST(CcuCompletion, KeepsDifferentMissionSlotsIndependentInReverseCompletionOrder) {
-    Slot mission_a;
-    Slot mission_b;
-
-    publish(mission_b, 4, 1, SIMPLER_CCU_COMPLETION_SUCCEEDED);
-    EXPECT_EQ(simpler::ccu::poll_completion(&mission_a.value, 1).state, CompletionPollState::pending);
-    EXPECT_EQ(simpler::ccu::poll_completion(&mission_b.value, 1).state, CompletionPollState::ready);
-
-    publish(mission_a, 3, 1, SIMPLER_CCU_COMPLETION_SUCCEEDED);
-    EXPECT_EQ(simpler::ccu::poll_completion(&mission_a.value, 1).state, CompletionPollState::ready);
-}
-
-TEST(CcuCompletion, PropagatesNativeFailure) {
-    Slot slot;
-    publish(slot, 3, 9, SIMPLER_CCU_COMPLETION_FAILED, 507018);
-
-    const auto result = simpler::ccu::poll_completion(&slot.value, 9);
-    EXPECT_EQ(result.state, CompletionPollState::failed);
-    EXPECT_EQ(result.native_error, 507018);
-}
-
-TEST(CcuCompletion, RejectsMalformedCommittedSlots) {
-    Slot slot;
-    publish(slot, 3, 5, SIMPLER_CCU_COMPLETION_SUCCEEDED);
-
-    slot.value.struct_size = 0;
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 5).state, CompletionPollState::protocol_error);
-    slot.value.struct_size = sizeof(SimplerCcuCompletionSlotV1);
-    slot.value.operation_sequence = 4;
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 5).state, CompletionPollState::protocol_error);
-    slot.value.operation_sequence = 5;
-    slot.value.native_error = 1;
-    EXPECT_EQ(simpler::ccu::poll_completion(&slot.value, 5).state, CompletionPollState::protocol_error);
-}
-
 }  // namespace

@@ -24,10 +24,10 @@ constexpr int kInvalidArgument = -1;
 }  // namespace
 
 HcommRunLifecycleSdk::HcommRunLifecycleSdk(
-    std::vector<HcommMissionStream> streams, StopWakeLauncher stop_wake_launcher
+    std::vector<HcommMissionStream> streams, ReadyEventPoller ready_event_poller
 ) :
     streams_(std::move(streams)),
-    stop_wake_launcher_(std::move(stop_wake_launcher)) {}
+    ready_event_poller_(std::move(ready_event_poller)) {}
 
 const HcommMissionStream *HcommRunLifecycleSdk::find_stream(uint64_t handle) const {
     for (const auto &stream : streams_) {
@@ -47,26 +47,9 @@ int HcommRunLifecycleSdk::launch(
     return HcommCcuKernelLaunch(mission->thread, program_handle, arguments, argument_count);
 }
 
-int HcommRunLifecycleSdk::read_control(uint64_t control_address, SimplerCcuRunControlV1 *control) {
-    if (control_address == 0 || control == nullptr) return kInvalidArgument;
-    return aclrtMemcpy(
-        control, sizeof(*control), reinterpret_cast<const void *>(control_address), sizeof(*control),
-        ACL_MEMCPY_DEVICE_TO_HOST
-    );
-}
-
-int HcommRunLifecycleSdk::request_stop(uint64_t control_address) {
-    if (control_address == 0) return kInvalidArgument;
-    constexpr uint32_t stop_requested = 1;
-    return aclrtMemcpy(
-        reinterpret_cast<void *>(control_address + offsetof(SimplerCcuRunControlV1, stop_requested)),
-        sizeof(stop_requested), &stop_requested, sizeof(stop_requested), ACL_MEMCPY_HOST_TO_DEVICE
-    );
-}
-
-int HcommRunLifecycleSdk::wake_stop(uint64_t stop_gate_address, uint64_t final_wake_value) {
-    if (stop_gate_address == 0 || final_wake_value == 0 || !stop_wake_launcher_) return kInvalidArgument;
-    return stop_wake_launcher_(stop_gate_address, final_wake_value);
+int HcommRunLifecycleSdk::poll_ready_event(uint64_t address, uint64_t mask, bool *ready) {
+    if (address == 0 || ready == nullptr || !ready_event_poller_) return kInvalidArgument;
+    return ready_event_poller_(address, mask, ready);
 }
 
 int HcommRunLifecycleSdk::query_stream(uint64_t stream_handle, StreamState *state) {

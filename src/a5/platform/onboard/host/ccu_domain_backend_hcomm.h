@@ -22,15 +22,17 @@
 namespace simpler::ccu {
 
 struct HcommPreparedMission {
-    uint32_t mission_id{};
+    uint32_t mission_index{};
     uint32_t kernel_id{};
     uint64_t program_handle{};
     uint64_t trigger_event_handle{};
-    uint64_t stop_event_handle{};
+    uint64_t ready_event_handle{};
+    uint64_t done_event_handle{};
     uint64_t trigger_gate_address{};
-    uint64_t stop_gate_address{};
+    uint64_t ready_gate_address{};
+    uint64_t done_gate_address{};
     uint64_t stream_handle{};
-    uint32_t group_id{};
+    uint32_t module_index{};
     uint64_t parameter_size{};
     uint32_t parameter_alignment{};
 };
@@ -46,9 +48,8 @@ public:
 
 std::vector<HcommPreparedMission> prepare_hcomm_ccu_domain(
     HcclComm base_communicator, uint64_t domain_id, const std::vector<uint32_t> &rank_ids, uint32_t domain_rank,
-    uint32_t group_id, const ExpectedBuildIdentity &expected_identity,
-    const std::vector<std::vector<uint8_t>> &module_bytes, const std::string &program_namespace,
-    std::unique_ptr<DomainCcuOwner> &owner, HcommDomainSession *&session
+    const ExpectedBuildIdentity &expected_identity, const std::vector<std::vector<uint8_t>> &module_bytes,
+    const std::string &program_namespace, std::unique_ptr<DomainCcuOwner> &owner, HcommDomainSession *&session
 );
 
 }  // namespace simpler::ccu

@@ -535,14 +535,21 @@ at offset zero; there is no legacy workspace pair or PTO-compatible prefix.
 PTO session builders receive the chosen workspace address explicitly and do
 not parse this context.
 
-The tail contains `ccu_missions_addr` and `ccu_mission_count`. On native A5 CCU
-domains they describe the current run's `SimplerCcuMissionDescriptorV1` table;
-other domains publish zeroes. Domain creation binds a registered callable with
-`ccu_callable`, a `ccu_group_id`, and the exact 32-byte `ccu_sdk_build_id` and
-`ccu_pto_isa_build_id`. All four options are required together. Creation and
-reuse complete every rank's mission READY barrier before ordinary submission.
-Normal run cleanup sends a final wake and requires EXITED plus completed
-streams. Unconfirmed stop closes admission and retains domain resources.
+The tail contains `ccu_workspace_addr` and `ccu_mission_count`. On native A5 CCU
+domains they describe the current run's `SimplerCcuWorkspaceV2` and instance count;
+other domains publish zeroes. Domain creation only allocates communication
+resources. A `ChipCallable` carries its CCU modules alongside its AIV children;
+submission prepares those modules against the one used domain covering its
+workers. SDK and ISA build identities are checked internally. Each L2 execution
+launches CCU and confirms local READY before activating ordinary device work.
+Device submission selects a callable-local kernel ID, with unique IDs required
+across all modules. The AICPU observes and clears each done Event before releasing
+dependent tasks. Finite programs return normally; completed mission streams are
+required before publishing execution completion. Unconfirmed stop
+closes admission and retains domain resources. Borrowing a retained domain alone
+does not prepare or launch CCU. Multiple matching domains and overlapping CCU
+executions on one domain are unsupported. See
+[the native CCU contract](design/ccu-native-abi.md) for the three-Event V2 ABI.
 
 All runtime libraries, bindings, communication-context producers and compiled
 kernels must come from the same simpler build and be updated together. This

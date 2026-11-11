@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 import simpler.worker as worker_mod
+from simpler.ccu import ChipCcuBinding
 from simpler.comm_domain import DomainConfig
 from simpler.orchestrator import _callback_run
 from simpler.task_interface import CommDomainHandle
@@ -23,7 +24,7 @@ from simpler.worker import Worker
 
 def _domain():
     handle = CommDomainHandle(name="ccu", workers=(0, 1), allocation_id=9, _release_fn=lambda _: None)
-    handle._config = DomainConfig((0, 1), 4096, (), True, (), ccu_binding=(bytes(32), 7, bytes(32), bytes(32)))
+    handle._config = DomainConfig((0, 1), 4096, (), True, ())
     return handle
 
 
@@ -57,14 +58,13 @@ def test_ready_wait_requires_every_rank():
     assert observed == [2, 2]
 
 
-def test_use_domain_records_keepalive_before_launch_and_ready():
+def test_use_domain_only_records_keepalive_without_launch():
     worker: Any = SimpleNamespace(level=3, _building_run_resources=worker_mod._RunResources())
     observed = []
     domain = _domain()
 
-    def collective(handle, operation, _binding):
-        assert worker._building_run_resources.ccu_domains[handle.name] is handle
-        observed.append(operation)
+    def collective(*_):
+        pytest.fail("borrowing a domain must not prepare or launch CCU")
 
     worker._control_admission = lambda _api: nullcontext()
     worker._ccu_domain_collective = collective
@@ -74,25 +74,21 @@ def test_use_domain_records_keepalive_before_launch_and_ready():
     with _callback_run(1, worker):
         Worker._use_domain(worker, domain)
         Worker._use_domain(worker, domain)
-    assert observed == [1, 2]
+    assert observed == []
+    assert worker._building_run_resources.ccu_domains == {}
     assert worker._building_run_resources.requires_ordered_cleanup
 
 
-def test_stop_failure_aborts_all_domains_and_preserves_first_error():
+def test_task_failure_aborts_all_used_ccu_domains():
     first, second = _domain(), _domain()
     first.name, second.name = "first", "second"
     aborted = []
-    stopped = []
-
-    def stop(handle, operation):
-        stopped.append((handle.name, operation))
-        raise RuntimeError(handle.name)
-
-    worker: Any = SimpleNamespace(_ccu_domain_wait=stop, _abort_ccu_domain=lambda handle: aborted.append(handle.name))
+    worker: Any = SimpleNamespace(_abort_ccu_domain=lambda handle: aborted.append(handle.name))
     resources = worker_mod._RunResources(ccu_domains={"first": first, "second": second})
-    with pytest.raises(RuntimeError, match="first"):
-        Worker._stop_run_ccu_domains(worker, resources, None)
-    assert stopped == [("first", 3), ("second", 3)]
+    error = RuntimeError("ordinary task failed")
+    with pytest.raises(RuntimeError, match="CCU run aborted") as result:
+        Worker._stop_run_ccu_domains(worker, resources, error)
+    assert result.value.__cause__ is error
     assert aborted == ["first", "second"]
     assert list(resources.ccu_domains) == ["first", "second"]
 
@@ -111,3 +107,73 @@ def test_abort_marks_unconfirmed_resources():
     Worker._abort_ccu_domain(worker, _domain())
     assert "retained" in observed[0][0]
     assert str(observed[0][1]) == "stream stop unconfirmed"
+
+
+def test_prepare_infers_callable_and_reuses_domain_without_launch():
+    domain = _domain()
+    resources = worker_mod._RunResources(live_domains={domain.name: domain})
+    state = SimpleNamespace(target=SimpleNamespace(ccu_module_count=1), eligible_worker_ids=(0, 1))
+    observed = []
+    worker: Any = SimpleNamespace(
+        level=3,
+        _config={"platform": "a5"},
+        _building_run_resources=resources,
+        _resolve_handle=lambda *_args, **_kwargs: state,
+        _control_admission=lambda _: nullcontext(),
+        _ccu_domain_collective=lambda handle, operation, digest: observed.append((handle, operation, digest)),
+    )
+    callable_handle = SimpleNamespace(digest=b"c" * 32)
+    Worker._prepare_ccu_submission(worker, callable_handle, [0])
+    Worker._prepare_ccu_submission(worker, callable_handle, [1])
+    assert observed == [(domain, 0, callable_handle.digest)]
+    assert resources.ccu_domains == {domain.name: domain}
+    with pytest.raises(ValueError, match="different CCU callables"):
+        Worker._prepare_ccu_submission(worker, SimpleNamespace(digest=b"d" * 32), [0])
+
+
+@pytest.mark.parametrize("domain_count", [0, 2])
+def test_ccu_submission_rejects_missing_or_ambiguous_domain(domain_count):
+    domains = {str(i): _domain() for i in range(domain_count)}
+    worker: Any = SimpleNamespace(
+        level=3,
+        _config={"platform": "a5"},
+        _building_run_resources=worker_mod._RunResources(live_domains=domains),
+        _resolve_handle=lambda *_args, **_kwargs: SimpleNamespace(target=SimpleNamespace(ccu_module_count=1)),
+    )
+    with pytest.raises(ValueError, match="exactly one"):
+        Worker._prepare_ccu_submission(worker, SimpleNamespace(digest=b"c" * 32), [0])
+
+
+def test_l2_launches_only_on_begin_and_confirms_stop_before_reuse():
+    operations = []
+    worker = SimpleNamespace(control_domain_ccu=lambda comm, domain, op, gen: operations.append((op, gen)) or 0)
+    binding = ChipCcuBinding(worker, 10, 9, 1)
+    assert operations == []
+    binding.begin()
+    with pytest.raises(RuntimeError, match="overlapping"):
+        binding.begin()
+    binding.finish()
+    binding.begin()
+    binding.finish()
+    assert operations == [(1, 1), (2, 1), (3, 1), (1, 2), (2, 2), (3, 2)]
+    assert not binding.active
+
+
+@pytest.mark.parametrize("failed_operation", [1, 2, 3])
+def test_l2_failure_aborts_and_keeps_binding_active(failed_operation):
+    operations = []
+
+    def control(comm, domain, operation, generation):
+        operations.append(operation)
+        if operation == failed_operation:
+            raise RuntimeError("original failure")
+        if operation == 4:
+            raise RuntimeError("abort unconfirmed")
+        return 0
+
+    binding = ChipCcuBinding(SimpleNamespace(control_domain_ccu=control), 10, 9, 1)
+    with pytest.raises(RuntimeError, match="original failure"):
+        binding.begin()
+        binding.finish()
+    assert operations[-1] == 4
+    assert binding.active

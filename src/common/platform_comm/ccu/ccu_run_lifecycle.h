@@ -26,7 +26,8 @@ struct MissionRunResources {
     uint32_t mission_id{};
     uint64_t program_handle{};
     uint64_t stream_handle{};
-    SimplerCcuLaunchArgumentsV1 launch_arguments{};
+    SimplerCcuLaunchArgumentsV2 launch_arguments{};
+    SimplerCcuEventDescriptorV2 ready_event{};
 };
 
 struct RunFailure {
@@ -40,9 +41,7 @@ public:
 
     virtual int
     launch(uint64_t program_handle, const uint64_t *arguments, uint32_t argument_count, uint64_t stream_handle) = 0;
-    virtual int read_control(uint64_t control_address, SimplerCcuRunControlV1 *control) = 0;
-    virtual int request_stop(uint64_t control_address) = 0;
-    virtual int wake_stop(uint64_t stop_gate_address, uint64_t final_wake_value) = 0;
+    virtual int poll_ready_event(uint64_t address, uint64_t mask, bool *ready) = 0;
     virtual int query_stream(uint64_t stream_handle, StreamState *state) = 0;
     virtual int abort_stream(uint64_t stream_handle) = 0;
 };
@@ -96,7 +95,6 @@ private:
         DomainRunLifecycle &owner, uint64_t generation, std::vector<MissionRunResources> missions, RunLifecycleSdk &sdk
     );
 
-    bool read_controls(bool require_ready, bool require_terminal);
     void record_failure(std::string operation, int64_t native_error);
     void finish_confirmed();
     void retain_unconfirmed();
@@ -105,6 +103,7 @@ private:
     uint64_t generation_{};
     std::vector<MissionRunResources> missions_;
     RunLifecycleSdk &sdk_;
+    std::vector<bool> ready_events_consumed_;
     std::vector<RunFailure> failures_;
     bool launched_{false};
     bool ready_{false};

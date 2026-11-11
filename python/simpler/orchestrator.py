@@ -361,6 +361,8 @@ class Orchestrator:
             remote_sidecar = None
         _validate_remote_sidecar_access(c_args, remote_sidecar)
         worker = self._worker
+        if worker is not None and target_namespace == "LOCAL_CHIP":
+            worker._prepare_ccu_submission(callable_handle, [cpp_worker_id])
         # Provenance validation precedes run ownership publication. Once a remote
         # ref is published, only the run fence may release it because the native
         # submit can commit before an exception reaches Python.
@@ -470,6 +472,8 @@ class Orchestrator:
         # must be live on that member's exact submitted target.
         # Run this fallible analysis before publishing remote-ref ownership.
         worker = self._worker
+        if worker is not None and target_namespace == "LOCAL_CHIP":
+            worker._prepare_ccu_submission(callable_handle, worker_ids)
         member_checks: list[tuple[int, TaskArgs]] = []
         if worker is not None:
             for g, c_args in enumerate(c_args_list):
@@ -545,7 +549,7 @@ class Orchestrator:
     # duration of the alloc / release handshake)
     # ------------------------------------------------------------------
 
-    def allocate_domain(  # noqa: PLR0913 -- CCU binding carries the callable, group and exact build identities
+    def allocate_domain(
         self,
         *,
         name: str,
@@ -557,10 +561,6 @@ class Orchestrator:
         workspace_engines: Sequence[str] = (),
         memory_source: AddressSpace = AddressSpace.DEVICE,
         initializer: Callable[[CommDomainHandle], None] | None = None,
-        ccu_callable=None,
-        ccu_group_id=None,
-        ccu_sdk_build_id=None,
-        ccu_pto_isa_build_id=None,
     ) -> CommDomainHandle:
         """Create a domain using L3 chip ids or L4 ``(node, chip)`` members.
 
@@ -596,7 +596,6 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
-            ccu_binding=(ccu_callable, ccu_group_id, ccu_sdk_build_id, ccu_pto_isa_build_id),
             reuse=False,
         )
 
@@ -611,10 +610,6 @@ class Orchestrator:
         workspace_engines: Sequence[str] = (),
         memory_source: AddressSpace = AddressSpace.DEVICE,
         initializer: Callable[[CommDomainHandle], None] | None = None,
-        ccu_callable=None,
-        ccu_group_id=None,
-        ccu_sdk_build_id=None,
-        ccu_pto_isa_build_id=None,
     ) -> CommDomainHandle:
         """Return the same live handle on an exact configuration match, otherwise create it.
 
@@ -633,7 +628,6 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
-            ccu_binding=(ccu_callable, ccu_group_id, ccu_sdk_build_id, ccu_pto_isa_build_id),
             reuse=True,
         )
 
@@ -648,7 +642,6 @@ class Orchestrator:
         workspace_engines=(),
         memory_source=AddressSpace.DEVICE,
         initializer=None,
-        ccu_binding=(),
         reuse,
     ):
         if self._worker is None:
@@ -663,7 +656,6 @@ class Orchestrator:
             workspace_engines=workspace_engines,
             memory_source=memory_source,
             initializer=initializer,
-            ccu_binding=ccu_binding,
         )
 
     def get_domain(self, name: str | CommDomainRef) -> CommDomainHandle:

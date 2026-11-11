@@ -4210,7 +4210,7 @@ NB_MODULE(_task_interface, m) {
         )
         .def(
             "bind_ccu_callable_to_domain",
-            [](ChipWorker &self, uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id, uint32_t group_id,
+            [](ChipWorker &self, uint64_t comm_handle, uint64_t allocation_id, int32_t callable_id,
                const nb::bytes &sdk_build_id, const nb::bytes &pto_isa_build_id) {
                 if (sdk_build_id.size() != SIMPLER_CCU_BUILD_ID_SIZE ||
                     pto_isa_build_id.size() != SIMPLER_CCU_BUILD_ID_SIZE) {
@@ -4219,10 +4219,10 @@ NB_MODULE(_task_interface, m) {
                 simpler::ccu::ExpectedBuildIdentity identity{};
                 std::memcpy(identity.sdk.data(), sdk_build_id.c_str(), identity.sdk.size());
                 std::memcpy(identity.pto_isa.data(), pto_isa_build_id.c_str(), identity.pto_isa.size());
-                self.bind_ccu_callable_to_domain(comm_handle, allocation_id, callable_id, group_id, identity);
+                self.bind_ccu_callable_to_domain(comm_handle, allocation_id, callable_id, identity);
             },
-            nb::arg("comm_handle"), nb::arg("allocation_id"), nb::arg("callable_id"), nb::arg("group_id"),
-            nb::arg("sdk_build_id"), nb::arg("pto_isa_build_id")
+            nb::arg("comm_handle"), nb::arg("allocation_id"), nb::arg("callable_id"), nb::arg("sdk_build_id"),
+            nb::arg("pto_isa_build_id")
         )
         .def(
             "control_domain_ccu", &ChipWorker::control_domain_ccu, nb::arg("comm_handle"), nb::arg("allocation_id"),

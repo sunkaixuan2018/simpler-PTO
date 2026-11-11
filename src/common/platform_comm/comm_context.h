@@ -45,7 +45,7 @@ struct CommContext {
     uint64_t windowsIn[COMM_MAX_RANK_NUM];
     uint64_t windowsOut[COMM_MAX_RANK_NUM];
     CommWorkspace workspaces[COMM_WORKSPACE_COUNT];
-    uint64_t ccu_missions_addr;
+    uint64_t ccu_workspace_addr;
     uint64_t ccu_mission_count;
 };
 

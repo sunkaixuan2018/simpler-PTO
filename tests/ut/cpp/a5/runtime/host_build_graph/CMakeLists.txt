@@ -21,6 +21,7 @@ a5_hbg_case(test_hbg_graph_view.cpp)
 
 a5_hbg_case(test_hbg_async_directory.cpp NO_OBJS TIMEOUT 20)
 a5_hbg_case(test_hbg_async_state.cpp NO_OBJS TIMEOUT 20)
+a5_hbg_case(test_hbg_ccu_completion.cpp NO_OBJS LINK a5_ut_support TIMEOUT 20)
 a5_hbg_case(test_hbg_async_pending.cpp NO_OBJS TIMEOUT 20)
 a5_hbg_case(test_hbg_async_writer.cpp NO_OBJS TIMEOUT 20)
 a5_hbg_case(test_hbg_async_control.cpp TIMEOUT 20

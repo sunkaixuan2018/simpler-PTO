@@ -10,64 +10,42 @@
  */
 
 #include <gtest/gtest.h>
-
 #include "async_condition_writer.h"
 #include "async_wait.h"
-
 namespace {
-
-struct alignas(SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT) Slot {
-    SimplerCcuCompletionSlotV1 value{};
-};
-
-void publish(Slot &slot, uint64_t sequence, uint32_t status, int64_t native_error = 0) {
-    slot.value.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
-    slot.value.struct_size = sizeof(SimplerCcuCompletionSlotV1);
-    slot.value.status = status;
-    slot.value.operation_sequence = sequence;
-    slot.value.native_error = native_error;
-    slot.value.completed_sequence = sequence;
-}
-
-CompletionCondition condition(Slot &slot, uint64_t sequence) {
+CompletionCondition condition(uint64_t &event) {
     CompletionCondition cond;
     cond.engine = ASYNC_ENGINE_CCU;
     cond.completion_type = COMPLETION_TYPE_CCU;
-    cond.addr = reinterpret_cast<uint64_t>(&slot.value);
-    cond.backend_cookie = sequence;
+    cond.addr = reinterpret_cast<uint64_t>(&event);
+    cond.backend_cookie = 1;
     return cond;
 }
-
-TEST(HbgCcuCompletion, PollsAndRetiresOneConditionWith64BitSequence) {
-    constexpr uint64_t kSequence = (uint64_t{1} << 40) + 7;
-    Slot slot;
-    auto cond = condition(slot, kSequence);
-
-    EXPECT_EQ(cond.test().state, CompletionPollState::PENDING);
-    publish(slot, kSequence, SIMPLER_CCU_COMPLETION_SUCCEEDED);
-    EXPECT_EQ(cond.test().state, CompletionPollState::READY);
-    cond.retire();
-    EXPECT_TRUE(cond.retired);
+TEST(HbgCcuCompletion, WaitsForIndependentEventsAndConfirmsClearBeforeRetirement) {
+    uint64_t a{}, b{1};
+    auto first = condition(a);
+    auto second = condition(b);
+    EXPECT_EQ(first.test().state, CompletionPollState::PENDING);
+    EXPECT_EQ(second.test().state, CompletionPollState::READY);
+    EXPECT_EQ(b, 0U);
+    a = 1;
+    EXPECT_EQ(first.test().state, CompletionPollState::READY);
+    EXPECT_EQ(a, 0U);
+    second.retire();
+    EXPECT_TRUE(second.retired);
+    EXPECT_FALSE(first.retired);
 }
-
-TEST(HbgCcuCompletion, MapsNativeFailureAndSequenceJumpToTaskFailure) {
-    Slot slot;
-    auto cond = condition(slot, 9);
-
-    publish(slot, 9, SIMPLER_CCU_COMPLETION_FAILED, 507018);
-    EXPECT_EQ(cond.test().error_code, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
-    publish(slot, 10, SIMPLER_CCU_COMPLETION_SUCCEEDED);
+TEST(HbgCcuCompletion, RejectsInvalidEventMask) {
+    uint64_t event{1};
+    auto cond = condition(event);
+    cond.backend_cookie = 2;
     EXPECT_EQ(cond.test().state, CompletionPollState::FAILED);
 }
-
-TEST(HbgCcuCompletion, ResidentWriterAcceptsOnlyCanonicalCcuToken) {
-    Slot slot;
-    CompletionToken token{
-        reinterpret_cast<uint64_t>(&slot.value), 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, uint64_t{1} << 40
-    };
+TEST(HbgCcuCompletion, ResidentWriterAcceptsCanonicalEventToken) {
+    uint64_t event{};
+    CompletionToken token{reinterpret_cast<uint64_t>(&event), 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, 1};
     EXPECT_TRUE(pto2::resident::detail::token_valid(token));
-    token.expected_value = 1;
+    token.backend_cookie = 2;
     EXPECT_FALSE(pto2::resident::detail::token_valid(token));
 }
-
 }  // namespace

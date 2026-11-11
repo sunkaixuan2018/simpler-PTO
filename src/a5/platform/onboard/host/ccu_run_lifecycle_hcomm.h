@@ -29,16 +29,14 @@ struct HcommMissionStream {
 
 class HcommRunLifecycleSdk final : public RunLifecycleSdk {
 public:
-    using StopWakeLauncher = std::function<int(uint64_t, uint64_t)>;
+    using ReadyEventPoller = std::function<int(uint64_t, uint64_t, bool *)>;
 
-    HcommRunLifecycleSdk(std::vector<HcommMissionStream> streams, StopWakeLauncher stop_wake_launcher);
+    HcommRunLifecycleSdk(std::vector<HcommMissionStream> streams, ReadyEventPoller ready_event_poller);
 
     int launch(
         uint64_t program_handle, const uint64_t *arguments, uint32_t argument_count, uint64_t stream_handle
     ) override;
-    int read_control(uint64_t control_address, SimplerCcuRunControlV1 *control) override;
-    int request_stop(uint64_t control_address) override;
-    int wake_stop(uint64_t stop_gate_address, uint64_t final_wake_value) override;
+    int poll_ready_event(uint64_t address, uint64_t mask, bool *ready) override;
     int query_stream(uint64_t stream_handle, StreamState *state) override;
     int abort_stream(uint64_t stream_handle) override;
 
@@ -46,7 +44,7 @@ private:
     const HcommMissionStream *find_stream(uint64_t handle) const;
 
     std::vector<HcommMissionStream> streams_;
-    StopWakeLauncher stop_wake_launcher_;
+    ReadyEventPoller ready_event_poller_;
 };
 
 }  // namespace simpler::ccu

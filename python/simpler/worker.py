@@ -907,7 +907,7 @@ _CTRL_OP_NAMES[_CTRL_DEVICE_MEMORY_INFO] = "device_memory_info"
 # region control; 27 mirrors worker_manager.h::CTRL_DFX_FLUSH.
 _CTRL_DFX_FLUSH = 27
 _CTRL_CCU_DOMAIN = 28
-_CCU_DOMAIN_REQUEST = struct.Struct("<QQII32s32s32si")
+_CCU_DOMAIN_REQUEST = struct.Struct("<QQI32si")
 _CTRL_OP_NAMES[_CTRL_DFX_FLUSH] = "flush_diagnostics"
 # The native flush wait takes a millisecond count in a C `int`. The wire field
 # is 64-bit, so a malformed frame is clamped here rather than left to fail
@@ -3509,6 +3509,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
     global_domain_store = _L2GlobalDomainStore()
     base_comm_handle = 0
     diagnostic_capture_index = 0
+    ccu_bindings = {}
+    ccu_callable_domains = {}
 
     def read_task_config(
         task_buf: memoryview,
@@ -3660,16 +3662,25 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                 try:
                     if size != _CCU_DOMAIN_REQUEST.size:
                         raise ValueError("CCU domain control payload size mismatch")
-                    allocation, generation, operation, group, digest, sdk_id, isa_id, _ = (
-                        _CCU_DOMAIN_REQUEST.unpack_from(payload)
-                    )
+                    allocation, generation, operation, digest, _ = _CCU_DOMAIN_REQUEST.unpack_from(payload)
                     comm = _require_base_communicator(base_comm_handle)
                     result = 0
                     if operation == 0:
                         cid = identity_table.get(digest)
                         if cid is None:
                             raise RuntimeError("CCU callable is not registered on this chip")
-                        cw.bind_ccu_callable_to_domain(comm, allocation, int(cid), group, sdk_id, isa_id)
+                        from .ccu import ChipCcuBinding, runtime_build_identity  # noqa: PLC0415 -- A5-only control
+
+                        binding = ccu_bindings.get(allocation)
+                        if binding is not None and binding.active:
+                            raise RuntimeError("cannot replace an active CCU domain registration")
+                        sdk_id, isa_id = runtime_build_identity()
+                        cw.bind_ccu_callable_to_domain(comm, allocation, int(cid), sdk_id, isa_id)
+                        ccu_bindings[allocation] = binding or ChipCcuBinding(cw, comm, allocation, 120.0)
+                        for old_digest, old_allocation in list(ccu_callable_domains.items()):
+                            if old_allocation == allocation:
+                                del ccu_callable_domains[old_digest]
+                        ccu_callable_domains[digest] = allocation
                     else:
                         result = cw.control_domain_ccu(comm, allocation, operation, generation)
                     struct.pack_into("<i", payload, _CCU_DOMAIN_REQUEST.size - 4, result)
@@ -3824,6 +3835,8 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             launched_published: bool = False
             ended_published: bool = False
             published_disposition: int = _DISPOSITION_NONE
+            ccu_binding: Any = None
+            ccu_started: bool = False
 
         staged_runs: dict[int, _StagedRun] = {}
 
@@ -3939,6 +3952,9 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             # at those bases, as the non-pipelined task path does. The lane copies the args into
             # its own storage, so this POD need not outlive the call.
             args = staged.pending_args  # type: ignore[attr-defined]
+            allocation = ccu_callable_domains.get(staged.digest)
+            if allocation is not None:
+                staged.ccu_binding = ccu_bindings[allocation]
             _validate_host_control_access(registry.get(staged.cid), args)
             chip_args = _materialize_chip_task_args(args, import_registry)
             if staged.config.output_prefix:
@@ -3966,7 +3982,23 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             _mailbox_store_i32(staged.entry_addr + _OFF_ENTRY_STATE, _FRAME_STAGED)
             staged.published_disposition = disposition
             if staged.activated:
+                activate_run(staged)
+
+        def activate_run(staged: _StagedRun) -> None:
+            if staged.ccu_binding is not None:
+                staged.ccu_binding.begin()
+                staged.ccu_started = True
+            try:
                 staged.chip_run.activate()
+            except BaseException:
+                if staged.ccu_binding is not None:
+                    staged.ccu_binding.abort()
+                raise
+
+        def finish_ccu_run(staged: _StagedRun) -> None:
+            if staged.ccu_started:
+                staged.ccu_binding.finish()
+                staged.ccu_started = False
 
         def republish_native_preparation(staged: _StagedRun) -> None:
             """Publish a staged run's preparation once it becomes native, not only when it staged.
@@ -3991,7 +4023,10 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
             msg = ""
             try:
                 staged.chip_run._raise_if_failed()
+                finish_ccu_run(staged)
             except Exception as e:  # noqa: BLE001
+                if staged.ccu_started:
+                    staged.ccu_binding.abort()
                 code = 1
                 msg = _format_exc(f"chip_process dev={device_id}: chip run", e)
             if code == 0 and on_task_done_success is not None:
@@ -4048,7 +4083,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     staged_runs.pop(staged.index, None)
                     continue
                 try:
-                    staged.chip_run.activate()
+                    activate_run(staged)
                     staged.activated = True
                 except Exception as e:  # noqa: BLE001
                     shutdown_message = _format_exc(f"chip_process dev={device_id}: native activation", e)
@@ -4063,7 +4098,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                     break
                 if control_state == _CONTROL_REQUEST:
                     sub_cmd = struct.unpack_from("Q", buf, _OFF_CALLABLE)[0]
-                    registry_control = sub_cmd in (_CTRL_PREPARE, _CTRL_REGISTER, _CTRL_UNREGISTER)
+                    registry_control = sub_cmd in (_CTRL_PREPARE, _CTRL_REGISTER, _CTRL_UNREGISTER, _CTRL_CCU_DOMAIN)
                     defer_control = registry_control and bool(staged_runs)
                     if sub_cmd == _CTRL_UNREGISTER:
                         defer_control = defer_control or task_frame_references_digest(_read_control_digest(buf))
@@ -4141,6 +4176,7 @@ def _run_chip_main_loop(  # noqa: PLR0913, PLR0915 -- fork-child entry: every de
                                 break
                             continue
                         if not staged.ended_published:
+                            finish_ccu_run(staged)
                             # Physical retirement returns execution credit only. The entry,
                             # native carrier, IO and strong observer remain this call's owners.
                             _write_entry_admissible_sets(
@@ -4944,6 +4980,7 @@ class _RunResources:
     remote_slot_refs: list[_RemoteSlotRefClaim | RemoteBufferHandle] = field(default_factory=list)
     live_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
     ccu_domains: dict[str, CommDomainHandle] = field(default_factory=dict)
+    ccu_bindings: dict[str, bytes] = field(default_factory=dict)
     pending_release_domains: list[CommDomainHandle] = field(default_factory=list)
     live_global_domains: dict[str, GlobalCommDomainHandle] = field(default_factory=dict)
     pending_release_global_domains: list[GlobalCommDomainHandle] = field(default_factory=list)
@@ -10793,7 +10830,6 @@ class Worker:
         workspace_engines=(),
         memory_source=AddressSpace.DEVICE,
         initializer=None,
-        ccu_binding=(),
     ):
         _check_domain_initializer_context(self, "allocate_domain")
         if initializer is not None:
@@ -10822,26 +10858,6 @@ class Worker:
             config = self._domain_config(
                 members, window_size, buffers, retain_after_run, workspace_engines, memory_source
             )
-            if ccu_binding and any(value is not None for value in ccu_binding):
-                if len(ccu_binding) != 4 or any(value is None for value in ccu_binding):
-                    raise ValueError("CCU domain requires callable, group and both build identities")
-                callable_handle, group, sdk_id, isa_id = ccu_binding
-                state = self._resolve_handle(callable_handle, expected_namespace="LOCAL_CHIP")
-                if self.level != 3 or self._config.get("platform") != "a5":
-                    raise ValueError("CCU domains require an L3 A5 Worker")
-                if state.eligible_worker_ids and not set(config.members) <= set(state.eligible_worker_ids):
-                    raise ValueError("CCU callable is not registered on every domain member")
-                group = operator.index(group)
-                if not 0 <= group < 2**32 - 1:
-                    raise ValueError("CCU group is outside the supported range")
-                if (
-                    not isinstance(sdk_id, bytes)
-                    or not isinstance(isa_id, bytes)
-                    or len(sdk_id) != 32
-                    or len(isa_id) != 32
-                ):
-                    raise ValueError("CCU build identities must each be 32 bytes")
-                config = replace(config, ccu_binding=(callable_handle.digest, group, sdk_id, isa_id))
             table = self._live_domains if self.level == 3 else self._live_global_domains
             handle = table.get(name)
             if handle is not None:
@@ -10884,8 +10900,6 @@ class Worker:
                         buffers=config.specs(),
                         retain_after_run=config.retain_after_run,
                     )
-                if config.ccu_binding:
-                    self._ccu_domain_collective(handle, 0, config.ccu_binding)
                 handle._use_fn = self._use_domain
                 self._use_domain(handle, config=config)
                 self._initialize_domain(handle, initializer)
@@ -10917,24 +10931,39 @@ class Worker:
             table = resources.live_domains if local else resources.live_global_domains
             table[handle.name] = handle
             resources.requires_ordered_cleanup = True
-        config = config if config is not None else handle._config
-        if config is not None and config.ccu_binding and handle.name not in resources.ccu_domains:
-            frame = _callback_frame_for(self)
-            if frame is not None and frame.has_submitted_task:
-                raise RuntimeError("CCU READY barrier must precede ordinary task submission")
-            resources.ccu_domains[handle.name] = handle
-            with self._control_admission("CCU READY barrier"):
-                try:
-                    self._ccu_domain_collective(handle, 1, config.ccu_binding)
-                    self._ccu_domain_wait(handle, 2)
-                except BaseException:
-                    self._abort_ccu_domain(handle)
-                    raise
         release = self._release_domain_handle if local else self._release_global_domain_handle
         handle._release_fn = lambda released, owner=resources: release(released, owner)
 
-    def _ccu_domain_collective(self, handle, operation, binding=()) -> list[int]:
-        digest, group, sdk_id, isa_id = binding or (bytes(32), 0, bytes(32), bytes(32))
+    def _prepare_ccu_submission(self, callable_handle, worker_ids) -> None:
+        state = self._resolve_handle(callable_handle, expected_namespace="LOCAL_CHIP")
+        if not getattr(state.target, "ccu_module_count", 0):
+            return
+        if self.level != 3 or self._config.get("platform") != "a5":
+            raise ValueError("CCU submissions require an L3 A5 Worker")
+        resources = self._building_run_resources
+        if resources is None:
+            raise RuntimeError("CCU submission requires an orchestration callback")
+        domains = [
+            handle
+            for handle in resources.live_domains.values()
+            if set(worker_ids) <= set(handle.workers) and not handle.released
+        ]
+        if len(domains) != 1:
+            raise ValueError("CCU submission requires exactly one used communication domain for its workers")
+        handle = domains[0]
+        if state.eligible_worker_ids and not set(handle.workers) <= set(state.eligible_worker_ids):
+            raise ValueError("CCU callable is not registered on every domain member")
+        previous = resources.ccu_bindings.get(handle.name)
+        if previous is not None:
+            if previous != callable_handle.digest:
+                raise ValueError("one domain cannot use different CCU callables in the same orchestration run")
+            return
+        resources.ccu_domains[handle.name] = handle
+        with self._control_admission("CCU callable preparation"):
+            self._ccu_domain_collective(handle, 0, callable_handle.digest)
+        resources.ccu_bindings[handle.name] = callable_handle.digest
+
+    def _ccu_domain_collective(self, handle, operation, digest=bytes(32)) -> list[int]:
         generation = getattr(handle, "_ccu_run_generation", 0)
         if operation == 1:
             generation += 1
@@ -10947,9 +10976,7 @@ class Worker:
 
         def send(index, chip):
             try:
-                payload = _CCU_DOMAIN_REQUEST.pack(
-                    handle.allocation_id, generation, operation, group, digest, sdk_id, isa_id, 0
-                )
+                payload = _CCU_DOMAIN_REQUEST.pack(handle.allocation_id, generation, operation, digest, 0)
                 reply = native.control_payload(
                     WorkerType.NEXT_LEVEL, chip, _CTRL_CCU_DOMAIN, payload, self._py_control_timeout_s
                 )
@@ -10980,19 +11007,12 @@ class Worker:
             self._record_unreclaimable("CCU stop is unconfirmed; domain resources are retained", error)
 
     def _stop_run_ccu_domains(self, resources, native_error) -> None:
-        first_error = None
+        if native_error is None:
+            return
         for handle in resources.ccu_domains.values():
-            try:
-                if native_error is not None:
-                    self._abort_ccu_domain(handle)
-                    raise RuntimeError("CCU run aborted after ordinary task failure") from native_error
-                self._ccu_domain_wait(handle, 3)
-            except BaseException as error:
-                self._abort_ccu_domain(handle)
-                if first_error is None:
-                    first_error = error
-        if first_error is not None:
-            raise first_error
+            self._abort_ccu_domain(handle)
+        if resources.ccu_domains:
+            raise RuntimeError("CCU run aborted after ordinary task failure") from native_error
 
     def _domain_serialization(self):
         return contextlib.nullcontext() if _callback_frame_for(self) is not None else self._submit_mu.exclusive()

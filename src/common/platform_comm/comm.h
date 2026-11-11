@@ -312,7 +312,7 @@ int comm_alloc_host_domain_windows(
  */
 int comm_prepare_domain_ccu(
     CommHandle h, uint64_t allocation_id, const void *module_package, size_t module_package_size,
-    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32], uint32_t group_id
+    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32]
 );
 
 /**

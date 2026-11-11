@@ -9,8 +9,7 @@
  * -----------------------------------------------------------------------------------------------------------
  */
 
-#ifndef PTO_ASYNC_KERNEL_API_H
-#define PTO_ASYNC_KERNEL_API_H
+#pragma once
 
 #include <stdint.h>
 
@@ -21,6 +20,7 @@
 #include "aicore_completion_mailbox_types.h"
 #include "completion_token.h"
 #include "platform_comm/ccu/ccu_device_submission.h"
+#include "platform_comm/comm_context.h"
 #include "runtime_status.h"
 
 #ifndef __aicore__
@@ -142,17 +142,19 @@ inline __aicore__ bool register_completion_condition(AsyncCtx &ctx, const Comple
 }
 
 inline __aicore__ bool submit_ccu_mission(
-    AsyncCtx &ctx, const volatile __gm__ SimplerCcuMissionDescriptorV1 *mission, uint64_t operation_sequence,
-    const void *parameters, uint64_t parameter_size
+    AsyncCtx &ctx, const __gm__ CommContext *domain, uint32_t kernel_id, const void *parameters, uint64_t parameter_size
 ) {
-    auto register_ccu_completion = [&](uint64_t address, uint64_t sequence) __aicore__ {
-        const CompletionToken token{address, 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, sequence};
+    const auto *workspace =
+        domain == nullptr ? nullptr :
+                            reinterpret_cast<const volatile __gm__ SimplerCcuWorkspaceV2 *>(domain->ccu_workspace_addr);
+    const auto *mission = simpler::ccu::find_mission(workspace, kernel_id);
+    auto register_ccu_completion = [&](uint64_t address, uint64_t mask) __aicore__ {
+        const CompletionToken token{address, 0, COMPLETION_ENGINE_CCU, COMPLETION_TYPE_CCU, mask};
         if (!register_completion_condition(ctx, token)) return false;
         pto2::detail::defer_flush(ctx);
         return true;
     };
-    const bool submitted =
-        simpler::ccu::submit_mission(mission, operation_sequence, parameters, parameter_size, register_ccu_completion);
+    const bool submitted = simpler::ccu::submit_mission(mission, parameters, parameter_size, register_ccu_completion);
     if (!submitted) pto2::detail::defer_error(ctx, SIMPLER_ERROR_ASYNC_COMPLETION_INVALID);
     return submitted;
 }
@@ -172,5 +174,3 @@ save_expected_notification_counter(AsyncCtx &ctx, volatile __gm__ void *counter_
     (void)register_completion_condition(ctx, token);
     pto2::detail::defer_flush(ctx);
 }
-
-#endif  // PTO_ASYNC_KERNEL_API_H

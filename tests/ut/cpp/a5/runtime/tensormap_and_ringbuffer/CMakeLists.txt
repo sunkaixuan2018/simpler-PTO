@@ -17,6 +17,8 @@ macro(a5_tmr_case)
     tmr_case(${ARGV} ARCHS a5)
 endmacro()
 
+a5_tmr_case(test_ccu_completion.cpp NO_OBJS LINK a5_ut_support TIMEOUT 20)
+
 a5_tmr_case(test_ready_queue_profiling.cpp
     NO_OBJS
     SOURCES

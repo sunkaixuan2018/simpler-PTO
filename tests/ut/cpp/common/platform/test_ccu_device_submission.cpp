@@ -10,178 +10,72 @@
  */
 
 #include <gtest/gtest.h>
-
-#include <array>
-#include <cstdint>
-#include <string>
-#include <vector>
-
 #include "platform_comm/ccu/ccu_device_submission.h"
-
 namespace {
-
-struct FakeIo {
-    static uint64_t load_u64(const volatile uint64_t *address) {
-        events.push_back("load");
-        return *address;
-    }
-
-    static void publish(volatile void *address, uint64_t) {
-        if (address == slot_address) {
-            events.push_back("slot");
-        } else if (address == parameter_address) {
-            events.push_back("parameters");
-        } else if (address == trigger_address) {
-            events.push_back("trigger");
-        } else {
-            events.push_back("unknown");
-        }
-    }
-
-    static void
-    reset(volatile SimplerCcuCompletionSlotV1 *slot, volatile void *parameters, volatile uint64_t *trigger) {
-        events.clear();
-        slot_address = slot;
-        parameter_address = parameters;
-        trigger_address = trigger;
-    }
-
-    static inline std::vector<std::string> events;
-    static inline volatile void *slot_address{};
-    static inline volatile void *parameter_address{};
-    static inline volatile void *trigger_address{};
-};
-
-struct MissionImage {
-    alignas(SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT) SimplerCcuCompletionSlotV1 slot{};
-    std::array<uint8_t, 8> parameters{};
-    uint64_t trigger{};
-    SimplerCcuMissionDescriptorV1 mission{};
-
-    explicit MissionImage(uint32_t mission_id) {
-        slot.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
-        slot.struct_size = sizeof(slot);
-        slot.mission_id = mission_id;
-        slot.run_generation = 9;
-
-        mission.abi_version = SIMPLER_CCU_MODULE_ABI_VERSION;
+struct Fixture {
+    alignas(64) uint64_t parameters[2]{};
+    uint64_t ready{}, trigger{}, done{};
+    SimplerCcuMissionDescriptorV2 mission{};
+    Fixture() {
+        mission.abi_version = 2;
         mission.struct_size = sizeof(mission);
-        mission.run_generation = slot.run_generation;
-        mission.mission_id = mission_id;
-        mission.kernel_id = mission_id + 10;
-        mission.group_id = 7;
-        mission.parameter_addr = reinterpret_cast<uint64_t>(parameters.data());
-        mission.parameter_size = parameters.size();
-        mission.completion_slot_addr = reinterpret_cast<uint64_t>(&slot);
-        mission.trigger_gate_addr = reinterpret_cast<uint64_t>(&trigger);
+        mission.run_generation = 7;
+        mission.kernel_id = 3;
+        mission.parameter_alignment = 64;
+        mission.parameter_addr = reinterpret_cast<uint64_t>(parameters);
+        mission.parameter_size = sizeof(parameters);
+        mission.ready = {reinterpret_cast<uint64_t>(&ready), 1};
+        mission.trigger = {reinterpret_cast<uint64_t>(&trigger), 1};
+        mission.done = {reinterpret_cast<uint64_t>(&done), 1};
     }
-
-    void reset_io() { FakeIo::reset(&slot, parameters.data(), &trigger); }
 };
-
-TEST(CcuDeviceSubmission, RegistersBeforePublishingParametersAndTrigger) {
-    MissionImage image(3);
-    image.reset_io();
-    const std::array<uint8_t, 8> parameters{1, 2, 3, 4, 5, 6, 7, 8};
-
-    const bool submitted = simpler::ccu::submit_mission<FakeIo>(
-        &image.mission, 1, parameters.data(), parameters.size(), [](uint64_t address, uint64_t sequence) {
-            FakeIo::events.push_back("register");
-            EXPECT_EQ(address, reinterpret_cast<uint64_t>(FakeIo::slot_address));
-            EXPECT_EQ(sequence, 1U);
-            return true;
-        }
-    );
-
-    EXPECT_TRUE(submitted);
-    EXPECT_EQ(FakeIo::events, (std::vector<std::string>{"load", "register", "slot", "parameters", "trigger"}));
-    EXPECT_EQ(image.parameters, parameters);
-    EXPECT_EQ(image.slot.operation_sequence, 1U);
-    EXPECT_EQ(image.slot.status, SIMPLER_CCU_COMPLETION_PENDING);
-    EXPECT_EQ(image.trigger, simpler::ccu::kCkeTriggerValue);
-}
-
-TEST(CcuDeviceSubmission, RegistrationFailurePublishesNothingAndDoesNotTrigger) {
-    MissionImage image(3);
-    image.reset_io();
-    const std::array<uint8_t, 8> parameters{1, 2, 3, 4, 5, 6, 7, 8};
-
-    EXPECT_FALSE(
-        simpler::ccu::submit_mission<FakeIo>(
-            &image.mission, 1, parameters.data(), parameters.size(), [](uint64_t, uint64_t) {
-                FakeIo::events.push_back("register");
-                return false;
-            }
-        )
-    );
-
-    EXPECT_EQ(FakeIo::events, (std::vector<std::string>{"load", "register"}));
-    EXPECT_EQ(image.parameters, (std::array<uint8_t, 8>{}));
-    EXPECT_EQ(image.slot.operation_sequence, 0U);
-    EXPECT_EQ(image.trigger, 0U);
-}
-
-TEST(CcuDeviceSubmission, RejectsOverlapSequenceJumpAndFailedPredecessor) {
-    MissionImage image(3);
-    image.reset_io();
-    const std::array<uint8_t, 8> parameters{};
-    uint32_t registrations = 0;
-    const auto register_completion = [&](uint64_t, uint64_t) {
-        ++registrations;
+TEST(CcuDeviceSubmission, RegistersDoneBeforeWritingParametersOrTrigger) {
+    Fixture f;
+    const uint64_t input[]{19, 23};
+    ASSERT_TRUE(simpler::ccu::submit_mission(&f.mission, input, sizeof(input), [&](uint64_t address, uint64_t mask) {
+        EXPECT_EQ(address, f.mission.done.address);
+        EXPECT_EQ(mask, 1U);
+        EXPECT_EQ(f.parameters[0], 0U);
+        EXPECT_EQ(f.trigger, 0U);
         return true;
-    };
-
-    EXPECT_FALSE(
-        simpler::ccu::submit_mission<FakeIo>(
-            &image.mission, 2, parameters.data(), parameters.size(), register_completion
-        )
-    );
-    EXPECT_EQ(registrations, 0U);
-
-    image.slot.completed_sequence = 1;
-    image.slot.operation_sequence = 1;
-    image.slot.status = SIMPLER_CCU_COMPLETION_FAILED;
-    image.slot.native_error = -9;
-    EXPECT_FALSE(
-        simpler::ccu::submit_mission<FakeIo>(
-            &image.mission, 2, parameters.data(), parameters.size(), register_completion
-        )
-    );
-    EXPECT_EQ(registrations, 0U);
-    EXPECT_EQ(image.trigger, 0U);
+    }));
+    EXPECT_EQ(f.parameters[0], 19U);
+    EXPECT_EQ(f.parameters[1], 23U);
+    EXPECT_EQ(f.trigger, (uint64_t{1} << 63) | 1);
 }
-
-TEST(CcuDeviceSubmission, IndependentMissionsCanBeOutstandingTogether) {
-    MissionImage mission_a(3);
-    MissionImage mission_b(4);
-    const std::array<uint8_t, 8> parameters_a{1};
-    const std::array<uint8_t, 8> parameters_b{2};
-    std::vector<uint64_t> registered_slots;
-    const auto register_completion = [&](uint64_t address, uint64_t) {
-        registered_slots.push_back(address);
+TEST(CcuDeviceSubmission, RegistrationFailureDoesNotPublishParametersOrTrigger) {
+    Fixture f;
+    const uint64_t input[]{19, 23};
+    EXPECT_FALSE(simpler::ccu::submit_mission(&f.mission, input, sizeof(input), [](uint64_t, uint64_t) {
+        return false;
+    }));
+    EXPECT_EQ(f.parameters[0], 0U);
+    EXPECT_EQ(f.trigger, 0U);
+}
+TEST(CcuDeviceSubmission, ValidatesWorkspaceGenerationAndAmbiguousKernelIds) {
+    Fixture f;
+    SimplerCcuMissionDescriptorV2 missions[]{f.mission, f.mission};
+    missions[1].mission_index = 1;
+    missions[1].kernel_id = 4;
+    SimplerCcuWorkspaceV2 workspace{
+        2,     sizeof(SimplerCcuWorkspaceV2), 2, 2, 7, reinterpret_cast<uint64_t>(missions), sizeof(missions[0]), 0, 91,
+        {0, 0}
+    };
+    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 4), &missions[1]);
+    missions[1].run_generation = 6;
+    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 4), nullptr);
+    missions[1].run_generation = 7;
+    missions[1].kernel_id = 3;
+    EXPECT_EQ(simpler::ccu::find_mission(&workspace, 3), nullptr);
+}
+TEST(CcuDeviceSubmission, RejectsAliasedEventsBeforeRegisteringCompletion) {
+    Fixture f;
+    f.mission.done.address = f.mission.trigger.address;
+    const uint64_t input[]{19, 23};
+    EXPECT_FALSE(simpler::ccu::submit_mission(&f.mission, input, sizeof(input), [](uint64_t, uint64_t) {
+        ADD_FAILURE();
         return true;
-    };
-
-    mission_a.reset_io();
-    ASSERT_TRUE(
-        simpler::ccu::submit_mission<FakeIo>(
-            &mission_a.mission, 1, parameters_a.data(), parameters_a.size(), register_completion
-        )
-    );
-    mission_b.reset_io();
-    ASSERT_TRUE(
-        simpler::ccu::submit_mission<FakeIo>(
-            &mission_b.mission, 1, parameters_b.data(), parameters_b.size(), register_completion
-        )
-    );
-
-    ASSERT_EQ(registered_slots.size(), 2U);
-    EXPECT_EQ(registered_slots[0], reinterpret_cast<uint64_t>(&mission_a.slot));
-    EXPECT_EQ(registered_slots[1], reinterpret_cast<uint64_t>(&mission_b.slot));
-    EXPECT_EQ(mission_a.slot.completed_sequence, 0U);
-    EXPECT_EQ(mission_b.slot.completed_sequence, 0U);
-    EXPECT_EQ(mission_a.trigger, simpler::ccu::kCkeTriggerValue);
-    EXPECT_EQ(mission_b.trigger, simpler::ccu::kCkeTriggerValue);
+    }));
+    EXPECT_EQ(f.trigger, 0U);
 }
-
 }  // namespace

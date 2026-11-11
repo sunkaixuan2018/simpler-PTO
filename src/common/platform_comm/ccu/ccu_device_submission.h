@@ -10,15 +10,11 @@
  */
 
 #pragma once
-
-#include <atomic>
-#include <cstddef>
 #include <cstdint>
-
 #include "ccu_native_abi.h"
 
 #if defined(__CCE_AICORE__)
-#define SIMPLER_CCU_SUBMIT_DEVICE [aicore]
+#define SIMPLER_CCU_SUBMIT_DEVICE __aicore__
 #define SIMPLER_CCU_SUBMIT_GM __gm__
 #else
 #define SIMPLER_CCU_SUBMIT_DEVICE
@@ -26,23 +22,30 @@
 #endif
 
 namespace simpler::ccu {
-
-inline constexpr uint64_t kCkeTriggerMask = 1;
-inline constexpr uint64_t kCkeTriggerValue = (uint64_t{1} << 63) | kCkeTriggerMask;
+inline SIMPLER_CCU_SUBMIT_DEVICE const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *
+find_mission(const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuWorkspaceV2 *workspace, uint32_t kernel_id) {
+    if (workspace == nullptr || workspace->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
+        workspace->struct_size != sizeof(*workspace) ||
+        workspace->layout_version != SIMPLER_CCU_WORKSPACE_LAYOUT_VERSION || workspace->run_generation == 0 ||
+        workspace->missions_addr == 0 || workspace->missions_addr % alignof(SimplerCcuMissionDescriptorV2) != 0 ||
+        workspace->mission_count == 0 || workspace->mission_descriptor_size != sizeof(SimplerCcuMissionDescriptorV2) ||
+        workspace->flags != 0 || workspace->reserved[0] != 0 || workspace->reserved[1] != 0)
+        return nullptr;
+    const auto *missions = reinterpret_cast<const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *>(
+        workspace->missions_addr
+    );
+    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *found = nullptr;
+    for (uint32_t i = 0; i < workspace->mission_count; ++i) {
+        if (missions[i].kernel_id != kernel_id) continue;
+        if (found != nullptr || missions[i].mission_index != i ||
+            missions[i].run_generation != workspace->run_generation)
+            return nullptr;
+        found = &missions[i];
+    }
+    return found;
+}
 
 struct DeviceSubmissionIo {
-    static SIMPLER_CCU_SUBMIT_DEVICE uint64_t load_u64(const volatile SIMPLER_CCU_SUBMIT_GM uint64_t *address) {
-#if defined(__CCE_AICORE__)
-        return *address;
-#elif defined(_MSC_VER)
-        const uint64_t value = *address;
-        std::atomic_thread_fence(std::memory_order_acquire);
-        return value;
-#else
-        return __atomic_load_n(address, __ATOMIC_ACQUIRE);
-#endif
-    }
-
     static SIMPLER_CCU_SUBMIT_DEVICE void publish(volatile SIMPLER_CCU_SUBMIT_GM void *address, uint64_t bytes) {
 #if defined(__CCE_AICORE__)
         (void)bytes;
@@ -58,52 +61,36 @@ struct DeviceSubmissionIo {
 
 template <typename Io = DeviceSubmissionIo, typename RegisterCompletion>
 SIMPLER_CCU_SUBMIT_DEVICE bool submit_mission(
-    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV1 *mission, uint64_t operation_sequence,
-    const void *parameters, uint64_t parameter_size, RegisterCompletion &&register_completion
+    const volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuMissionDescriptorV2 *mission, const void *parameters,
+    uint64_t parameter_size, RegisterCompletion &&register_completion
 ) {
-    if (mission == nullptr || operation_sequence == 0 || mission->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
-        mission->struct_size != sizeof(SimplerCcuMissionDescriptorV1) || mission->run_generation == 0 ||
-        mission->parameter_addr == 0 || mission->completion_slot_addr == 0 || mission->trigger_gate_addr == 0 ||
-        mission->parameter_size != parameter_size || (parameter_size != 0 && parameters == nullptr) ||
-        mission->reserved != 0)
+    if (mission == nullptr || mission->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION ||
+        mission->struct_size != sizeof(*mission) || mission->run_generation == 0 || mission->flags != 0 ||
+        mission->reserved0 != 0 || mission->parameter_addr == 0 || mission->parameter_alignment == 0 ||
+        (mission->parameter_alignment & (mission->parameter_alignment - 1)) != 0 ||
+        mission->parameter_addr % mission->parameter_alignment != 0 || mission->parameter_size != parameter_size ||
+        (parameter_size != 0 && parameters == nullptr))
         return false;
-
-    auto *slot = reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM SimplerCcuCompletionSlotV1 *>(
-        static_cast<uintptr_t>(mission->completion_slot_addr)
-    );
-    if (reinterpret_cast<uintptr_t>(slot) % SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT != 0 ||
-        slot->abi_version != SIMPLER_CCU_MODULE_ABI_VERSION || slot->struct_size != sizeof(*slot) ||
-        slot->mission_id != mission->mission_id || slot->run_generation != mission->run_generation)
+    const uint64_t addresses[]{mission->ready.address, mission->trigger.address, mission->done.address};
+    if (mission->ready.mask != SIMPLER_CCU_EVENT_MASK || mission->trigger.mask != SIMPLER_CCU_EVENT_MASK ||
+        mission->done.mask != SIMPLER_CCU_EVENT_MASK)
         return false;
-
-    const uint64_t completed_sequence = Io::load_u64(&slot->completed_sequence);
-    if (completed_sequence != operation_sequence - 1) return false;
-    if (completed_sequence != 0 && (slot->operation_sequence != completed_sequence ||
-                                    slot->status != SIMPLER_CCU_COMPLETION_SUCCEEDED || slot->native_error != 0))
-        return false;
-
-    if (!register_completion(mission->completion_slot_addr, operation_sequence)) return false;
-
-    slot->operation_sequence = operation_sequence;
-    slot->status = SIMPLER_CCU_COMPLETION_PENDING;
-    slot->native_error = 0;
-    Io::publish(slot, offsetof(SimplerCcuCompletionSlotV1, completed_sequence));
-
-    auto *destination =
-        reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM uint8_t *>(static_cast<uintptr_t>(mission->parameter_addr));
+    for (uint32_t i = 0; i < 3; ++i) {
+        if (addresses[i] == 0 || addresses[i] % alignof(uint64_t) != 0) return false;
+        for (uint32_t j = 0; j < i; ++j)
+            if (addresses[i] == addresses[j]) return false;
+    }
+    if (!register_completion(mission->done.address, mission->done.mask)) return false;
+    auto *destination = reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM uint8_t *>(mission->parameter_addr);
     const auto *source = static_cast<const uint8_t *>(parameters);
     for (uint64_t i = 0; i < parameter_size; ++i)
         destination[i] = source[i];
     Io::publish(destination, parameter_size);
-
-    auto *trigger =
-        reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM uint64_t *>(static_cast<uintptr_t>(mission->trigger_gate_addr));
-    *trigger = kCkeTriggerValue;
+    auto *trigger = reinterpret_cast<volatile SIMPLER_CCU_SUBMIT_GM uint64_t *>(mission->trigger.address);
+    *trigger = (uint64_t{1} << 63) | mission->trigger.mask;
     Io::publish(trigger, sizeof(*trigger));
     return true;
 }
-
 }  // namespace simpler::ccu
-
 #undef SIMPLER_CCU_SUBMIT_DEVICE
 #undef SIMPLER_CCU_SUBMIT_GM

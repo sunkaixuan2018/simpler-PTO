@@ -31,7 +31,7 @@ public:
     struct Observation {
         std::string operation;
         const void *entry{};
-        SimplerCcuRegistrationBindingV1 binding{};
+        SimplerCcuRegistrationBindingV2 binding{};
         std::string name;
         uint64_t program_handle{};
     };
@@ -87,7 +87,7 @@ private:
         ASSERT_NE(arguments, nullptr);
         ASSERT_NE(arguments[0], nullptr);
         observations.push_back(
-            {std::move(operation), entry, *static_cast<const SimplerCcuRegistrationBindingV1 *>(arguments[0]), name}
+            {std::move(operation), entry, *static_cast<const SimplerCcuRegistrationBindingV2 *>(arguments[0]), name}
         );
     }
 
@@ -95,25 +95,26 @@ private:
     uint64_t next_program{100};
 };
 
-NativeKernelDefinition kernel(uint32_t kernel_id, uint32_t group_id, uintptr_t entry) {
+NativeKernelDefinition kernel(uint32_t kernel_id, uint32_t, uintptr_t entry) {
     NativeKernelDefinition definition;
-    definition.record.struct_size = sizeof(SimplerCcuKernelRecordV1);
+    definition.record.struct_size = sizeof(SimplerCcuKernelRecordV2);
     definition.record.kernel_id = kernel_id;
-    definition.record.group_id = group_id;
     definition.record.task_argument_layout_version = SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION;
-    definition.record.capability_flags = SIMPLER_CCU_KERNEL_CAP_COMPLETION_SLOT | SIMPLER_CCU_KERNEL_CAP_STOP_GATE;
+    definition.record.capability_flags = SIMPLER_CCU_KERNEL_CAP_THREE_EVENTS;
     definition.record.registration_binding_layout_version = SIMPLER_CCU_REGISTRATION_BINDING_LAYOUT_VERSION;
-    definition.record.registration_binding_size = sizeof(SimplerCcuRegistrationBindingV1);
+    definition.record.registration_binding_size = sizeof(SimplerCcuRegistrationBindingV2);
     definition.record.registration_argument_count = SIMPLER_CCU_REGISTRATION_ARGUMENT_COUNT;
     definition.record.task_argument_count = SIMPLER_CCU_TASK_ARGUMENT_COUNT;
     definition.entry = reinterpret_cast<const void *>(entry);
     return definition;
 }
 
-DomainRegistrationRequest request() { return {91, 7, 1, 2, 0xabc, "test_ccu", {{3, 0x301, 0x302}, {4, 0x401, 0x402}}}; }
+DomainRegistrationRequest request() {
+    return {91, 1, 2, 0xabc, "test_ccu", {{3, 0x300, 0x301, 0x302, 0}, {4, 0x400, 0x401, 0x402, 1}}};
+}
 
 TEST(CcuDomainRegistration, QueriesBeforeOneRegistrationTransactionAndBindsEachMission) {
-    const std::vector<NativeKernelDefinition> kernels{kernel(3, 7, 0x103), kernel(8, 9, 0x108), kernel(4, 7, 0x104)};
+    const std::vector<NativeKernelDefinition> kernels{kernel(3, 7, 0x103), kernel(4, 9, 0x104)};
     FakeSdk sdk;
 
     const auto registered = simpler::ccu::register_domain_kernels(kernels, request(), sdk);
@@ -138,8 +139,8 @@ TEST(CcuDomainRegistration, QueriesBeforeOneRegistrationTransactionAndBindsEachM
     EXPECT_EQ(sdk.observations[0].binding.rank_count, 2U);
     EXPECT_EQ(sdk.observations[0].binding.channel_handle, 0xabcU);
     EXPECT_EQ(sdk.observations[0].binding.trigger_event_handle, 0x301U);
-    EXPECT_EQ(sdk.observations[0].binding.stop_event_handle, 0x302U);
-    EXPECT_EQ(sdk.observations[4].name, "test_ccu_d91_g7_k3_r1");
+    EXPECT_EQ(sdk.observations[0].binding.done_event_handle, 0x302U);
+    EXPECT_EQ(sdk.observations[4].name, "test_ccu_d91_k3_r1_m0");
 }
 
 TEST(CcuDomainRegistration, QueryFailureDoesNotStartRegistration) {

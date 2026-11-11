@@ -36,21 +36,21 @@ public:
 class FakeRunSdk final : public RunLifecycleSdk {
 public:
     int launch(uint64_t, const uint64_t *, uint32_t, uint64_t) override { return 0; }
-    int read_control(uint64_t, SimplerCcuRunControlV1 *) override { return 0; }
-    int request_stop(uint64_t) override { return 0; }
-    int wake_stop(uint64_t, uint64_t) override { return 0; }
+    int poll_ready_event(uint64_t, uint64_t, bool *ready) override {
+        *ready = true;
+        return 0;
+    }
     int query_stream(uint64_t, StreamState *) override { return 0; }
     int abort_stream(uint64_t) override { return 0; }
 };
 
-MissionRunResources mission(uint64_t generation) {
+MissionRunResources mission(uint64_t) {
     MissionRunResources value{};
     value.mission_id = 1;
     value.program_handle = 101;
     value.stream_handle = 11;
-    value.launch_arguments = {
-        SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION, generation, 1, 0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000, 0
-    };
+    value.launch_arguments = {SIMPLER_CCU_TASK_ARGUMENT_LAYOUT_VERSION, 0x1000, 0x2000, 0};
+    value.ready_event = {0x3000, SIMPLER_CCU_EVENT_MASK};
     return value;
 }
 

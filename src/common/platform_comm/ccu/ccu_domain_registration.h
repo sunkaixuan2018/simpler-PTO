@@ -22,13 +22,14 @@ namespace simpler::ccu {
 
 struct MissionRegistrationResources {
     uint32_t kernel_id{};
+    uint64_t ready_event_handle{};
     uint64_t trigger_event_handle{};
-    uint64_t stop_event_handle{};
+    uint64_t done_event_handle{};
+    uint32_t mission_index{};
 };
 
 struct DomainRegistrationRequest {
     uint64_t domain_id{};
-    uint32_t group_id{};
     uint32_t rank_id{};
     uint32_t rank_count{};
     uint64_t channel_handle{};
@@ -38,7 +39,7 @@ struct DomainRegistrationRequest {
 
 struct RegisteredKernel {
     uint32_t kernel_id{};
-    uint32_t group_id{};
+    uint32_t mission_index{};
     uint64_t program_handle{};
 };
 

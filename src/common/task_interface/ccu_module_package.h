@@ -21,7 +21,7 @@
 
 inline constexpr uint32_t CCU_MODULE_PACKAGE_MAGIC = 0x55434353U;
 inline constexpr uint32_t CCU_MODULE_PACKAGE_VERSION = 1U;
-inline constexpr uint32_t CCU_MODULE_ABI_VERSION = 1U;
+inline constexpr uint32_t CCU_MODULE_ABI_VERSION = 2U;
 inline constexpr uint32_t CCU_MAX_MODULES = 4096U;
 
 struct CcuModulePackageHeader {

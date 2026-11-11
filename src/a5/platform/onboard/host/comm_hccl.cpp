@@ -117,6 +117,8 @@ struct DomainAllocation {
     std::unique_ptr<simpler::ccu::DomainCcuOwner> ccu;
     simpler::ccu::HcommDomainSession *ccu_session = nullptr;
     std::vector<simpler::ccu::HcommPreparedMission> ccu_missions;
+    std::vector<uint8_t> ccu_package;
+    simpler::ccu::ExpectedBuildIdentity ccu_build_identity{};
     std::vector<uint32_t> rank_ids;
     HcclComm urma_comm = nullptr;
     std::unique_ptr<pto::comm::urma::UrmaWorkspaceManager> urma_workspace;
@@ -2099,25 +2101,40 @@ extern "C" int comm_alloc_host_domain_windows(
 
 extern "C" int comm_prepare_domain_ccu(
     CommHandle h, uint64_t allocation_id, const void *module_package, size_t module_package_size,
-    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32], uint32_t group_id
+    const uint8_t sdk_build_id[32], const uint8_t pto_isa_build_id[32]
 ) try {
     if (h == nullptr || module_package == nullptr || module_package_size == 0 || sdk_build_id == nullptr ||
-        pto_isa_build_id == nullptr || group_id == SIMPLER_CCU_INVALID_GROUP_ID)
+        pto_isa_build_id == nullptr)
         return -1;
     auto found = h->domain_allocations.find(allocation_id);
-    if (found == h->domain_allocations.end() || !found->second->initialized || found->second->ccu != nullptr ||
-        found->second->rank_ids.empty())
+    if (found == h->domain_allocations.end() || !found->second->initialized || found->second->rank_ids.empty())
         return -1;
 
     simpler::ccu::ExpectedBuildIdentity identity{};
     std::copy_n(sdk_build_id, identity.sdk.size(), identity.sdk.begin());
     std::copy_n(pto_isa_build_id, identity.pto_isa.size(), identity.pto_isa.begin());
     auto modules = unpack_ccu_modules(module_package, module_package_size);
+    auto &allocation = *found->second;
+    const auto *raw_package = static_cast<const uint8_t *>(module_package);
+    const std::vector<uint8_t> package(raw_package, raw_package + module_package_size);
+    if (allocation.ccu) {
+        if (!allocation.ccu->drained()) return COMM_RECLAMATION_UNCONFIRMED;
+        if (allocation.ccu_package == package && allocation.ccu_build_identity.sdk == identity.sdk &&
+            allocation.ccu_build_identity.pto_isa == identity.pto_isa)
+            return 0;
+        if (!allocation.ccu->close()) return COMM_RECLAMATION_UNCONFIRMED;
+        allocation.ccu.reset();
+        allocation.ccu_session = nullptr;
+        allocation.ccu_missions.clear();
+        allocation.ccu_package.clear();
+    }
     found->second->ccu_missions = simpler::ccu::prepare_hcomm_ccu_domain(
-        h->hccl_comm, allocation_id, found->second->rank_ids, static_cast<uint32_t>(found->second->rank), group_id,
-        identity, modules, "simpler_callable", found->second->ccu, found->second->ccu_session
+        h->hccl_comm, allocation_id, found->second->rank_ids, static_cast<uint32_t>(found->second->rank), identity,
+        modules, "simpler_callable", found->second->ccu, found->second->ccu_session
     );
     if (!found->second->ccu || found->second->ccu_missions.empty()) return -1;
+    allocation.ccu_package = package;
+    allocation.ccu_build_identity = identity;
     return 0;
 } catch (const std::exception &error) {
     LOG_ERROR(
@@ -2145,7 +2162,7 @@ comm_control_domain_ccu(CommHandle h, uint64_t allocation_id, uint32_t operation
         const uint64_t table = allocation.ccu_session->begin(*allocation.ccu, allocation.ccu_missions, generation);
         const uint64_t metadata[]{table, allocation.ccu_missions.size()};
         const auto target =
-            reinterpret_cast<uintptr_t>(allocation.device_ctx) + offsetof(CommContext, ccu_missions_addr);
+            reinterpret_cast<uintptr_t>(allocation.device_ctx) + offsetof(CommContext, ccu_workspace_addr);
         if (aclrtMemcpy(
                 reinterpret_cast<void *>(target), sizeof(metadata), metadata, sizeof(metadata),
                 ACL_MEMCPY_HOST_TO_DEVICE

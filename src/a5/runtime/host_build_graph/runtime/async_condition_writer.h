@@ -73,8 +73,8 @@ inline __aicore__ bool valid(const AsyncWriter &writer) {
 inline __aicore__ bool token_valid(const CompletionToken &token) {
     if (token.addr == 0) return false;
     if (token.engine == COMPLETION_ENGINE_CCU && token.completion_type == COMPLETION_TYPE_CCU)
-        return token.addr % SIMPLER_CCU_COMPLETION_SLOT_ALIGNMENT == 0 && token.expected_value == 0 &&
-               token.backend_cookie != 0;
+        return token.addr % alignof(uint64_t) == 0 && token.expected_value == 0 &&
+               token.backend_cookie == SIMPLER_CCU_EVENT_MASK;
     if (token.engine != COMPLETION_ENGINE_SDMA) return false;
     if (token.completion_type == COMPLETION_TYPE_COUNTER)
         return token.addr % sizeof(uint32_t) == 0 && token.backend_cookie == 0 && token.expected_value <= INT32_MAX;

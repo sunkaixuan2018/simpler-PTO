@@ -57,3 +57,11 @@ TEST(CcuModulePackageTest, ChipCallableRoundTripsAndValidatesModulePackage) {
     ++corrupt_callable->ccu_modules_offset_;
     EXPECT_THROW(validate_chip_callable_buffer(corrupt.data(), corrupt.size()), std::invalid_argument);
 }
+
+TEST(CcuModulePackageTest, PackagesV2AndRejectsOldModuleAbi) {
+    auto packed = pack_ccu_modules({{1, 2, 3}});
+    auto *record = reinterpret_cast<CcuModulePackageRecord *>(packed.data() + sizeof(CcuModulePackageHeader));
+    ASSERT_EQ(record->abi_version, 2U);
+    record->abi_version = 1;
+    EXPECT_THROW(unpack_ccu_modules(packed.data(), packed.size()), std::invalid_argument);
+}

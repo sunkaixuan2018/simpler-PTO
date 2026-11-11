@@ -11,14 +11,22 @@
 
 #include <cstdint>
 
-extern "C" __global__[aicore] void simpler_ccu_event_trigger(uint64_t gate_address, uint64_t wake_value) {
+extern "C" __global__[aicore] void
+simpler_ccu_event_trigger(uint64_t gate_address, uint64_t value, uint64_t result_address) {
     auto *gate = reinterpret_cast<volatile __gm__ uint64_t *>(gate_address);
     auto *cache_line = reinterpret_cast<__gm__ void *>(gate_address);
-    __asm__ __volatile__("" ::: "memory");
     dcci(cache_line, cache_line_t::ENTIRE_DATA_CACHE);
-    *gate = wake_value;
-    dcci(cache_line, cache_line_t::ENTIRE_DATA_CACHE);
+    uint64_t result = *gate;
+    if (value != UINT64_MAX) {
+        *gate = value;
+        dcci(cache_line, cache_line_t::ENTIRE_DATA_CACHE);
+        dsb(DSB_DDR);
+        result = *gate;
+    }
+    if (result_address != 0) {
+        *reinterpret_cast<volatile __gm__ uint64_t *>(result_address) = result;
+        dcci(reinterpret_cast<__gm__ void *>(result_address), cache_line_t::ENTIRE_DATA_CACHE);
+    }
     dsb(DSB_DDR);
     pipe_barrier(PIPE_ALL);
-    __asm__ __volatile__("" ::: "memory");
 }

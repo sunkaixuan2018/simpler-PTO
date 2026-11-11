@@ -28,7 +28,8 @@ _ROOT = Path(__file__).resolve().parent
 _RUNTIME = "tensormap_and_ringbuffer"
 
 
-def _build_callable(tmp_path):
+def _build_callable(tmp_path, variant=0):
+    tmp_path.mkdir(parents=True, exist_ok=True)
     sdk = Path(os.environ["ASCEND_HOME_PATH"])
     arch = sdk / "aarch64-linux"
     common = Path(__file__).resolve().parents[5] / "src/common"
@@ -38,6 +39,7 @@ def _build_callable(tmp_path):
     identities = tmp_path / "identities.cpp"
     identities.write_text(
         "#include <cstdint>\n"
+        f"extern const uint32_t ccu_test_variant = {variant};\n"
         f"extern const uint8_t ccu_test_sdk_identity[32] = {{{','.join(map(str, sdk_identity))}}};\n"
         f"extern const uint8_t ccu_test_isa_identity[32] = {{{','.join(map(str, isa_identity))}}};\n"
     )
@@ -76,27 +78,24 @@ def _build_callable(tmp_path):
             extra_include_dirs=compiler.get_orchestration_include_dirs(_RUNTIME),
         )
         children.append((index, CoreCallable.build(signature=signatures[index], binary=extract_text_section(binary))))
-    return (
-        ChipCallable.build(
-            signature=[D.OUT, D.OUT, D.OUT, D.IN, D.IN],
-            func_name="ccu_orchestration",
-            config_name="ccu_orchestration_config",
-            binary=orchestration,
-            children=children,
-            ccu_modules=[module.read_bytes()],
-        ),
-        sdk_identity,
-        isa_identity,
+    return ChipCallable.build(
+        signature=[D.OUT, D.OUT, D.OUT, D.IN, D.IN],
+        func_name="ccu_orchestration",
+        config_name="ccu_orchestration_config",
+        binary=orchestration,
+        children=children,
+        ccu_modules=[module.read_bytes()],
     )
 
 
 @pytest.mark.platforms(["a5"])
 @pytest.mark.runtime(_RUNTIME)
 @pytest.mark.device_count(2)
-def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
+@pytest.mark.parametrize("replace_callable", [False, True])
+def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request, replace_callable):
     rounds = request.config.getoption("--rounds")
     assert rounds > 0
-    target, sdk_id, isa_id = _build_callable(tmp_path)
+    target = _build_callable(tmp_path)
     worker = Worker(
         level=3,
         platform=st_platform,
@@ -105,6 +104,9 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
         num_sub_workers=0,
     )
     callable_handle = worker.register(target)
+    replacement_handle = (
+        worker.register(_build_callable(tmp_path / "replacement", variant=1)) if replace_callable else callable_handle
+    )
     retained = []
     try:
         worker.init()
@@ -116,10 +118,6 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
                 members=[0, 1],
                 window_size=4 * 1024 * 1024,
                 retain_after_run=True,
-                ccu_callable=callable_handle,
-                ccu_group_id=7,
-                ccu_sdk_build_id=sdk_id,
-                ccu_pto_isa_build_id=isa_id,
             )
             if retained:
                 assert domain is retained[0]
@@ -131,7 +129,8 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
                     args.add_tensor(output.tensor((8,), DataType.UINT64), TensorArgType.OUTPUT_EXISTING)
                 args.add_scalar(domain.device_context(rank))
                 args.add_scalar(round_index * 100 + rank * 10)
-                orch.submit_next_level(callable_handle, args, config, worker=rank)
+                selected = replacement_handle if round_index > max(1, rounds // 2) else callable_handle
+                orch.submit_next_level(selected, args, config, worker=rank)
 
         for round_index in range(1, rounds + 1):
             worker.run(run_round)
@@ -147,7 +146,7 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
                     f"CCU round={round_index}/{rounds}: B-before-A, dynamic parameters and confirmed stop passed",
                     flush=True,
                 )
-        # No mission is triggered: normal stop must wake both EventWait loops.
+        # Merely borrowing a retained domain does not launch CCU work.
         worker.run(lambda orch, _args, _cfg: orch.get_domain("native_ccu"))
         retained[0].release()
         assert retained[0].freed
@@ -159,7 +158,7 @@ def test_two_missions_b_before_a(st_platform, st_device_ids, tmp_path, request):
 @pytest.mark.runtime(_RUNTIME)
 @pytest.mark.device_count(2)
 def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_device_ids, tmp_path, monkeypatch):
-    target, sdk_id, isa_id = _build_callable(tmp_path)
+    target = _build_callable(tmp_path)
     worker = Worker(
         level=3,
         platform=st_platform,
@@ -197,10 +196,6 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
                 members=[0, 1],
                 window_size=4 * 1024 * 1024,
                 retain_after_run=True,
-                ccu_callable=callable_handle,
-                ccu_group_id=7,
-                ccu_sdk_build_id=sdk_id,
-                ccu_pto_isa_build_id=isa_id,
             )
             retained.append(domain)
             for rank in range(2):
@@ -208,7 +203,7 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
                 for output in outputs[rank]:
                     args.add_tensor(output.tensor((8,), DataType.UINT64), TensorArgType.OUTPUT_EXISTING)
                 args.add_scalar(domain.device_context(rank))
-                # B adds two: zero explicitly requests native error 2971.
+                # B adds two: zero requests a missing done Event.
                 args.add_scalar((1 << 64) - 2)
                 orch.submit_next_level(callable_handle, args, config, worker=rank)
 
@@ -220,11 +215,23 @@ def test_mission_failure_closes_admission_and_retains_domain(st_platform, st_dev
         for device in st_device_ids[:2]:
             logs = list(log_root.glob(f"debug/device-{device}/device-*.log"))
             evidence = "\n".join(log.read_text(errors="replace") for log in logs)
-            assert "CCU completion failed:" in evidence and "native_error=2971" in evidence
+            assert any(
+                all(
+                    field in line
+                    for field in (
+                        "ASYNC_WAIT reason=scheduler_timeout",
+                        "normal_done=1",
+                        "engine=CCU type=4",
+                        "cookie=0x1",
+                        "retired=0",
+                    )
+                )
+                for line in evidence.splitlines()
+            ), "missing evidence of a completed AIV task blocked on the CCU done Event"
         with pytest.raises(RuntimeError):
             worker.run(lambda *_: None)
         assert not retained[0].freed
-        print("CCU native failure observed; admission closed and domain retained", flush=True)
+        print("CCU missing done observed; admission closed and domain retained", flush=True)
     finally:
         exit_records = bytearray()
         try:
