@@ -1,5 +1,6 @@
 import logging
 import os
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -130,15 +131,8 @@ class RuntimeCompiler:
 
     @staticmethod
     def _find_executable(name: str) -> bool:
-        """Check if an executable exists (either as absolute path or in PATH)."""
-        if os.path.isfile(name) and os.access(name, os.X_OK):
-            return True
-        result = subprocess.run(
-            ["which", name],
-            capture_output=True,
-            timeout=1
-        )
-        return result.returncode == 0
+        """Check for an executable path or look it up in PATH."""
+        return shutil.which(name) is not None
 
     def compile(
         self,
@@ -159,7 +153,7 @@ class RuntimeCompiler:
 
         Raises:
             ValueError: If target platform is invalid
-            RuntimeError: If CMake or Make fails
+            RuntimeError: If CMake configuration or build fails
             FileNotFoundError: If output binary not found
         """
         if target_platform == "aicore":
@@ -189,13 +183,13 @@ class RuntimeCompiler:
         platform: str,
         step_name: str,
     ) -> None:
-        """Run a single build step (CMake or Make) with logging and error handling.
+        """Run a CMake step with logging and error handling.
 
         Args:
             cmd: Command and arguments
             cwd: Working directory
-            platform: Platform name for logging
-            step_name: Step name for logging (e.g., "CMake", "Make")
+            platform: Target name for logging
+            step_name: Step name for logging
 
         Raises:
             RuntimeError: If the step fails or executable not found
@@ -206,7 +200,7 @@ class RuntimeCompiler:
 
         try:
             result = subprocess.run(
-                cmd, cwd=cwd, check=False, capture_output=True, text=True
+                cmd, cwd=cwd, check=False, capture_output=True, text=True, errors="replace"
             )
 
             if result.stdout and logger.isEnabledFor(10):  # DEBUG = 10
@@ -217,12 +211,18 @@ class RuntimeCompiler:
                 logger.debug(result.stderr)
 
             if result.returncode != 0:
-                logger.error(f"[{platform}] {step_name} failed: {result.stderr}")
-                raise RuntimeError(
-                    f"{step_name} failed for {platform}: {result.stderr}"
+                diagnostics = "\n".join(
+                    output.strip() for output in (result.stdout, result.stderr) if output.strip()
                 )
-        except FileNotFoundError:
-            raise RuntimeError(f"{step_name} not found. Please install {step_name}.")
+                message = f"{step_name} failed for {platform} (exit {result.returncode})"
+                if diagnostics:
+                    message = f"{message}:\n{diagnostics}"
+                logger.error("[%s] %s", platform, message)
+                raise RuntimeError(message)
+        except OSError as error:
+            raise RuntimeError(
+                f"Could not start {step_name} for {platform} using {cmd[0]}: {error}"
+            ) from error
 
     def _run_compilation(
         self,
@@ -232,7 +232,7 @@ class RuntimeCompiler:
         platform: str = "AICore"
     ) -> bytes:
         """
-        Run CMake configuration and Make build in a temporary directory.
+        Run CMake configuration and build in a temporary directory.
 
         Args:
             cmake_source_dir: Path to CMake source directory
@@ -244,26 +244,23 @@ class RuntimeCompiler:
             Compiled binary data as bytes
 
         Raises:
-            RuntimeError: If CMake or Make fails
+            RuntimeError: If CMake configuration or build fails
             FileNotFoundError: If output binary not found
         """
-        with tempfile.TemporaryDirectory(prefix=f"{platform.lower()}_build_", dir="/tmp") as build_dir:
+        with tempfile.TemporaryDirectory(prefix=f"{platform.lower()}_build_") as build_dir:
             cmake_cmd = ["cmake", cmake_source_dir] + cmake_args
             self._run_build_step(cmake_cmd, build_dir, platform, "CMake configuration")
 
-            make_cmd = ["make", f"-j{min(multiprocessing.cpu_count(), 32)}", "VERBOSE=1"]
-            self._run_build_step(make_cmd, build_dir, platform, "Make build")
+            build_cmd = ["cmake", "--build", ".", "--config", "Release", "--verbose"]
+            if "CMAKE_BUILD_PARALLEL_LEVEL" not in os.environ:
+                build_cmd.extend(["--parallel", str(min(multiprocessing.cpu_count(), 32))])
+            self._run_build_step(build_cmd, build_dir, platform, "CMake build")
 
-            # Read the compiled binary
-            binary_path = os.path.join(build_dir, binary_name)
-            if not os.path.isfile(binary_path):
-                raise FileNotFoundError(
-                    f"Compiled binary not found: {binary_path}. "
-                    f"Expected output file name: {binary_name}"
-                )
+            paths = (Path(build_dir) / binary_name, Path(build_dir) / "Release" / binary_name)
+            for path in paths:
+                if path.is_file():
+                    return path.read_bytes()
 
-            with open(binary_path, "rb") as f:
-                binary_data = f.read()
-
-        return binary_data
+            expected = ", ".join(str(path) for path in paths)
+            raise FileNotFoundError(f"Compiled binary {binary_name} not found. Checked: {expected}")
 
