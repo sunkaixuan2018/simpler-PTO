@@ -44,7 +44,6 @@ Golden.py interface:
     __outputs__ = ["out_f"]  # Explicit output names (or use 'out_' prefix)
 """
 
-import importlib.util
 import logging
 import os
 import sys
@@ -54,6 +53,11 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
+
+if __package__:
+    from .example_config import get_golden_cases, load_module_from_path
+else:
+    from example_config import get_golden_cases, load_module_from_path
 
 logger = logging.getLogger(__name__)
 
@@ -95,17 +99,6 @@ def _to_torch(tensor) -> torch.Tensor:
         import numpy as np
         arr = np.asarray(tensor)
         return torch.from_numpy(arr)
-
-
-def _load_module_from_path(module_path: Path, module_name: str):
-    """Dynamically load a Python module from file path."""
-    spec = importlib.util.spec_from_file_location(module_name, module_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load module from {module_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    return module
 
 
 def _get_project_root() -> Path:
@@ -369,8 +362,7 @@ class CodeRunner:
         self.orchestration = self._kernel_config.ORCHESTRATION
 
         # Extract golden configuration — determine which cases to run
-        all_cases = getattr(self._golden_module, 'ALL_CASES', {"Default": {}})
-        default_case = getattr(self._golden_module, 'DEFAULT_CASE', "Default")
+        all_cases, default_case = get_golden_cases(self._golden_module)
 
         if run_all_cases:
             self.params_list = [{"name": name, **params} for name, params in all_cases.items()]
@@ -404,14 +396,14 @@ class CodeRunner:
                 f"kernel_config.py not found in {self.kernels_dir}\n"
                 f"Expected: {config_path}"
             )
-        return _load_module_from_path(config_path, f"kernel_config_{id(self)}")
+        return load_module_from_path(config_path, f"kernel_config_{id(self)}")
 
     def _load_golden_module(self):
         """Load golden.py script."""
         if not self.golden_path.exists():
             raise FileNotFoundError(f"Golden script not found: {self.golden_path}")
 
-        module = _load_module_from_path(self.golden_path, f"golden_{id(self)}")
+        module = load_module_from_path(self.golden_path, f"golden_{id(self)}")
 
         # Validate required functions
         if not hasattr(module, 'generate_inputs'):
@@ -934,7 +926,7 @@ class PTOCompiler:
         self.kernels_dir = Path(kernels_dir).resolve()
         self.platform = platform
         self.project_root = _get_project_root()
-        self._kernel_config = _load_module_from_path(
+        self._kernel_config = load_module_from_path(
             self.kernels_dir / "kernel_config.py", f"kernel_config_compiler_{id(self)}"
         )
         self.kernels = self._kernel_config.KERNELS
