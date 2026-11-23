@@ -19,6 +19,23 @@ sys.path.insert(0, str(PROJECT_ROOT / "python"))
 class TestRuntimeBuilderDiscovery:
     """Test runtime discovery from src/runtime/ subdirectories."""
 
+    @patch("runtime_builder.KernelCompiler")
+    @patch("runtime_builder.RuntimeCompiler")
+    def test_compilers_are_initialized_independently_on_demand(self, runtime, kernel):
+        from runtime_builder import RuntimeBuilder
+
+        builder = RuntimeBuilder(platform="a2a3")
+        assert "host_build_graph" in builder.list_runtimes()
+        runtime.get_instance.assert_not_called()
+        kernel.assert_not_called()
+
+        assert builder.get_runtime_compiler() is builder.get_runtime_compiler()
+        runtime.get_instance.assert_called_once_with(platform="a2a3")
+        kernel.assert_not_called()
+
+        assert builder.get_kernel_compiler() is builder.get_kernel_compiler()
+        kernel.assert_called_once_with(platform="a2a3")
+
     def test_discovers_real_runtimes(self):
         """RuntimeBuilder discovers host_build_graph from the real project tree."""
         from runtime_builder import RuntimeBuilder
@@ -171,6 +188,42 @@ class TestRuntimeBuilderBuildErrors:
 
 class TestRuntimeBuilderBuild:
     """Test build() logic with mocked RuntimeCompiler."""
+
+    @pytest.mark.parametrize(
+        ("source", "message"),
+        [
+            ("", "BUILD_CONFIG must be a mapping"),
+            ("BUILD_CONFIG = {}", r"BUILD_CONFIG\['aicore'\] must be a mapping"),
+            (
+                "target = dict(include_dirs=[], source_dirs=[])\n"
+                "BUILD_CONFIG = dict(aicore=target, aicpu=target, host=dict("
+                "include_dirs='include', source_dirs=[]))",
+                r"host\.include_dirs must be a sequence of paths",
+            ),
+            (
+                "target = dict(include_dirs=[], source_dirs=[])\n"
+                "BUILD_CONFIG = dict(aicore=target, aicpu=target, host=dict("
+                "include_dirs=[], source_dirs=[42]))",
+                r"host\.source_dirs must be a sequence of paths",
+            ),
+        ],
+    )
+    @patch("runtime_builder.RuntimeCompiler")
+    def test_invalid_configuration_fails_before_initializing_compilers(
+        self, compiler, tmp_path, source, message,
+    ):
+        from runtime_builder import RuntimeBuilder
+
+        config = tmp_path / "src" / "runtime" / "broken" / "build_config.py"
+        config.parent.mkdir(parents=True)
+        config.write_text(source, encoding="utf-8")
+        builder = RuntimeBuilder(platform="a2a3sim")
+
+        with pytest.raises(ValueError, match=message) as error:
+            builder.build("broken")
+
+        assert str(config) in str(error.value)
+        compiler.get_instance.assert_not_called()
 
     @pytest.fixture(autouse=True)
     def _patch_runtime_root(self, monkeypatch, tmp_path):
