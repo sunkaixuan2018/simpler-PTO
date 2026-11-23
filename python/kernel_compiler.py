@@ -172,15 +172,17 @@ class KernelCompiler:
     def _compile_to_bytes(
         self,
         cmd: List[str],
-        output_path: str,
+        source_path: str,
+        suffix: str,
         label: str,
         error_hint: str = "Compiler not found"
     ) -> bytes:
         """Run compilation command, read output file, clean up, return bytes.
 
         Args:
-            cmd: Compilation command and arguments
-            output_path: Path to expected output file
+            cmd: Compilation command and flags
+            source_path: Source file passed to the compiler
+            suffix: Extension of the compiled binary
             label: Label for log messages
             error_hint: Message for FileNotFoundError
 
@@ -190,17 +192,20 @@ class KernelCompiler:
         Raises:
             RuntimeError: If compilation fails or output file not found
         """
-        self._run_subprocess(cmd, label, error_hint)
+        with tempfile.TemporaryDirectory(prefix="pto_compile_") as temp_dir:
+            output_path = Path(temp_dir) / f"output{suffix}"
+            command = cmd + ["-o", str(output_path), source_path]
+            logger.debug(f"  Command: {' '.join(command)}")
+            self._run_subprocess(command, label, error_hint)
+            try:
+                binary_data = output_path.read_bytes()
+            except FileNotFoundError as error:
+                raise RuntimeError(
+                    f"Compilation succeeded but output file not found: {output_path}"
+                ) from error
+            if not binary_data:
+                raise RuntimeError(f"Compilation produced an empty output file: {output_path}")
 
-        if not os.path.isfile(output_path):
-            raise RuntimeError(
-                f"Compilation succeeded but output file not found: {output_path}"
-            )
-
-        with open(output_path, 'rb') as f:
-            binary_data = f.read()
-
-        os.remove(output_path)
         logger.info(f"[{label}] Compilation successful: {len(binary_data)} bytes")
         return binary_data
 
@@ -225,17 +230,6 @@ class KernelCompiler:
             if self.platform not in fallback_map:
                 raise ValueError(f"No toolchain fallback for platform: {self.platform}")
             return fallback_map[self.platform]
-
-    @staticmethod
-    def _make_temp_path(prefix: str, suffix: str) -> str:
-        """Create a unique temporary file path in /tmp via mkstemp.
-
-        The file is created atomically to avoid races, then immediately
-        closed so the caller can overwrite it with compiler output.
-        """
-        fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir="/tmp")
-        os.close(fd)
-        return path
 
     def compile_incore(
         self,
@@ -288,9 +282,6 @@ class KernelCompiler:
         pto_include = os.path.join(pto_isa_root, "include")
         pto_pto_include = os.path.join(pto_isa_root, "include", "pto")
 
-        # Generate output path
-        output_path = self._make_temp_path(prefix="incore_", suffix=".o")
-
         # Build command from toolchain
         cmd = [self.ccec.cxx_path] + self.ccec.get_compile_flags(core_type=core_type)
         cmd.extend([f"-I{pto_include}", f"-I{pto_pto_include}"])
@@ -299,15 +290,11 @@ class KernelCompiler:
             for inc_dir in extra_include_dirs:
                 cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
-        cmd.extend(["-o", output_path, source_path])
-
         # Execute compilation
         core_type_name = "AIV" if core_type == "aiv" else "AIC"
         logger.info(f"[Incore] Compiling ({core_type_name}): {source_path}")
-        logger.debug(f"  Command: {' '.join(cmd)}")
-
         return self._compile_to_bytes(
-            cmd, output_path, "Incore",
+            cmd, source_path, ".o", "Incore",
             error_hint=f"ccec compiler not found at {self.ccec.cxx_path}"
         )
 
@@ -386,9 +373,6 @@ class KernelCompiler:
         if not os.path.isfile(source_path):
             raise FileNotFoundError(f"Source file not found: {source_path}")
 
-        # Generate output path
-        output_path = self._make_temp_path(prefix="orch_", suffix=".so")
-
         cmd = [toolchain.cxx_path] + toolchain.get_compile_flags()
 
         if extra_sources:
@@ -408,15 +392,10 @@ class KernelCompiler:
             for inc_dir in extra_include_dirs:
                 cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
-        # Output and input
-        cmd.extend(["-o", output_path, source_path])
-
         # Log compilation command
         logger.info(f"[Orchestration] Compiling: {source_path}")
-        logger.debug(f"  Command: {' '.join(cmd)}")
-
         return self._compile_to_bytes(
-            cmd, output_path, "Orchestration",
+            cmd, source_path, ".so", "Orchestration",
             error_hint=f"{toolchain.cxx_path} not found. Please install it."
         )
 
@@ -445,9 +424,7 @@ class KernelCompiler:
         if not os.path.isfile(source_path):
             raise FileNotFoundError(f"Source file not found: {source_path}")
 
-        # Generate output path (use platform-appropriate extension)
         ext = ".dylib" if sys.platform == "darwin" else ".so"
-        output_path = self._make_temp_path(prefix="sim_kernel_", suffix=ext)
 
         # Build command from toolchain
         cmd = [self.gxx15.cxx_path] + self.gxx15.get_compile_flags()
@@ -463,13 +440,9 @@ class KernelCompiler:
             for inc_dir in extra_include_dirs:
                 cmd.append(f"-I{os.path.abspath(inc_dir)}")
 
-        cmd.extend(["-o", output_path, source_path])
-
         # Log compilation command
         logger.info(f"[SimKernel] Compiling: {source_path}")
-        logger.debug(f"  Command: {' '.join(cmd)}")
-
         return self._compile_to_bytes(
-            cmd, output_path, "SimKernel",
+            cmd, source_path, ext, "SimKernel",
             error_hint=f"{self.gxx15.cxx_path} not found. Please install g++-15."
         )
