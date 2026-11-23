@@ -48,7 +48,7 @@ python examples/scripts/run_example.py \
 
 | Argument | Short | Description | Default |
 |----------|-------|-------------|---------|
-| `--kernels` | `-k` | Kernels directory path (contains kernel_config.py) | **Required** |
+| `--kernels` | `-k` | Kernels directory path (contains kernel_config.py) | **Required for execution** |
 | `--golden` | `-g` | golden.py script path | **Required** |
 | `--platform` | `-p` | Platform name: `a2a3` or `a2a3sim` | `a2a3` |
 | `--device` | `-d` | Device ID | From env var or 0 |
@@ -56,6 +56,68 @@ python examples/scripts/run_example.py \
 | `--verbose` | `-v` | Enable verbose output (equivalent to `--log-level debug`) | False |
 | `--silent` | | Enable silent mode (equivalent to `--log-level error`) | False |
 | `--log-level` | | Set log level: `error`, `warn`, `info`, `debug` | `info` |
+| `--list-cases` | | List the cases defined in the golden script and mark the default | False |
+
+### Listing Test Cases
+
+```bash
+python examples/scripts/run_example.py --list-cases \
+  -g examples/host_build_graph/paged_attention/golden.py
+```
+
+The runner loads the golden script and lists its case names in declaration order.
+Scripts without `ALL_CASES` show `Default (default)`. Use `--case <name>` to run
+one of the listed cases or `--all` to run every case.
+
+## Running a Suite of Examples
+
+`run_example_suite.py` discovers examples under `examples/` that contain both
+`golden.py` and `kernels/kernel_config.py`. Example names are relative to that
+directory, such as `host_build_graph/vector_example`. The suite runs one example
+at a time through `run_example.py`.
+
+List examples for a runtime without importing their configuration:
+
+```bash
+python examples/scripts/run_example_suite.py --list -r host_build_graph
+```
+
+Run a subset in simulation and use a per-example time limit:
+
+```bash
+python examples/scripts/run_example_suite.py -p a2a3sim \
+  --include 'host_build_graph/*' --exclude '*allgather*' \
+  --timeout 180 --output-dir outputs/example-suite
+```
+
+- `--runtime` and `--include` can each be repeated. Examples must match one
+  requested runtime and one include pattern when both flags are present.
+  Any matching `--exclude` pattern removes the example.
+- The default platform is `a2a3sim`. Use `-p a2a3 -d 4` to run on device 4
+  or to use it as the first device of an example's multi-device configuration.
+- The suite uses each example's default case. Use `--all` for every case or
+  `--case NAME` when the selected examples share a case name.
+- Use `--fail-fast` to stop after the first failed example. The report marks
+  unstarted examples as skipped.
+
+Each run prints its output directory. The directory contains the following files:
+
+| File | Contents |
+|------|----------|
+| `report.json` | Platform, start time, and each example's command, status, duration, and log filename |
+| `junit.xml` | One test result per example for JUnit-compatible tools |
+| `0001.log`, etc. | Combined stdout and stderr for each started example |
+
+Rerun failures with their original platform. Supply any case, device, or timeout
+options needed for the new run.
+
+```bash
+python examples/scripts/run_example_suite.py -p a2a3sim \
+  --rerun-failed outputs/example-suite/run-abcd1234/report.json
+```
+
+The suite returns `0` on success, `1` when a run has a failed example, `2` for
+invalid arguments or selection, and `130` when interrupted.
 
 ### Platform Description
 

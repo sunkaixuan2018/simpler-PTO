@@ -124,8 +124,7 @@ Golden.py interface:
 
     parser.add_argument(
         "-k", "--kernels",
-        required=True,
-        help="Path to kernels directory containing kernel_config.py"
+        help="Path to kernels directory containing kernel_config.py (required when running tests)"
     )
 
     parser.add_argument(
@@ -186,23 +185,29 @@ Golden.py interface:
         help="Enable profiling and generate swimlane.json"
     )
 
-    parser.add_argument(
+    cases = parser.add_mutually_exclusive_group()
+    cases.add_argument(
         "--all",
         action="store_true",
         help="Run all test cases defined in ALL_CASES (default: run only DEFAULT_CASE)"
     )
 
-    parser.add_argument(
+    cases.add_argument(
         "--case",
         type=str,
         default=None,
         help="Run a specific test case by name (e.g., --case Case2)"
     )
 
-    args = parser.parse_args()
+    cases.add_argument(
+        "--list-cases",
+        action="store_true",
+        help="List test cases and mark the default without compiling or running kernels"
+    )
 
-    if args.all and args.case:
-        parser.error("--all and --case are mutually exclusive")
+    args = parser.parse_args()
+    if not args.list_cases and args.kernels is None:
+        parser.error("the following arguments are required: -k/--kernels")
 
     # Determine log level from arguments
     log_level_str = None
@@ -238,9 +243,27 @@ Golden.py interface:
     sys.path.insert(0, str(script_dir))
 
     # Validate paths
-    kernels_path = Path(args.kernels)
     golden_path = Path(args.golden)
 
+    if args.list_cases:
+        if not golden_path.is_file():
+            logger.error(f"Golden script not found: {golden_path}")
+            return 1
+        try:
+            from example_config import get_golden_cases, load_module_from_path
+
+            module = load_module_from_path(golden_path, "golden")
+            all_cases, default_case = get_golden_cases(module)
+            if default_case not in all_cases:
+                raise ValueError(f"Default case {default_case!r} not found in ALL_CASES")
+            for name in all_cases:
+                print(f"{name} (default)" if name == default_case else name)
+        except Exception as e:
+            logger.error(f"Could not list cases from {golden_path}: {e}")
+            return 1
+        return 0
+
+    kernels_path = Path(args.kernels)
     if not kernels_path.exists():
         logger.error(f"Kernels directory not found: {kernels_path}")
         return 1
