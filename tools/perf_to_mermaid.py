@@ -21,6 +21,15 @@ from datetime import datetime
 import importlib.util
 
 
+MERMAID_LABEL_ENTITIES = str.maketrans({
+    '"': "#quot;",
+    "#": "#35;",
+    "&": "#38;",
+    "<": "#60;",
+    ">": "#62;",
+})
+
+
 def read_perf_data(filepath):
     """Read performance data from JSON file.
 
@@ -35,7 +44,7 @@ def read_perf_data(filepath):
     Raises:
         ValueError: If JSON format is invalid
     """
-    with open(filepath, 'r') as f:
+    with open(filepath, 'r', encoding='utf-8-sig') as f:
         data = json.load(f)
 
     # Validate required fields
@@ -139,7 +148,8 @@ def generate_mermaid_flowchart(tasks, func_id_to_name=None, style="detailed", di
             label = f"{func_name}({task_id})"
 
         # Node definition with label
-        lines.append(f"    Task{task_id}[\"{label}\"]")
+        escaped_label = " ".join(label.splitlines()).translate(MERMAID_LABEL_ENTITIES)
+        lines.append(f"    Task{task_id}[\"{escaped_label}\"]")
 
     lines.append("")
 
@@ -289,7 +299,7 @@ def main():
             f.write(f"生成自：`{input_path.name}`\n\n")
             f.write(mermaid_text)
 
-        print(f"\n✓ 转换完成")
+        print("\n转换完成")
         print(f"  输入：{input_path}")
         print(f"  输出：{output_path}")
 
