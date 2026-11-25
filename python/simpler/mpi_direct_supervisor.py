@@ -56,6 +56,13 @@ class _StartupGateRankFailure(RuntimeError):
     pass
 
 
+def _launcher_environment(startup_token: str) -> dict[str, str]:
+    inherited = dict(os.environ)
+    inherited.pop(MPI_DIRECT_STARTUP_TOKEN_ENV, None)
+    # MPICH 5.0.2 skips the last inherited environment entry in -genvlist lookups.
+    return {MPI_DIRECT_STARTUP_TOKEN_ENV: startup_token, **inherited}
+
+
 def _host_slots(topology: MpiDirectTopology | ServiceConfig) -> tuple[tuple[str, int], ...]:
     return tuple((host, sum(1 for _ in ranks)) for host, ranks in groupby(topology.hosts))
 
@@ -436,9 +443,7 @@ def run_supervisor(
                         python_executable=python_executable,
                         startup_port=gate_port,
                     )
-                    proc = subprocess.Popen(
-                        command, start_new_session=True, env={**os.environ, MPI_DIRECT_STARTUP_TOKEN_ENV: gate_token}
-                    )
+                    proc = subprocess.Popen(command, start_new_session=True, env=_launcher_environment(gate_token))
                     _startup_gate(topology, gate_token, listener, proc, startup_payloads)
                     return int(proc.wait())
             except BaseException:
@@ -493,7 +498,7 @@ def run_service_supervisor(
                 "--startup-timeout",
                 str(topology.startup_timeout_s),
             ]
-            env = {**os.environ, MPI_DIRECT_STARTUP_TOKEN_ENV: token}
+            env = _launcher_environment(token)
             env.pop(ROUTER_TOKEN_ENV, None)
             proc = subprocess.Popen(command, start_new_session=os.name != "nt", env=env)
             try:
